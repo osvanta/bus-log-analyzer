@@ -148,7 +148,8 @@ def reader_factory(
     - Raw-only MDF → ``MDFCANReader`` and a database is required.
     - Decoded MDF → ``MDFReader`` without a database.
     - Mixed MDF without a database → ``MDFReader`` (decoded signals win).
-    - Mixed MDF with a database → ``MDFCANReader`` for CAN decode/trace.
+    - Mixed MDF with a database → ``MDFCANReader`` combines existing
+      decoded channels with DBC-decoded CAN signals and raw CAN Trace.
 
     Raises
     ------
@@ -177,7 +178,9 @@ def reader_factory(
         if content.has_raw_can and (
             not content.has_decoded_signals or dbc_path
         ):
-            # Raw-only, or mixed with an explicitly configured database.
+            # Raw-only, or mixed with an explicitly configured database.  For
+            # mixed files MDFCANReader preserves the native decoded channels
+            # and appends the DBC-decoded raw-CAN signals.
             if not dbc_path:
                 raise ValueError(
                     "This MDF file contains raw CAN bus frames.\n"

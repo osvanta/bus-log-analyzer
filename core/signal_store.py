@@ -86,6 +86,9 @@ class SignalStore:
         self.unmatched_frames = 0
         self.first_frame_ids: list[str] = []
         self.diagnostics_text: str = ""
+        # Non-fatal reader problems. Valid channels remain available and the
+        # GUI presents these entries after the measurement finishes loading.
+        self.load_warnings: list[str] = []
         # On-disk indexed frame store (Option B: no cap, temp file on disk)
         self.raw_frame_store = None   # set to RawFrameStore by LoadWorker
         self.base_ts: float = 0.0  # set by LoadWorker for streaming

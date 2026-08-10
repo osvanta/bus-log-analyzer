@@ -80,6 +80,25 @@ def test_multistack_plot_mode_is_mutually_exclusive(window):
     assert not window.plot_panel._multistack_mode
 
 
+def test_partial_measurement_load_warns_but_keeps_finished_store(window):
+    from PySide6.QtWidgets import QMessageBox
+    from core.signal_store import SignalStore
+
+    store = SignalStore()
+    store.load_warnings = [
+        "Skipped channel 'Powertrain / Broken': seek out of range"
+    ]
+    store.diagnostics_text = "partial load"
+    QMessageBox.warning.reset_mock()
+
+    window._on_worker_finished(store)
+
+    assert window.store is store
+    QMessageBox.warning.assert_called_once()
+    assert QMessageBox.warning.call_args[0][1] == 'Measurement partially loaded'
+    assert 'seek out of range' in QMessageBox.warning.call_args[0][2]
+
+
 # ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------
@@ -194,8 +213,9 @@ def test_mixed_mdf_notice_explains_decoded_first_loading(window, monkeypatch, tm
     QMessageBox.information.assert_called_once()
     title, message = QMessageBox.information.call_args[0][1:]
     assert title == "Mixed MDF content detected"
-    assert "load and plot the decoded signals" in message
+    assert "list the existing decoded signals first" in message
     assert "assign a DBC or ARXML" in message
+    assert "list both" in message
 
 
 def test_load_mf4_bus_logging_without_database_warns(window, monkeypatch, tmp_path):

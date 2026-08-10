@@ -733,15 +733,15 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self._mixed_mdf_notices_shown.add(path)
         message = (
             'This MDF file contains both existing decoded signals and raw CAN frames.\n\n'
-            'CANScope will load and plot the decoded signals without requiring a database. '
-            'The embedded raw CAN frames will not be decoded or shown in CAN Trace during '
-            'this load.\n\n'
-            'To decode and view the CAN frames, open Database Manager, assign a DBC or '
-            'ARXML file, and load the measurement again.'
+            'CANScope will always list the existing decoded signals first.\n\n'
+            'To additionally decode the embedded CAN frames, open Database Manager and '
+            'assign a DBC or ARXML file. On the next load, CANScope will list both the '
+            'existing decoded signals and the database-decoded CAN signals, and CAN Trace '
+            'will show the raw frames.'
         )
         self._log(
-            'Mixed MDF detected: decoded signals will be loaded first; configure a '
-            'DBC/ARXML and reload to use embedded raw CAN frames.'
+            'Mixed MDF detected: existing decoded signals have priority; configure a '
+            'DBC/ARXML to append decoded raw-CAN signals and enable CAN Trace.'
         )
         QMessageBox.information(self, 'Mixed MDF content detected', message)
 
@@ -2252,7 +2252,13 @@ QToolButton:pressed { background-color: #1a2a3a; }
             decoded=f'{store.decoded_frames:,}',
             samples=f'{store.total_samples:,}',
         )
-        self._log('Decode finished successfully.')
+        load_warnings = list(getattr(store, 'load_warnings', ()) or ())
+        if load_warnings:
+            self._log(
+                f'Decode finished with {len(load_warnings)} skipped item(s).'
+            )
+        else:
+            self._log('Decode finished successfully.')
         self._append_debug_runtime(
             '\nLOAD + DECODE RESULT: PASS\n'
             f'Frames: {store.total_frames:,} | '
@@ -2324,7 +2330,27 @@ QToolButton:pressed { background-color: #1a2a3a; }
             }
         if temporary_handoff_active:
             self._temporary_plot_handoff = None
-        self._update_status('Decode complete', 'Select signal(s) and plot them by double-click, right-click, drag, or Space.')
+        if load_warnings:
+            shown = load_warnings[:20]
+            details = '\n'.join(f'• {warning}' for warning in shown)
+            if len(load_warnings) > len(shown):
+                details += (
+                    f'\n• …and {len(load_warnings) - len(shown)} more. '
+                    'See Diagnostics for the complete list.'
+                )
+            QMessageBox.warning(
+                self,
+                'Measurement partially loaded',
+                'CANScope loaded all readable channels. The following items '
+                f'could not be loaded:\n\n{details}\n\n'
+                'The original measurement was not modified.',
+            )
+            self._update_status(
+                'Decode complete with warnings',
+                'Readable channels are available; see Diagnostics for skipped items.',
+            )
+        else:
+            self._update_status('Decode complete', 'Select signal(s) and plot them by double-click, right-click, drag, or Space.')
 
     def _on_worker_failed(self, error_message: str) -> None:
         self._log(f'ERROR: {error_message}')

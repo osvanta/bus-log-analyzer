@@ -7,6 +7,10 @@ from typing import Iterator
 import numpy as np
 
 from core.models import DecodedSignalSample
+from core.readers.mdf_recovery import (
+    make_bounded_mdf4_copy,
+    remove_recovery_copy,
+)
 
 
 class MDFImportError(RuntimeError):
@@ -49,6 +53,17 @@ def _decode_str_arr(arr) -> list[str]:
         else (v.strip() if isinstance(v, str) else str(v))
         for v in arr
     ]
+
+
+def _channel_failure_text(
+    group_name: str,
+    channel_name: str,
+    exc: BaseException | str,
+) -> str:
+    reason = " ".join(str(exc).split()) or type(exc).__name__
+    if len(reason) > 320:
+        reason = reason[:317] + "..."
+    return f"Skipped channel '{group_name} / {channel_name}': {reason}"
 
 
 class LazyTextValues:
@@ -177,6 +192,7 @@ class MDFReader:
 
         fmt = "MF4" if self._path.suffix.lower() == ".mf4" else "MDF"
         self.source_description = f"{fmt}  ({self._path.name}) — asammdf"
+        self.load_warnings: list[str] = []
         content = self.content_info(self._path)
         self.load_messages: list[str] = [
             f"asammdf: opening {fmt} file…",
@@ -235,9 +251,18 @@ class MDFReader:
         except ImportError as exc:
             raise MDFImportError("asammdf not installed.") from exc
 
+        recovery_path = None
         try:
-            mdf = asammdf.MDF(str(self._path))
+            try:
+                mdf = asammdf.MDF(str(self._path))
+            except Exception as original_exc:
+                recovery_path, warnings = make_bounded_mdf4_copy(self._path)
+                if recovery_path is None:
+                    raise original_exc
+                self.load_warnings.extend(warnings)
+                mdf = asammdf.MDF(str(recovery_path))
         except Exception as exc:
+            remove_recovery_copy(recovery_path)
             raise MDFReadError(
                 f"Failed to open MDF file '{self._path}': {exc}"
             ) from exc
@@ -248,12 +273,24 @@ class MDFReader:
             yield from self._iter_arrays(
                 mdf,
                 batch_all_groups=batch_all_groups,
+                channel_error=self._record_channel_error,
             )
         finally:
             try:
                 mdf.close()
             except Exception:
                 pass
+            remove_recovery_copy(recovery_path)
+
+    def _record_channel_error(
+        self,
+        group_name: str,
+        channel_name: str,
+        exc: BaseException | str,
+    ) -> None:
+        warning = _channel_failure_text(group_name, channel_name, exc)
+        if warning not in self.load_warnings:
+            self.load_warnings.append(warning)
 
     @staticmethod
     def _channel_metadata(mdf):
@@ -307,7 +344,14 @@ class MDFReader:
         has_decoded_signals = False
         try:
             import asammdf
-            mdf = asammdf.MDF(str(mdf_path))
+            recovery_path = None
+            try:
+                mdf = asammdf.MDF(str(mdf_path))
+            except Exception as original_exc:
+                recovery_path, _warnings = make_bounded_mdf4_copy(mdf_path)
+                if recovery_path is None:
+                    raise original_exc
+                mdf = asammdf.MDF(str(recovery_path))
             try:
                 for group in mdf.groups:
                     if MDFReader._is_raw_can_group(group):
@@ -321,6 +365,7 @@ class MDFReader:
                     mdf.close()
                 except Exception:
                     pass
+                remove_recovery_copy(recovery_path)
         except Exception:
             pass
 
@@ -349,6 +394,7 @@ class MDFReader:
         mdf,
         include_group_index: bool = False,
         batch_all_groups: bool = False,
+        channel_error=None,
     ):
         """
         Core vectorised channel iterator using ``mdf.select()`` for batch I/O.
@@ -391,7 +437,7 @@ class MDFReader:
         # labels remain lazy. Pre-decoded MDF keeps the bounded per-group path.
         if batch_all_groups:
             yield from MDFReader._iter_arrays_all_groups(
-                mdf, groups_channels, include_group_index
+                mdf, groups_channels, include_group_index, channel_error
             )
             return
 
@@ -413,14 +459,27 @@ class MDFReader:
                             mdf.get(ch_name, group=group_idx,
                                     index=ch_idx, raw=False)
                         )
-                    except Exception:
+                    except Exception as exc:
                         sigs.append(None)
+                        if channel_error is not None:
+                            channel_error(grp_name, ch_name, exc)
 
             # Classify each channel as enum or numeric.
-            enum_mask = [
-                False if sig is None else _is_text(sig.samples)
-                for sig in sigs
-            ]
+            enum_mask = []
+            for i, sig in enumerate(sigs):
+                if sig is None:
+                    enum_mask.append(False)
+                    continue
+                try:
+                    # Materialise both arrays here so a lazy/block-reference
+                    # failure is isolated to this channel.
+                    _ = sig.timestamps
+                    enum_mask.append(_is_text(sig.samples))
+                except Exception as exc:
+                    sigs[i] = None
+                    enum_mask.append(False)
+                    if channel_error is not None:
+                        channel_error(grp_name, ch_list[i][1], exc)
 
             # One file-block read for all enum channels in this group (raw=True).
             # Batched to avoid double-decompress per enum channel (Bottleneck 5).
@@ -457,10 +516,21 @@ class MDFReader:
                 unit    = str(getattr(sig, "unit", "") or "")
 
                 if ts_arr is None or eng_arr is None:
+                    if channel_error is not None:
+                        channel_error(
+                            grp_name, ch_name,
+                            "timestamps or samples are unavailable",
+                        )
                     continue
                 if len(ts_arr) == 0:
                     continue
                 if len(ts_arr) != len(eng_arr):
+                    if channel_error is not None:
+                        channel_error(
+                            grp_name, ch_name,
+                            f"timestamp/sample length mismatch "
+                            f"({len(ts_arr)} != {len(eng_arr)})",
+                        )
                     continue
 
                 ts_arr = np.asarray(ts_arr, dtype=np.float64)
@@ -507,7 +577,9 @@ class MDFReader:
             del sigs
 
     @staticmethod
-    def _iter_arrays_all_groups(mdf, groups_channels, include_group_index):
+    def _iter_arrays_all_groups(
+        mdf, groups_channels, include_group_index, channel_error=None
+    ):
         """Read an already-extracted bus-log MDF with two global selects."""
         flat_channels = [
             (group_idx, ch_idx, ch_name)
@@ -527,13 +599,26 @@ class MDFReader:
                 mdf,
                 include_group_index=include_group_index,
                 batch_all_groups=False,
+                channel_error=channel_error,
             )
             return
 
-        enum_mask = [
-            False if sig is None else _is_text(sig.samples)
-            for sig in sigs
-        ]
+        enum_mask = []
+        for i, sig in enumerate(sigs):
+            if sig is None:
+                enum_mask.append(False)
+                continue
+            try:
+                _ = sig.timestamps
+                enum_mask.append(_is_text(sig.samples))
+            except Exception as exc:
+                sigs[i] = None
+                enum_mask.append(False)
+                if channel_error is not None:
+                    group_idx, _ch_idx, ch_name = flat_channels[i]
+                    channel_error(
+                        MDFReader._group_name(mdf, group_idx), ch_name, exc
+                    )
         enum_positions = [i for i, is_enum in enumerate(enum_mask) if is_enum]
         raw_map: dict[int, object] = {}
         if enum_positions:
@@ -568,6 +653,22 @@ class MDFReader:
                 or len(ts_arr) == 0
                 or len(ts_arr) != len(eng_arr)
             ):
+                if channel_error is not None and (
+                    ts_arr is None
+                    or eng_arr is None
+                    or (
+                        ts_arr is not None
+                        and eng_arr is not None
+                        and len(ts_arr) != len(eng_arr)
+                    )
+                ):
+                    reason = (
+                        "timestamps or samples are unavailable"
+                        if ts_arr is None or eng_arr is None
+                        else f"timestamp/sample length mismatch "
+                             f"({len(ts_arr)} != {len(eng_arr)})"
+                    )
+                    channel_error(group_names[group_idx], ch_name, reason)
                 continue
 
             ts_arr = np.asarray(ts_arr, dtype=np.float64)

@@ -142,6 +142,21 @@ class LoadWorker(QObject):
             else:
                 self._run_sample_loop(reader, store)
 
+            load_warnings = list(getattr(reader, "load_warnings", ()) or ())
+            store.load_warnings = load_warnings
+            if load_warnings:
+                warning_text = "\n".join(
+                    f"  {index}. {warning}"
+                    for index, warning in enumerate(load_warnings, 1)
+                )
+                store.diagnostics_text += (
+                    "\n\nPARTIAL LOAD WARNINGS\n" + warning_text
+                )
+                self.progress.emit(
+                    f"Completed with warnings: {len(load_warnings):,} "
+                    "channel/group item(s) were skipped."
+                )
+
             elapsed = time.perf_counter() - t_start
             elapsed_str = (
                 f"{elapsed:.1f} s" if elapsed < 60
@@ -731,6 +746,72 @@ class LoadWorker(QObject):
         store.normalize_timestamps(already_normalized=True)
         store.diagnostics_text = "\n".join(diag_parts)
 
+    def _decode_recovered_mdf_trace(
+        self,
+        source_store: RawFrameStore,
+        store: SignalStore,
+        native_base_ts: float | None,
+    ) -> float:
+        """DBC-decode readable raw groups after native MDF extraction fails."""
+        import numpy as np
+
+        source_store.seal()
+        frame_count = len(source_store)
+        source_timestamps = np.frombuffer(
+            source_store.timestamps, dtype=np.float64
+        )
+        raw_base_ts = (
+            float(np.min(source_timestamps)) if frame_count else 0.0
+        )
+
+        class _RecoveredRawArrays:
+            def iter_raw_batches(self, batch_size):
+                channels = np.frombuffer(source_store.channels, dtype=np.uint8)
+                arb_ids = np.frombuffer(source_store.arb_ids, dtype=np.uint32)
+                dlcs = np.frombuffer(source_store.dlcs, dtype=np.uint8)
+                directions = np.frombuffer(
+                    source_store.directions, dtype=np.uint8
+                )
+                flags = np.frombuffer(source_store.flags, dtype=np.uint8)
+                data = memoryview(source_store._mmap)
+                for start in range(0, frame_count, batch_size):
+                    end = min(frame_count, start + batch_size)
+                    yield (
+                        raw_base_ts,
+                        (source_timestamps[start:end] - raw_base_ts).tolist(),
+                        channels[start:end].tolist(),
+                        arb_ids[start:end].tolist(),
+                        dlcs[start:end].tolist(),
+                        directions[start:end].tolist(),
+                        flags[start:end].tolist(),
+                        data[start * 64:end * 64],
+                    )
+
+        self.progress.emit(
+            "WARNING: native DBC extraction failed; decoding each readable "
+            "raw CAN group with CANScope's bounded fallback."
+        )
+        try:
+            self._run_can_raw_vectorized(_RecoveredRawArrays(), store)
+        finally:
+            source_store.close()
+
+        global_base_ts = (
+            raw_base_ts
+            if native_base_ts is None
+            else min(native_base_ts, raw_base_ts)
+        )
+        shift = raw_base_ts - global_base_ts
+        if shift:
+            recovered_store = store.raw_frame_store
+            np.frombuffer(
+                recovered_store.timestamps, dtype=np.float64
+            )[:] += shift
+            for series in store._series_by_key.values():
+                series.numpy_timestamps()[:] += shift
+        store.base_ts = global_base_ts
+        return global_base_ts
+
     # ── Native asammdf bus decode path ───────────────────────────────────
 
     def _run_mdf_bus_arrays(self, reader, store: SignalStore) -> None:
@@ -796,9 +877,24 @@ class LoadWorker(QObject):
                 if signal_name not in signals:
                     signals.append(signal_name)
                 metadata_keys.add((channel, message_name, signal_name))
-                trace_message_names.setdefault(
-                    (channel, int(_message_id)), message_name
-                )
+            reader_trace_names = getattr(
+                reader, "dbc_trace_message_names", None
+            )
+            if reader_trace_names is None:
+                # Compatibility for alternate/test readers whose metadata is
+                # entirely DBC-derived.
+                for (
+                    channel,
+                    message_name,
+                    message_id,
+                    _signal_name,
+                    _unit,
+                ) in metadata_rows:
+                    trace_message_names.setdefault(
+                        (channel, int(message_id)), message_name
+                    )
+            else:
+                trace_message_names.update(reader_trace_names)
             self.tree_update.emit(payload)
             self.progress.emit(
                 f"MF4 signal list ready: {len(metadata_rows):,} signals in "
@@ -849,6 +945,16 @@ class LoadWorker(QObject):
             self.progress.emit(
                 f"WARNING: CAN Trace could not be loaded ({trace_warning})"
             )
+        if (
+            trace_store is not None
+            and trace_frames
+            and getattr(reader, "dbc_extraction_failed", False)
+        ):
+            base_ts = self._decode_recovered_mdf_trace(
+                trace_store, store, base_ts
+            )
+            trace_store = None
+            trace_frames = 0
         if trace_store is not None and trace_frames:
             timestamps_np = np.frombuffer(trace_store.timestamps, dtype=np.float64)
             trace_base_ts = float(np.min(timestamps_np))
@@ -985,11 +1091,11 @@ class LoadWorker(QObject):
         store.diagnostics_text = (
             store.channel_summary_text()
             + f"\n\nSource: {reader.source_description}"
-            + f"\n\nDecoded signals: {total:,}"
+            + f"\n\nDecoded signals: {len(store._series_by_key):,}"
             + "\n\nMF4 decoded directly by asammdf in one pass."
             + (
-                f"\nCAN Trace: {trace_frames:,} raw frames loaded in bulk."
-                if trace_frames
+                f"\nCAN Trace: {store.total_frames:,} raw frames loaded in bulk."
+                if store.raw_frame_store is not None
                 else "\nCAN Trace was not available from the MDF raw groups."
             )
         )

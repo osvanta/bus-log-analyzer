@@ -237,6 +237,112 @@ def test_signal_metadata_callback_precedes_sample_array_read(tmp_path, monkeypat
     assert rows[0][0] == (1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")
 
 
+def test_mixed_mdf_with_dbc_keeps_native_signals_and_appends_can_decode(
+    tmp_path, monkeypatch
+):
+    events = []
+    raw_group = SimpleNamespace(
+        channels=[
+            SimpleNamespace(name="CAN_DataFrame", channel_type=0),
+            SimpleNamespace(name="CAN_DataFrame.ID", channel_type=0),
+        ],
+        channel_group=SimpleNamespace(acq_name="CAN1"),
+    )
+    native_channel = SimpleNamespace(
+        name="RecorderSpeed", channel_type=0, unit="rpm"
+    )
+    native_group = SimpleNamespace(
+        channels=[native_channel],
+        channel_group=SimpleNamespace(acq_name="RecorderDecoded"),
+    )
+    native_signal = SimpleNamespace(
+        timestamps=np.array([1.0, 2.0]),
+        samples=np.array([700.0, 800.0]),
+        unit="rpm",
+    )
+    dbc_channel = SimpleNamespace(
+        name="VehicleSpeed",
+        channel_type=0,
+        unit="km/h",
+        display_names={"CAN1.VehicleStatus.VehicleSpeed": "bus"},
+    )
+    dbc_group = SimpleNamespace(
+        channels=[dbc_channel],
+        channel_group=SimpleNamespace(
+            acq_source=SimpleNamespace(
+                path="CAN1.CAN_DataFrame.ID=0x123 EXT=False"
+            ),
+            acq_name="CAN1 message ID=0x123 EXT=False",
+        ),
+    )
+    dbc_signal = SimpleNamespace(
+        timestamps=np.array([1.5, 2.5]),
+        samples=np.array([10.0, 20.0]),
+        unit="km/h",
+    )
+
+    class _Extracted:
+        groups = [dbc_group]
+        channels_db = {"VehicleSpeed": [(0, 0)]}
+
+        def select(self, _specs, raw=False):
+            assert raw is False
+            events.append("dbc-select")
+            return [dbc_signal]
+
+        def close(self):
+            pass
+
+    class _ExtractSource:
+        groups = [raw_group, native_group]
+        _mdf = SimpleNamespace(bus_logging_map={"CAN": {1: object()}})
+
+        def extract_bus_logging(self, **_kwargs):
+            events.append("extract")
+            return _Extracted()
+
+        def close(self):
+            pass
+
+    class _NativeSource:
+        groups = [raw_group, native_group]
+
+        def select(self, specs, raw=False):
+            assert raw is False
+            assert specs == [("RecorderSpeed", 1, 0)]
+            events.append("native-select")
+            return [native_signal]
+
+        def close(self):
+            pass
+
+    def open_mdf(_path, **kwargs):
+        return _ExtractSource() if kwargs.get("use_display_names") is False \
+            else _NativeSource()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "asammdf",
+        SimpleNamespace(MDF=open_mdf),
+    )
+    mf4 = tmp_path / "mixed.mf4"
+    mf4.write_bytes(b"test")
+    reader = MDFCANReader(mf4, tmp_path / "test.dbc")
+    metadata = []
+
+    rows = list(reader.iter_decoded_channel_arrays(
+        None,
+        metadata_ready=metadata.extend,
+    ))
+
+    native_meta = (None, "RecorderDecoded", 0, "RecorderSpeed", "rpm")
+    dbc_meta = (1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")
+    assert metadata == [native_meta, dbc_meta]
+    assert [row[0] for row in rows] == [native_meta, dbc_meta]
+    assert events == ["extract", "native-select", "dbc-select"]
+    assert reader.dbc_trace_message_names == {(1, 0x123): "VehicleStatus"}
+
+
 def test_mdf_composite_channel_is_emitted_as_one_raw_array_batch():
     samples = np.array(
         [
