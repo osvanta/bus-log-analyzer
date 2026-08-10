@@ -1,4 +1,11 @@
 # Changelog
+## [v00.00.59] — 2026-08-10: broken or unexpected channel loading  don't block the whole data
+
+### loading improvement
+
+broken or unexpected channel loading  don't block the whole data
+rolling mean
+handling of frame data and flat data in same measurement 
 
 ## [v00.00.58] — 2026-08-06: MultiStack plotting and diagnostic counter
 
