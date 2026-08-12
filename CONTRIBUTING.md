@@ -4,6 +4,43 @@ Thank you for taking the time to contribute.
 
 ---
 
+## Licensing of Contributions
+
+CAN Scope is licensed under the [Mozilla Public License 2.0](LICENSE) from
+release `v00.00.60` onward. Earlier releases were MIT and stay MIT — see
+[LICENSE-MIT](LICENSE-MIT).
+
+**By opening a pull request against this repository, you confirm that:**
+
+1. You wrote the contribution yourself, or you have the right to submit it under
+   the terms below — it is not copied from a source with incompatible licensing,
+   and it is not subject to an employer or client agreement that would prevent
+   you from contributing it.
+2. You license your contribution to the project owner and to all recipients
+   under the Mozilla Public License 2.0.
+3. You additionally grant the project owner a perpetual, worldwide,
+   non-exclusive, royalty-free, irrevocable licence to use, reproduce, modify,
+   distribute and **sublicense** your contribution, including the right to
+   distribute it under different licence terms.
+
+Point 3 exists so the project can offer commercial licences and paid components
+alongside the open source release without having to track down every past
+contributor. It does not take your copyright away — you keep it, and your
+contribution stays permanently available under the MPL to everyone.
+
+If you cannot agree to these terms, please open an issue describing the change
+instead of submitting code, and it can be implemented independently.
+
+New source files should carry the standard MPL header:
+
+```python
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+```
+
+---
+
 ## Before You Open a Pull Request
 
 1. **Check existing issues** — your bug or feature may already be tracked.

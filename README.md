@@ -4,7 +4,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?logo=windows)
-![License](https://img.shields.io/badge/License-MIT-green)
+![License](https://img.shields.io/badge/License-MPL--2.0-green)
 ![Release](https://img.shields.io/github/v/release/dinacaran/canscope)
 
 ## Screenshots
@@ -131,4 +131,23 @@ Runtime dependencies are maintained in [requirements.txt](requirements.txt).
 
 Release binaries are currently unsigned, so Windows SmartScreen may show a warning on first launch.
 
-CAN Scope is licensed under the [MIT License](LICENSE).
+CAN Scope is licensed under the [Mozilla Public License 2.0](LICENSE).
+
+MPL-2.0 is a file-level copyleft license. You may use CAN Scope freely, including
+inside commercial and proprietary products, and you may combine these files with
+files of your own under any terms you choose. The one obligation is reciprocal:
+if you distribute a modified version of a file that carries the MPL notice, the
+source of that modified file must be made available under the MPL.
+
+Releases up to and including `v00.00.59` were published under the MIT License and
+remain available under those terms — see [LICENSE-MIT](LICENSE-MIT). The change to
+MPL-2.0 applies from `v00.00.60` onward.
+
+CAN Scope bundles third-party components under their own licenses, including
+LGPL-3.0 components (Qt via PySide6, python-can, asammdf, chardet). They are used
+unmodified and remain available from their upstream projects. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full component list, and
+`licenses/` for the complete license texts — both ship inside the portable build.
+
+"CAN Scope" and "CANScope" are names used by this project. The license grants
+rights to the code, not to the project name.

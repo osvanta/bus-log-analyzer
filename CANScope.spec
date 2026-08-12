@@ -1,4 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Copyright (c) 2025-2026 Dinakaran Ganesan
 
 from pathlib import Path
 import os
@@ -24,6 +30,20 @@ if splash_file.exists():
 icon_png = project_root / "resources" / "CANScope_ICON.png"
 if icon_png.exists():
     datas.append((str(icon_png), "resources"))
+
+# Licence documentation. The LGPL-3.0 components bundled here (Qt via PySide6,
+# python-can, asammdf, chardet) require that the licence texts and a notice
+# accompany the distributed application, so these are not optional extras —
+# a build missing them is not redistributable. See THIRD_PARTY_NOTICES.md.
+for _licence_file in ("LICENSE", "LICENSE-MIT", "THIRD_PARTY_NOTICES.md"):
+    _p = project_root / _licence_file
+    if _p.exists():
+        datas.append((str(_p), "."))
+
+_licence_dir = project_root / "licenses"
+if _licence_dir.is_dir():
+    for _p in sorted(_licence_dir.glob("*.txt")):
+        datas.append((str(_p), "licenses"))
 
 # asammdf asks canmatrix to load database format handlers by module name at
 # runtime. PyInstaller cannot discover those dynamic imports automatically;

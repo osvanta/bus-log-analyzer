@@ -1,3 +1,9 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Copyright (c) 2025-2026 Dinakaran Ganesan
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -367,6 +373,9 @@ QToolButton:pressed { background-color: #1a2a3a; }
         shortcuts_act = QAction('Shortcuts', self)
         shortcuts_act.triggered.connect(self.show_shortcuts)
         toolbar.addAction(shortcuts_act)
+        about_act = QAction('About', self)
+        about_act.triggered.connect(self.show_about)
+        toolbar.addAction(about_act)
         self._act_can_trace = QAction('CAN Trace', self)
         self._act_can_trace.triggered.connect(self.show_raw_frames)
         self._act_can_trace.setEnabled(False)  # enabled after decode
@@ -2222,6 +2231,15 @@ QToolButton:pressed { background-color: #1a2a3a; }
         close_btn.clicked.connect(dlg.accept)
         layout.addWidget(close_btn)
         dlg.exec()
+
+    def show_about(self) -> None:
+        """Show application details and the bundled third-party licence texts.
+
+        Imported lazily so the dialog's licence-file reads stay off the
+        startup path.
+        """
+        from gui.about_dialog import AboutDialog
+        AboutDialog(self.app_name, self.version, self).exec()
 
     def _on_worker_progress(self, message: str) -> None:
         self._log(message)

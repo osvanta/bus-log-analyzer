@@ -1,3 +1,9 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Copyright (c) 2025-2026 Dinakaran Ganesan
+
 from __future__ import annotations
 
 import sys
@@ -7,7 +13,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 APP_NAME    = "CAN Scope"
-APP_VERSION = "v00.00.59"
+APP_VERSION = "v00.00.60"
 
 
 def main() -> int:

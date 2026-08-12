@@ -1,4 +1,22 @@
 # Changelog
+## [v00.00.60] — 2026-08-11: Relicensed to the Mozilla Public License 2.0
+
+### Changed — CAN Scope is now licensed under MPL-2.0.
+
+From this release onward CAN Scope is distributed under the Mozilla Public
+License, Version 2.0. Releases up to and including v00.00.59 were published
+under the MIT License and remain available under those terms; that grant is
+perpetual and is not affected by this change.
+
+MPL-2.0 is a file-level copyleft license. Source files carrying the MPL notice
+stay open — anyone distributing a modified version of those files must publish
+their changes — while separate files may be combined with them under other
+terms. The historical MIT text is retained in `LICENSE-MIT`.
+
+### Added — Contribution licensing terms.
+
+CONTRIBUTING.md now states the inbound license terms for pull requests.
+
 ## [v00.00.59] — 2026-08-10: broken or unexpected channel loading  don't block the whole data
 
 ### loading improvement
