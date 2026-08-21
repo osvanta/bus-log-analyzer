@@ -1,0 +1,77 @@
+# Line-ending policy for CAN Scope.
+#
+# Without this file, what git does with line endings depends on each machine's
+# `core.autocrlf` setting. That is why the repository looks clean on Windows
+# (autocrlf=true) but reports every text file as modified when the same working
+# tree is read from a Linux VM or container (autocrlf unset). This file removes
+# the ambiguity: the rules below travel with the repository and apply
+# identically on every machine, CI runner and contributor clone.
+#
+# The repository already stores LF for every text file, so adding this causes
+# no churn -- `git add --renormalize .` produces zero changes.
+
+# Default: git decides what is text, normalises it to LF in the repository, and
+# checks it out using the platform's native convention.
+*   text=auto
+
+# ---------------------------------------------------------------------------
+# Scripts, where the line ending is functional rather than cosmetic
+# ---------------------------------------------------------------------------
+
+# cmd.exe can mis-handle LF-only batch files -- `goto`, labels and multi-line
+# blocks are the usual casualties. Pin these to CRLF regardless of platform.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Shell scripts and git hooks are run by sh/bash; a CR at the end of the
+# shebang line makes them fail with a confusing "bad interpreter" error.
+*.sh            text eol=lf
+tools/hooks/*   text eol=lf
+tests/hooks/*   text eol=lf
+
+# ---------------------------------------------------------------------------
+# Test fixtures
+# ---------------------------------------------------------------------------
+# Pinned to LF so every machine sees byte-identical fixtures. Parser tests that
+# depend on offsets, lengths or checksums then behave the same everywhere.
+# Note: do NOT mark these `-text`. That would tell git to store the working-tree
+# bytes verbatim, which on a Windows checkout means committing CRLF into
+# fixtures that are currently LF.
+tests/fixtures/**   text eol=lf
+
+# ---------------------------------------------------------------------------
+# Binary -- never normalise, never diff as text
+# ---------------------------------------------------------------------------
+*.png    binary
+*.ico    binary
+*.icns   binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.pdf    binary
+*.zip    binary
+*.exe    binary
+*.dll    binary
+*.pyd    binary
+
+# Measurement and log formats. BLF, MF4 and MDF are binary container formats;
+# a line-ending conversion would corrupt them. None are tracked today, but
+# fixtures get added over time and the failure would be silent.
+*.blf    binary
+*.mf4    binary
+*.mdf    binary
+*.dat    binary
+
+# ASC and CSV logs, DBC and ARXML databases are text. They are left to
+# `text=auto` above, which keeps them LF in the repository.
+
+# ---------------------------------------------------------------------------
+# Diff and review quality-of-life
+# ---------------------------------------------------------------------------
+*.py     diff=python
+*.md     diff=markdown
+
+# Generated or vendored files: keep them out of diffs and language statistics.
+licenses/**    linguist-vendored
+CHANGELOG.md   merge=union
