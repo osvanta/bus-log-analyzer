@@ -98,6 +98,12 @@ class SplashScreen(QSplashScreen):
             Qt.TransformationMode.SmoothTransformation,
         )
 
+        # Keep the pristine artwork. _render() composites onto a copy of this,
+        # never onto the widget's current pixmap — that one already carries the
+        # previously drawn status text, so reusing it stacks each message on top
+        # of the last.
+        self._base_pixmap = scaled
+
         # Normal titled window: shows in taskbar, minimises with Win+D / Show Desktop.
         # Only the Minimize button is shown — no Close (would crash mid-load) or Maximize.
         super().__init__(scaled)
@@ -128,7 +134,7 @@ class SplashScreen(QSplashScreen):
 
     def _render(self) -> None:
         """Composite status text + version onto the base pixmap and repaint."""
-        pm = self.pixmap().copy()   # fresh copy each call (base pixmap is cached)
+        pm = self._base_pixmap.copy()   # pristine artwork, not the last render
         painter = QPainter(pm)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
