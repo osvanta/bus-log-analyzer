@@ -5,12 +5,12 @@ cantools>=39.4  # includes DBC + ARXML (AUTOSAR 3/4) database support; no [arxml
 numpy>=1.26
 asammdf>=7.0
 # Required for asammdf native one-pass CAN bus extraction from MF4/MDF files.
-# Its format handlers are bundled explicitly by CANScope.spec.
+# Its format handlers are bundled explicitly by BusLogAnalyzer.spec.
 canmatrix>=1.0
 pyinstaller>=6.0
 # YAML config loader for the diagnostics engine (rules in config/diagnostics/)
 pyyaml>=6.0
-# HTTP client for GitHub Models API (AI diagnosis feature, hidden Ctrl+Shift+A)
+# HTTP client for GitHub Models API 
 requests>=2.31
 # Read-only .xlsx parsing for Excel diagnostic manuals under config/diagnostics/knowledge/
 openpyxl>=3.1

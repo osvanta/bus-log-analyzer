@@ -5,7 +5,7 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-Lightweight dataclasses shared across the CAN Scope core.
+Lightweight dataclasses shared across the Osvanta Bus Log Analyzer core.
 
 This module has NO heavy dependencies (no cantools, no python-can, no numpy,
 no asammdf) so it can be imported at startup without triggering those slow

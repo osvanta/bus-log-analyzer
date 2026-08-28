@@ -2,7 +2,7 @@
 
 ## Offline Analysis Only
 
-CAN Scope is designed exclusively for **offline post-processing** of measurement
+Osvanta Bus Log Analyzer is designed exclusively for **offline post-processing** of measurement
 files. It must **not** be used in any safety-critical, real-time, or
 production-control context.
 
@@ -14,7 +14,7 @@ indirect, incidental, or consequential damages arising from its use.
 
 ## Third-Party Dependencies
 
-CAN Scope depends on several open-source libraries
+Osvanta Bus Log Analyzer depends on several open-source libraries
 (python-can, cantools, PySide6, pyqtgraph, numpy, asammdf). Each is governed
 by its own licence. Please review those licences before redistributing.
 
@@ -33,7 +33,7 @@ compatible file formats.
 
 ## Data Privacy
 
-CAN Scope processes measurement files entirely **locally on your machine**.
+Osvanta Bus Log Analyzer processes measurement files entirely **locally on your machine**.
 No data is transmitted to any server. No telemetry is collected.
 
 ## Use at Your Own Risk

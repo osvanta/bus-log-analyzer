@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
-"""Read-only forensic inspection for CANScope measurement load problems.
+"""Read-only forensic inspection for Osvanta Bus Log Analyzer measurement load problems.
 
 The normal measurement readers deliberately remain untouched.  This module
 uses independent, bounded probes so a failure in python-can or asammdf still
@@ -1093,7 +1093,7 @@ class _Inspection:
             dbc_involved = "NOT YET ASSESSED"
 
         summary = [
-            "CANScope LOAD DEBUG",
+            "OSVANTA BUS LOG ANALYZER LOAD DEBUG",
             "=" * 100,
             f"STATUS: {status}",
             f"CLASSIFICATION: {classification}",
@@ -1139,7 +1139,7 @@ def inspect_measurement(
     inspection = _Inspection(path)
     body: list[str] = [
         "ENVIRONMENT",
-        f"  CANScope: {app_version or '(unknown)'}",
+        f"  Osvanta Bus Log Analyzer: {app_version or '(unknown)'}",
         (
             f"  OS: {platform.system()} {platform.release()} "
             f"{platform.machine()} | Python: {platform.python_version()}"
@@ -1623,7 +1623,7 @@ def format_runtime_failure(error_message: str, measurement_path: str | Path) -> 
         dbc = "UNKNOWN"
     else:
         code = "LOAD-RUNTIME-FAILURE"
-        layer = "CANScope loading pipeline"
+        layer = "Analyzer loading pipeline"
         dbc = "UNKNOWN"
     first_line = next((line.strip() for line in redacted.splitlines() if line.strip()), "")
     return "\n".join(

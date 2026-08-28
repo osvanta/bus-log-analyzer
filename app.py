@@ -12,8 +12,8 @@ from pathlib import Path
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-APP_NAME    = "CAN Scope"
-APP_VERSION = "v00.00.60"
+APP_NAME    = "Osvanta Bus Log Analyzer"
+APP_VERSION = "v00.01.00"
 
 
 def main() -> int:
@@ -27,7 +27,7 @@ def main() -> int:
         else Path(__file__).resolve().parent
     )
     # Prefer PNG (full RGBA, sharp on HiDPI); fall back to ICO
-    for _icon_name in ('CANScope_ICON.png', 'app_icon.ico'):
+    for _icon_name in ('app_icon.png', 'app_icon.ico'):
         _icon_path = _res_root / 'resources' / _icon_name
         if _icon_path.exists():
             app.setWindowIcon(QIcon(str(_icon_path)))
@@ -37,8 +37,8 @@ def main() -> int:
     # gui.splash only imports PySide6 (already loaded) + pathlib.
     # All heavy modules (cantools, python-can, asammdf, pyqtgraph) are
     # imported lazily when MainWindow / PlotPanel are first constructed.
-    from gui.splash import CANScopeSplash
-    splash = CANScopeSplash(version=APP_VERSION)
+    from gui.splash import SplashScreen
+    splash = SplashScreen(version=APP_VERSION)
     splash.show()
     app.processEvents()
 

@@ -38,7 +38,7 @@ env/
 ENV/
 .env
 # ── PyInstaller ───────────────────────────────────────────────────────────
-# Keep CANScope.spec in source control; exclude build artefacts
+# Keep BusLogAnalyzer.spec in source control; exclude build artefacts
 *.spec.bak
 # ── IDE / editors ─────────────────────────────────────────────────────────
 .vscode/
@@ -52,7 +52,11 @@ ENV/
 .DS_Store
 Thumbs.db
 desktop.ini
-# ── CAN Scope runtime files ───────────────────────────────────────────────
+# ── Osvanta Bus Log Analyzer runtime files ─────────────────────────────
+osvanta_dev.log
+osvanta_config.json
+osvanta_temp_plot_config.json
+# Pre-rename names, still ignored so existing working copies stay clean.
 canscope_dev.log
 canscope_config.json
 canscope_temp_plot_config.json
@@ -85,3 +89,4 @@ secrets.json
 *.xlsx
 *.csv
 AGENTS.md
+resources/internal/

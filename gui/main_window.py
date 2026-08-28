@@ -130,13 +130,13 @@ class MainWindow(QMainWindow):
         self._pending_plot_type: str | None = None
         self._temporary_plot_handoff: dict | None = None
         self._temporary_plot_config_path = (
-            self._application_root() / 'canscope_temp_plot_config.json'
+            self._application_root() / 'osvanta_temp_plot_config.json'
         )
         # Store keys plotted by the most recent plot_finding() call — cleared
         # and replaced (not accumulated) on each subsequent finding click.
         self._finding_plot_keys: set[str] = set()
         self._raw_frame_dialog = None
-        self._log_file_path = Path(__file__).resolve().parents[1] / 'canscope_dev.log'
+        self._log_file_path = Path(__file__).resolve().parents[1] / 'osvanta_dev.log'
         # Hidden, session-only CAN load forensics (Ctrl+Alt+D).
         self._debug_mode = False
         self._debug_window: LoadDebugWindow | None = None
@@ -153,7 +153,7 @@ class MainWindow(QMainWindow):
         self._debug_runtime_lines: list[str] = []
         self._debug_measurement_summary = ''
         # Auto-launch on a load/database failure. Suppress with
-        # CANSCOPE_AUTO_DEBUG=0; the guard flag stops an inspector that
+        # OSVANTA_AUTO_DEBUG=0; the guard flag stops an inspector that
         # fails from re-triggering the launcher.
         self._debug_auto_launching = False
         self._debug_auto_launched = False
@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
         self._set_ready_status()
 
         # Hidden diagnostics feature — Ctrl+Shift+A. No menu/toolbar entry.
-        # Disable with env var CANSCOPE_DIAGNOSTICS=0.
+        # Disable with env var OSVANTA_DIAGNOSTICS=0.
         # The package is not part of this repo, so a build without it must still start.
         try:
             from gui.diagnostics.activation import install_shortcut
@@ -458,7 +458,11 @@ QToolButton:pressed { background-color: #1a2a3a; }
         Debug mode is otherwise manual, so the report a failure needs is only
         collected if the user happened to press Ctrl+Alt+D beforehand.
         """
-        if os.environ.get('CANSCOPE_AUTO_DEBUG', '1') == '0':
+        # OSVANTA_AUTO_DEBUG is the current name; the pre-rename
+        # CANSCOPE_AUTO_DEBUG is still honoured so existing developer
+        # shells and CI keep working.
+        if os.environ.get('OSVANTA_AUTO_DEBUG',
+                          os.environ.get('CANSCOPE_AUTO_DEBUG', '1')) == '0':
             return
         if self._debug_auto_launching:
             # A failure raised by the inspector itself must not re-enter here.
@@ -742,9 +746,9 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self._mixed_mdf_notices_shown.add(path)
         message = (
             'This MDF file contains both existing decoded signals and raw CAN frames.\n\n'
-            'CANScope will always list the existing decoded signals first.\n\n'
+            'Osvanta Bus Log Analyzer will always list the existing decoded signals first.\n\n'
             'To additionally decode the embedded CAN frames, open Database Manager and '
-            'assign a DBC or ARXML file. On the next load, CANScope will list both the '
+            'assign a DBC or ARXML file. On the next load, the analyzer will list both the '
             'existing decoded signals and the database-decoded CAN signals, and CAN Trace '
             'will show the raw frames.'
         )
@@ -1569,7 +1573,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
             'name_show_message': self.plot_panel._name_show_message,           # Fix 4
             'table_column_widths': self.plot_panel.table_column_widths(),  # Fix 2
         }
-        path, _ = QFileDialog.getSaveFileName(self, 'Save configuration', 'canscope_config.json', 'JSON Files (*.json)')
+        path, _ = QFileDialog.getSaveFileName(self, 'Save configuration', 'osvanta_config.json', 'JSON Files (*.json)')
         if not path:
             return
         try:
@@ -2359,7 +2363,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
             QMessageBox.warning(
                 self,
                 'Measurement partially loaded',
-                'CANScope loaded all readable channels. The following items '
+                'Osvanta Bus Log Analyzer loaded all readable channels. The following items '
                 f'could not be loaded:\n\n{details}\n\n'
                 'The original measurement was not modified.',
             )

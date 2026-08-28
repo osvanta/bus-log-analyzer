@@ -10,10 +10,10 @@ ChannelConfig — maps CAN channel numbers to database file paths (.dbc or .arxm
 This is the persistent "vehicle / project configuration" layer, kept
 separate from session config (signals, plot layout, measurement path).
 
-Saved as a standalone JSON file (.canscope_ch):
+Saved as a standalone JSON file (.osvanta_ch):
 
     {
-        "type": "canscope_channel_config",
+        "type": "osvanta_channel_config",
         "version": 2,
         "name": "Truck ECU Setup",
         "channels": {
@@ -25,6 +25,10 @@ Saved as a standalone JSON file (.canscope_ch):
 
 Version history: 1 = DBC-only paths; 2 = DBC or ARXML paths (both accepted
 on load, version 2 written on save).
+
+Files written before the Osvanta rename carry the ".canscope_ch" extension
+and a "canscope_channel_config" type. Both are still accepted on load; only
+the new names are ever written.
 
 Channel key 0 (ALL_CHANNELS_KEY) means "apply to all channels that have
 no specific database assigned".
@@ -54,7 +58,12 @@ class ChannelConfig:
         Key ``ALL_CHANNELS_KEY`` (0) = fallback for unassigned channels.
     """
 
-    FILE_EXTENSION = ".canscope_ch"
+    FILE_EXTENSION = ".osvanta_ch"
+    # Pre-rename names. Read, never written.
+    LEGACY_FILE_EXTENSION = ".canscope_ch"
+
+    CONFIG_TYPE = "osvanta_channel_config"
+    LEGACY_TYPE = "canscope_channel_config"
 
     def __init__(
         self,
@@ -77,17 +86,17 @@ class ChannelConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> "ChannelConfig":
-        """Load from a .canscope_ch JSON file."""
+        """Load a channel config (.osvanta_ch, or a legacy .canscope_ch)."""
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        if data.get("type") != "canscope_channel_config":
+        if data.get("type") not in (cls.CONFIG_TYPE, cls.LEGACY_TYPE):
             raise ValueError(f"Not a channel config file: {path}")
         channels = {int(k): str(v) for k, v in data.get("channels", {}).items()}
         return cls(name=str(data.get("name", "Unnamed")), channels=channels)
 
     def save(self, path: str | Path) -> None:
-        """Save to a .canscope_ch JSON file."""
+        """Save to a .osvanta_ch JSON file."""
         data = {
-            "type": "canscope_channel_config",
+            "type": self.CONFIG_TYPE,
             "version": 2,
             "name": self.name,
             "channels": {str(k): v for k, v in self.channels.items()},

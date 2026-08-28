@@ -5,7 +5,7 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-Generate sample.blf and sample.asc for the CANScope test suite.
+Generate sample.blf and sample.asc for the Osvanta Bus Log Analyzer test suite.
 
 Run once after cloning, or whenever sample.dbc changes:
 

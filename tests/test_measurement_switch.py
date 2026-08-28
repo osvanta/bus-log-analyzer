@@ -104,8 +104,8 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
     )
     monkeypatch.setattr("gui.main_window.dbc_required_for", lambda _path: False)
 
-    window = MainWindow("CANScope", "00.00.99")
-    temporary_config = tmp_path / "canscope_temp_plot_config.json"
+    window = MainWindow("Osvanta Bus Log Analyzer", "00.00.99")
+    temporary_config = tmp_path / "osvanta_temp_plot_config.json"
     window._temporary_plot_config_path = temporary_config
     old_series = _series()
     window.store = object()
@@ -165,9 +165,9 @@ def test_load_decode_restores_plot_handoff_and_skips_missing_signals(
     monkeypatch.setattr("gui.main_window.QThread", _FakeThread)
     monkeypatch.setattr("gui.main_window.LoadWorker", _FakeWorker)
 
-    window = MainWindow("CANScope", "00.00.99")
+    window = MainWindow("Osvanta Bus Log Analyzer", "00.00.99")
     window._temporary_plot_config_path = (
-        tmp_path / "canscope_temp_plot_config.json"
+        tmp_path / "osvanta_temp_plot_config.json"
     )
     messages = []
     window._log = messages.append
@@ -215,8 +215,8 @@ def test_cancelled_open_keeps_current_plot_and_creates_no_handoff(
         "getOpenFileName",
         lambda *args, **kwargs: ("", ""),
     )
-    window = MainWindow("CANScope", "00.00.99")
-    temporary_config = tmp_path / "canscope_temp_plot_config.json"
+    window = MainWindow("Osvanta Bus Log Analyzer", "00.00.99")
+    temporary_config = tmp_path / "osvanta_temp_plot_config.json"
     window._temporary_plot_config_path = temporary_config
     series = _series()
     window.plot_panel.add_series(series.key, series)
@@ -245,8 +245,8 @@ def test_open_without_plotted_signals_creates_no_handoff(
         lambda *args, **kwargs: (str(new_measurement), ""),
     )
     monkeypatch.setattr("gui.main_window.dbc_required_for", lambda _path: False)
-    window = MainWindow("CANScope", "00.00.99")
-    temporary_config = tmp_path / "canscope_temp_plot_config.json"
+    window = MainWindow("Osvanta Bus Log Analyzer", "00.00.99")
+    temporary_config = tmp_path / "osvanta_temp_plot_config.json"
     window._temporary_plot_config_path = temporary_config
 
     window.choose_blf()
@@ -282,7 +282,7 @@ def test_manual_configuration_takes_precedence_over_temporary_handoff(
         lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
     )
 
-    window = MainWindow("CANScope", "00.00.99")
+    window = MainWindow("Osvanta Bus Log Analyzer", "00.00.99")
     window.store = _store("OldSignal")
     window._temporary_plot_handoff = {
         "plot_type": "stacked",

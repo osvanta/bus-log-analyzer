@@ -19,7 +19,10 @@ from core.calculated_signals import (
 )
 
 
-FORMULA_LIBRARY_TYPE = "canscope_formulas"
+# Written into new library files. load_formula_library() deliberately never
+# checks this value -- it dispatches on the "formulas"/"generated_signals"
+# key -- so libraries written before the Osvanta rename keep loading as-is.
+FORMULA_LIBRARY_TYPE = "osvanta_formulas"
 FORMULA_LIBRARY_VERSION = "1"
 
 
@@ -42,10 +45,10 @@ def save_formula_library(
 
 
 def load_formula_library(path: str | Path) -> FormulaLibraryLoadResult:
-    """Permissively read a formula library file OR a CANScope config file.
+    """Permissively read a formula library file OR an application config file.
 
     A dedicated formula-library file stores its entries under "formulas";
-    a full CANScope configuration stores the same shape under
+    a full application configuration stores the same shape under
     "generated_signals". Either is accepted so users can reuse formulas
     straight out of a saved configuration without loading it in full.
     """
@@ -69,7 +72,7 @@ def load_formula_library(path: str | Path) -> FormulaLibraryLoadResult:
     else:
         raise CalculatedSignalError(
             "No formulas found: expected a 'formulas' key (formula library file) "
-            "or a 'generated_signals' key (CANScope configuration file)"
+            "or a 'generated_signals' key (application configuration file)"
         )
 
     if not isinstance(raw_formulas, list):

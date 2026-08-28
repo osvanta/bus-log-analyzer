@@ -1,20 +1,20 @@
-# Third-Party Notices — CAN Scope
+# Third-Party Notices — Osvanta Bus Log Analyzer
 
-CAN Scope itself is licensed under the Mozilla Public License 2.0 (see `LICENSE`).
+Osvanta Bus Log Analyzer itself is licensed under the Mozilla Public License 2.0 (see `LICENSE`).
 This file covers the third-party components redistributed with the portable build.
 
 Full licence texts for every component listed here are in the `licenses/` directory
 next to this file. Nothing in this document modifies or limits the terms of those
 licences; where this summary and a licence text disagree, the licence text governs.
 
-Generated for CAN Scope v00.00.60 against the dependency set in `requirements.txt`.
+Generated for Osvanta Bus Log Analyzer v00.01.00 against the dependency set in `requirements.txt`.
 Last reviewed 2026-08-12.
 
 ---
 
 ## 1. Components under the GNU Lesser General Public License
 
-The following components are used under the **LGPL**. CAN Scope does not modify any
+The following components are used under the **LGPL**. Osvanta Bus Log Analyzer does not modify any
 of them — they are redistributed exactly as published by their upstream projects.
 
 | Component | Version | License | Project |
@@ -28,7 +28,7 @@ of them — they are redistributed exactly as published by their upstream projec
 | `shiboken6` | 6.11.0 | LGPL-3.0-only | [link](https://pyside.org) |
 
 `PySide6`, `PySide6_Essentials`, `PySide6_Addons` and `shiboken6` are the Qt for Python
-bindings and the Qt libraries they wrap. Qt is dual-licensed; **CAN Scope uses Qt under
+bindings and the Qt libraries they wrap. Qt is dual-licensed; **Osvanta Bus Log Analyzer uses Qt under
 the LGPL-3.0**, not under a commercial Qt licence and not under the GPL.
 
 LGPL-3.0 is written as a set of additional permissions on top of the GNU GPL-3.0, so
@@ -40,12 +40,12 @@ both texts are required and both are provided:
 
 ### Your right to replace these libraries
 
-The LGPL gives you the right to run CAN Scope against your own build of any of these
+The LGPL gives you the right to run Osvanta Bus Log Analyzer against your own build of any of these
 libraries. The portable build supports this:
 
 - **Qt** ships as individual DLLs (`Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, …) in
   the application directory. Replace them with interface-compatible builds of your own
-  and CAN Scope will load yours instead.
+  and the application will load yours instead.
 - **python-can**, **asammdf** and **chardet** are pure Python. They can be replaced by
   placing your own copies in the application directory, which takes precedence over the
   bundled archive.
@@ -57,7 +57,7 @@ shipped is available from its project page linked in the table, and from PyPI at
 `https://pypi.org/project/<name>/<version>/#files`.
 
 If you would prefer to receive the corresponding source directly, open an issue at
-https://github.com/dinacaran/CANScope/issues and it will be provided.
+https://github.com/osvanta/bus-log-analyzer/issues and it will be provided.
 
 ---
 
@@ -108,7 +108,7 @@ https://github.com/dinacaran/CANScope/issues and it will be provided.
 |---|---|
 | `licenses/GNU-LGPL-3.0.txt` | LGPL-3.0 components in section 1 |
 | `licenses/GNU-GPL-3.0.txt` | Required by, and incorporated into, LGPL-3.0 |
-| `licenses/MPL-2.0.txt` | CAN Scope itself, and `certifi` |
+| `licenses/MPL-2.0.txt` | Osvanta Bus Log Analyzer itself, and `certifi` |
 | `licenses/<name>-<version>.txt` | The licence text shipped by that component |
 
 ---

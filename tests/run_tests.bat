@@ -1,5 +1,5 @@
 @echo off
-REM Run the CANScope test suite.
+REM Run the Osvanta Bus Log Analyzer test suite.
 REM Run this from the repo root: tests\run_tests.bat
 
 cd /d "%~dp0.."

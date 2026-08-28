@@ -27,8 +27,27 @@ def test_load_legacy_v1_channel_path(legacy_v1_path):
     assert cfg.channels[1] == "C:/fake/engine.dbc"
 
 
+def test_legacy_canscope_type_still_loads(legacy_v1_path):
+    """Channel configs written before the Osvanta rename must keep opening."""
+    raw = json.loads(legacy_v1_path.read_text(encoding="utf-8"))
+    assert raw["type"] == ChannelConfig.LEGACY_TYPE
+    cfg = ChannelConfig.load(legacy_v1_path)
+    assert cfg.name == "Legacy Config"
+
+
+def test_legacy_file_round_trips_to_new_names(tmp_path, legacy_v1_path):
+    """Re-saving a legacy config writes the new extension and type."""
+    cfg = ChannelConfig.load(legacy_v1_path)
+    out = tmp_path / f"resaved{ChannelConfig.FILE_EXTENSION}"
+    cfg.save(out)
+    assert out.suffix == ".osvanta_ch"
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["type"] == "osvanta_channel_config"
+    assert ChannelConfig.load(out).channels == cfg.channels
+
+
 def test_load_wrong_type_raises(tmp_path):
-    bad = tmp_path / "bad.canscope_ch"
+    bad = tmp_path / "bad.osvanta_ch"
     bad.write_text(json.dumps({"type": "something_else", "channels": {}}))
     with pytest.raises(ValueError, match="Not a channel config file"):
         ChannelConfig.load(bad)
@@ -37,7 +56,7 @@ def test_load_wrong_type_raises(tmp_path):
 # ── Save / round-trip ──────────────────────────────────────────────────────
 
 def test_save_round_trip(tmp_path, sample_dbc_path):
-    out = tmp_path / "test.canscope_ch"
+    out = tmp_path / "test.osvanta_ch"
     cfg = ChannelConfig(name="Test", channels={1: str(sample_dbc_path)})
     cfg.save(out)
 
@@ -47,17 +66,17 @@ def test_save_round_trip(tmp_path, sample_dbc_path):
 
 
 def test_save_writes_version_2(tmp_path):
-    out = tmp_path / "test.canscope_ch"
+    out = tmp_path / "test.osvanta_ch"
     ChannelConfig(name="X", channels={}).save(out)
     data = json.loads(out.read_text())
     assert data["version"] == 2
 
 
 def test_save_writes_type_field(tmp_path):
-    out = tmp_path / "test.canscope_ch"
+    out = tmp_path / "test.osvanta_ch"
     ChannelConfig(name="X", channels={}).save(out)
     data = json.loads(out.read_text())
-    assert data["type"] == "canscope_channel_config"
+    assert data["type"] == "osvanta_channel_config"
 
 
 # ── Factory ───────────────────────────────────────────────────────────────

@@ -16,7 +16,7 @@ jobs:
     env:
       # Turn fixture/Qt skips into failures — a green run must mean the
       # loading/decoding and GUI tests actually executed.
-      CANSCOPE_STRICT_FIXTURES: '1'
+      OSVANTA_STRICT_FIXTURES: '1'
       QT_QPA_PLATFORM: offscreen
     steps:
       - name: Checkout
@@ -74,13 +74,13 @@ jobs:
           pip install pyinstaller
 
       - name: Build portable EXE
-        run: pyinstaller CANScope.spec
+        run: pyinstaller BusLogAnalyzer.spec
 
       - name: Verify build output
         shell: pwsh
         run: |
-          if (!(Test-Path "dist\CANScope\CANScope.exe")) {
-            Write-Error "Build failed: CANScope.exe not found"
+          if (!(Test-Path "dist\BusLogAnalyzer\BusLogAnalyzer.exe")) {
+            Write-Error "Build failed: BusLogAnalyzer.exe not found"
             exit 1
           }
           Write-Host "Build succeeded."
@@ -89,8 +89,8 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          $zipName = "CANScope_${tag}_Windows.zip"
-          Compress-Archive -Path "dist\CANScope\*" -DestinationPath $zipName
+          $zipName = "BusLogAnalyzer_${tag}_Windows.zip"
+          Compress-Archive -Path "dist\BusLogAnalyzer\*" -DestinationPath $zipName
           Write-Host "Created: $zipName"
 
       # workflow_dispatch from a branch has no tag — build and zip still run
@@ -99,15 +99,15 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: CANScope_*_Windows.zip
+          files: BusLogAnalyzer_*_Windows.zip
           generate_release_notes: false
           body: |
-            ## CAN Scope ${{ github.ref_name }}
+            ## Osvanta Bus Log Analyzer ${{ github.ref_name }}
 
             ### Installation
-            1. Download `CANScope_${{ github.ref_name }}_Windows.zip`
+            1. Download `BusLogAnalyzer_${{ github.ref_name }}_Windows.zip`
             2. Unzip anywhere
-            3. Run `CANScope.exe` — no Python installation required
+            3. Run `BusLogAnalyzer.exe` — no Python installation required
 
             ### Supported formats
             - Vector BLF (`.blf`) — requires DBC

@@ -4,4 +4,4 @@
 #
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
-"""GUI widgets for CAN Scope."""
+"""GUI widgets for Osvanta Bus Log Analyzer."""

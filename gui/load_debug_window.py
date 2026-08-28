@@ -64,7 +64,7 @@ class LoadDebugWindow(QMainWindow):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle("CANScope CAN Load Debug")
+        self.setWindowTitle("Osvanta Bus Log Analyzer - CAN Load Debug")
         self.resize(1500, 900)
 
         central = QWidget(self)
@@ -111,7 +111,7 @@ class LoadDebugWindow(QMainWindow):
         font.setPointSize(9)
         self.report.setFont(font)
         self.report.setPlainText(
-            "CANScope LOAD DEBUG\n"
+            "OSVANTA BUS LOG ANALYZER LOAD DEBUG\n"
             + "=" * 100
             + "\nSTATUS: waiting for a measurement file"
         )
@@ -147,7 +147,7 @@ class LoadDebugWindow(QMainWindow):
 
     def clear_report(self) -> None:
         self.report.setPlainText(
-            "CANScope LOAD DEBUG\n"
+            "OSVANTA BUS LOG ANALYZER LOAD DEBUG\n"
             + "=" * 100
             + "\nSTATUS: waiting for inspection"
         )
@@ -164,7 +164,7 @@ class LoadDebugWindow(QMainWindow):
         touches the disk on its own.
         """
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Debug Report", "canscope_debug_report.txt",
+            self, "Save Debug Report", "osvanta_debug_report.txt",
             "Text files (*.txt)",
         )
         if not path:

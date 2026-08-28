@@ -1,4 +1,52 @@
 # Changelog
+
+> The product was renamed to **Osvanta Bus Log Analyzer** in August 2026, when the
+> repository moved to `github.com/osvanta/bus-log-analyzer`. Releases up to and
+> including v00.00.60 were published as **CAN Scope / CANScope**; the entries below
+> use the names in force at the time of each release.
+
+## [v00.01.00] — 2026-08-28: Renamed to Osvanta Bus Log Analyzer
+
+### Changed — the application, the executable and the release asset are renamed.
+
+CAN Scope is now **Osvanta Bus Log Analyzer**. The portable executable is
+`BusLogAnalyzer.exe`, it unpacks to `dist\BusLogAnalyzer\`, and the release
+asset is `BusLogAnalyzer_<tag>_Windows.zip`. The PyInstaller spec is
+`BusLogAnalyzer.spec`. The repository moved to
+`github.com/osvanta/bus-log-analyzer`.
+
+This is a minor version bump rather than another `v00.00.x` because the
+executable and asset names change, so an existing shortcut or download script
+pointing at `CANScope.exe` needs updating.
+
+### Changed — channel configs are now `.osvanta_ch`; older files still open.
+
+Channel configurations save as `.osvanta_ch` carrying an
+`osvanta_channel_config` type marker. **Existing `.canscope_ch` files continue
+to load unchanged** — both the old extension and the old type marker are still
+accepted, and the Load Channel Config dialog lists both. Only the new names are
+ever written, so re-saving an old configuration migrates it.
+
+Formula libraries likewise write an `osvanta_formulas` type marker. Reading
+never depended on that field, so every existing formula library keeps loading.
+
+Session configuration files are unaffected: the save dialog now suggests
+`osvanta_config.json`, but loading accepts any JSON file you select, so an
+existing `canscope_config.json` still opens.
+
+### Changed — environment variables use the `OSVANTA_` prefix.
+
+`OSVANTA_STRICT_FIXTURES`, `OSVANTA_AUTO_DEBUG`, `OSVANTA_DIAGNOSTICS` and
+`OSVANTA_DIAG_TELEMETRY` replace their `CANSCOPE_` equivalents. The old names
+are still honoured as a fallback, so existing CI configuration and developer
+shells keep working.
+
+### Changed — local runtime filenames.
+
+The dev log is `osvanta_dev.log` and the session hand-off file is
+`osvanta_temp_plot_config.json`. The pre-rename names remain in `.gitignore`
+so existing working copies stay clean.
+
 ## [v00.00.60] — 2026-08-11: Relicensed to the Mozilla Public License 2.0
 
 ### Changed — CAN Scope is now licensed under MPL-2.0.

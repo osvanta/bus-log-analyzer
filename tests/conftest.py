@@ -5,7 +5,7 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-Shared pytest fixtures for the CANScope test suite.
+Shared pytest fixtures for the Osvanta Bus Log Analyzer test suite.
 
 Binary fixtures (sample.blf, sample.asc) are generated on first run
 by tests/fixtures/_generate.py and are intentionally not committed to git.
@@ -34,21 +34,25 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 # Binary fixtures are generated on demand and not committed, so a generation
 # failure would normally skip every BLF/ASC test and leave the run green —
 # silently disabling coverage of the loading/decoding pipeline. CI sets
-# CANSCOPE_STRICT_FIXTURES=1 to turn those skips into hard failures.
-STRICT_FIXTURES = bool(os.environ.get("CANSCOPE_STRICT_FIXTURES"))
+# OSVANTA_STRICT_FIXTURES=1 to turn those skips into hard failures. The
+# pre-rename CANSCOPE_STRICT_FIXTURES is still honoured.
+STRICT_FIXTURES = bool(
+    os.environ.get("OSVANTA_STRICT_FIXTURES")
+    or os.environ.get("CANSCOPE_STRICT_FIXTURES")
+)
 
 
 def skip_or_fail(reason: str) -> None:
-    """Skip locally, fail under CANSCOPE_STRICT_FIXTURES. Never returns."""
+    """Skip locally, fail under OSVANTA_STRICT_FIXTURES. Never returns."""
     if STRICT_FIXTURES:
-        pytest.fail(f"{reason} (CANSCOPE_STRICT_FIXTURES is set)")
+        pytest.fail(f"{reason} (OSVANTA_STRICT_FIXTURES is set)")
     pytest.skip(reason)
 
 
 # Keep diagnostic telemetry out of the repo's logs/ during test runs.
 @pytest.fixture(autouse=True)
 def _no_diag_telemetry(monkeypatch):
-    monkeypatch.setenv("CANSCOPE_DIAG_TELEMETRY", "0")
+    monkeypatch.setenv("OSVANTA_DIAG_TELEMETRY", "0")
 
 # ── Payload constants (match sample.dbc signal layout) ────────────────────
 # EngineControl 0x100: EngSpeed raw=2400 (0x0960 LE) → 1200.0 rpm; Throttle raw=100 → 50.0 %

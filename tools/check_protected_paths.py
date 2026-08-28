@@ -45,7 +45,7 @@ PROTECTED_PIPELINE: tuple[str, ...] = (
 # "What NOT to Modify Without Instruction" — plus owner-only release metadata.
 PROTECTED_OTHER: tuple[str, ...] = (
     "core/signal_store.py",    # data source for the whole app
-    "CANScope.spec",           # PyInstaller build spec
+    "BusLogAnalyzer.spec",     # PyInstaller build spec
 )
 
 # Owner writes these at release time; contributors must never touch them.

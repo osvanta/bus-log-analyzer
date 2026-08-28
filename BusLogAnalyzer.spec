@@ -27,7 +27,7 @@ if splash_file.exists():
     datas.append((str(splash_file), "resources"))
 
 # Bundle app icon PNG for runtime window icon
-icon_png = project_root / "resources" / "CANScope_ICON.png"
+icon_png = project_root / "resources" / "app_icon.png"
 if icon_png.exists():
     datas.append((str(icon_png), "resources"))
 
@@ -78,7 +78,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     # diskcache is listed as a cantools dependency and is imported unconditionally
-    # by cantools at startup. It must be bundled even though CAN Scope never
+    # by cantools at startup. It must be bundled even though the app never
     # activates the cache (cache_dir is never passed to load_file()).
     # The Dependabot pickle-deserialization alert (CVE diskcache <=5.6.3) does
     # not apply here: no cache directory is ever created or read by this app.
@@ -95,7 +95,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="CANScope",
+    name="BusLogAnalyzer",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -112,5 +112,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="CANScope",
+    name="BusLogAnalyzer",
 )

@@ -152,7 +152,7 @@ def make_bounded_mdf4_copy(path: str | Path) -> tuple[Path | None, list[str]]:
     if not repairs:
         return None, []
 
-    fd, temp_name = tempfile.mkstemp(prefix="canscope_recovered_", suffix=source.suffix)
+    fd, temp_name = tempfile.mkstemp(prefix="osvanta_recovered_", suffix=source.suffix)
     os.close(fd)
     recovered = Path(temp_name)
     try:

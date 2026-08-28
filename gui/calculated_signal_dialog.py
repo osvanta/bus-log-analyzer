@@ -463,7 +463,7 @@ class CalculatedSignalDialog(QDialog):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save formula library",
-            "canscope_formulas.formulas.json",
+            "osvanta_formulas.formulas.json",
             "Formula files (*.formulas.json *.json);;All files (*)",
         )
         if not path:

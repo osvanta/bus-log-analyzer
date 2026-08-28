@@ -36,7 +36,7 @@ def window(qapp, monkeypatch):
     monkeypatch.setattr(QMessageBox, "critical", Mock(return_value=QMessageBox.StandardButton.Ok))
     monkeypatch.setattr(QMessageBox, "information", Mock(return_value=QMessageBox.StandardButton.Ok))
 
-    w = MainWindow('CANScope', '00.00.99')
+    w = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
     # Never let a test spin up a real background decode thread.
     monkeypatch.setattr(w, 'load_data', Mock())
     yield w

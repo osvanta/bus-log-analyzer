@@ -7,6 +7,16 @@ on:
   pull_request:
     branches:
       - main
+    # `labeled`/`unlabeled` are required for the `approved-pipeline-change`
+    # override in the guard job below to work at all. Under the default types
+    # (opened/synchronize/reopened) adding the label fires no event, and
+    # re-running the failed job replays the original payload — which has no
+    # label — so the override documented in docs/PR_Policy.md would silently
+    # never take effect. Removing the label re-runs the guard and re-blocks.
+    # Cost: any label change re-runs the Windows jobs too (~4 min). Filtering
+    # by label name would need a job-level `if:`, which would leave the
+    # required checks skipped rather than passed — see the guard job's note.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
@@ -77,7 +87,7 @@ jobs:
     env:
       # Turn fixture/Qt skips into failures — a green run must mean the
       # loading/decoding and GUI tests actually executed.
-      CANSCOPE_STRICT_FIXTURES: '1'
+      OSVANTA_STRICT_FIXTURES: '1'
       QT_QPA_PLATFORM: offscreen
     steps:
       - name: Checkout
@@ -120,13 +130,13 @@ jobs:
           pip install pyinstaller
 
       - name: Build portable EXE
-        run: pyinstaller CANScope.spec
+        run: pyinstaller BusLogAnalyzer.spec
 
       - name: Verify build output
         shell: pwsh
         run: |
-          if (!(Test-Path "dist\CANScope\CANScope.exe")) {
-            Write-Error "Build failed: CANScope.exe not found"
+          if (!(Test-Path "dist\BusLogAnalyzer\BusLogAnalyzer.exe")) {
+            Write-Error "Build failed: BusLogAnalyzer.exe not found"
             exit 1
           }
           Write-Host "Build succeeded."
