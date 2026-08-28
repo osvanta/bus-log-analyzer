@@ -7,6 +7,16 @@ on:
   pull_request:
     branches:
       - main
+    # `labeled`/`unlabeled` are required for the `approved-pipeline-change`
+    # override in the guard job below to work at all. Under the default types
+    # (opened/synchronize/reopened) adding the label fires no event, and
+    # re-running the failed job replays the original payload — which has no
+    # label — so the override documented in docs/PR_Policy.md would silently
+    # never take effect. Removing the label re-runs the guard and re-blocks.
+    # Cost: any label change re-runs the Windows jobs too (~4 min). Filtering
+    # by label name would need a job-level `if:`, which would leave the
+    # required checks skipped rather than passed — see the guard job's note.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
