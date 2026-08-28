@@ -1,5 +1,5 @@
 @echo off
-REM Install the shared pre-commit hook for the PUBLIC CANScope repo.
+REM Install the shared pre-commit hook for the PUBLIC Osvanta Bus Log Analyzer repo.
 REM Run once after cloning:  tools\install-hooks.bat
 REM
 REM Uses core.hooksPath so the hook stays tracked in-repo (tools/hooks/) instead

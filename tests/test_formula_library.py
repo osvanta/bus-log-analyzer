@@ -47,7 +47,7 @@ def test_reads_formulas_out_of_a_real_config_json(tmp_path):
             {"name": "Scaled", "formula": "`CH1::Message::A` * 100", "unit": "rpm"},
         ],
     }
-    path = tmp_path / "canscope_config.json"
+    path = tmp_path / "osvanta_config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
 
     result = load_formula_library(path)

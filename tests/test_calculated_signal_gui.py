@@ -58,7 +58,7 @@ def _series(name: str, values) -> SignalSeries:
 def window(qapp, monkeypatch):
     monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
     monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.StandardButton.Ok)
-    widget = MainWindow("CANScope", "00.00.99")
+    widget = MainWindow("Osvanta Bus Log Analyzer", "00.00.99")
     widget.store = _Store([_series("A", [1.0, 2.0, 3.0])])
     widget._update_action_states()
     yield widget

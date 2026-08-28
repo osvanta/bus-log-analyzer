@@ -15,7 +15,7 @@ If you discover a security issue (e.g. malicious ASCII/MDF/BLF/DBC file causing
 arbitrary code execution), please **do not open a public GitHub issue**.
 
 Instead, report it privately via GitHub's
-[Security Advisories](https://github.com/dinacaran/CANScope/security/advisories)
+[Security Advisories](https://github.com/osvanta/bus-log-analyzer/security/advisories)
 feature, or email the maintainer directly.
 
 Please include:

@@ -21,7 +21,7 @@
 
 # Protected core files
 /core/signal_store.py       @dinacaran
-/CANScope.spec              @dinacaran
+/BusLogAnalyzer.spec        @dinacaran
 
 # Owner-only release metadata
 /CHANGELOG.md               @dinacaran

@@ -476,7 +476,7 @@ class DBCManagerDialog(QDialog):
     def _on_save_channel_config(self) -> None:
         cfg = self.result_config()
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Channel Config", f"{cfg.name}.canscope_ch",
+            self, "Save Channel Config", f"{cfg.name}{ChannelConfig.FILE_EXTENSION}",
             f"Channel Config (*{ChannelConfig.FILE_EXTENSION});;All files (*)"
         )
         if not path:
@@ -491,7 +491,8 @@ class DBCManagerDialog(QDialog):
     def _on_load_channel_config(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Channel Config", "",
-            f"Channel Config (*{ChannelConfig.FILE_EXTENSION});;All files (*)"
+            f"Channel Config (*{ChannelConfig.FILE_EXTENSION} "
+            f"*{ChannelConfig.LEGACY_FILE_EXTENSION});;All files (*)"
         )
         if not path:
             return

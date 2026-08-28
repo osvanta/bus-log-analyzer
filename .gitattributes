@@ -1,4 +1,4 @@
-# Line-ending policy for CAN Scope.
+# Line-ending policy for Osvanta Bus Log Analyzer.
 #
 # Without this file, what git does with line endings depends on each machine's
 # `core.autocrlf` setting. That is why the repository looks clean on Windows

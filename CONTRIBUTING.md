@@ -1,4 +1,4 @@
-# Contributing to CAN Scope
+# Contributing to Osvanta Bus Log Analyzer
 
 Thank you for taking the time to contribute.
 
@@ -6,7 +6,7 @@ Thank you for taking the time to contribute.
 
 ## Licensing of Contributions
 
-CAN Scope is licensed under the [Mozilla Public License 2.0](LICENSE) from
+Osvanta Bus Log Analyzer is licensed under the [Mozilla Public License 2.0](LICENSE) from
 release `v00.00.60` onward. Earlier releases were MIT and stay MIT — see
 [LICENSE-MIT](LICENSE-MIT).
 
@@ -68,7 +68,7 @@ performance work, and dependency bumps.
 | `core/readers/` | Format detection and all reader implementations |
 | `core/signal_store.py` | Data source for the entire app |
 | `requirements.txt` | Loading/decoding dependency versions |
-| `CANScope.spec` | PyInstaller build spec — changes break the portable build |
+| `BusLogAnalyzer.spec` | PyInstaller build spec — changes break the portable build |
 | `CHANGELOG.md`, `app.py` | Release metadata — the owner writes these at release time |
 | `.github/` | Workflows run with write access on a release tag |
 | `tools/` | The guard cannot police edits to itself |
@@ -90,8 +90,8 @@ release the check.
 ## Development Setup
 
 ```bash
-git clone https://github.com/dinacaran/canscope.git
-cd canscope
+git clone https://github.com/osvanta/bus-log-analyzer.git
+cd bus-log-analyzer
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -r requirements.txt -r requirements-dev.txt
@@ -118,7 +118,7 @@ so a PR that breaks either will not merge.
 ## Project Layout
 
 ```
-canscope/
+bus-log-analyzer/
 ├── app.py                    # Entry point, APP_NAME, APP_VERSION
 ├── core/
 │   ├── readers/              # One reader class per format

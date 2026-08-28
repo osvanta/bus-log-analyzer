@@ -5,7 +5,7 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-CAN Scope splash screen.
+Osvanta Bus Log Analyzer splash screen.
 
 Displays the splash image while the application is initialising.
 Overlays:
@@ -55,13 +55,13 @@ _STATUS_COLOR     = QColor('#a0c8ff')  # light blue — matches splash palette
 _VERSION_COLOR    = QColor('#6090b0')  # muted blue-grey
 
 
-class CANScopeSplash(QSplashScreen):
+class SplashScreen(QSplashScreen):
     """
     Splash screen shown during application startup.
 
     Usage::
 
-        splash = CANScopeSplash(version='v00.00.12')
+        splash = SplashScreen(version='v00.00.12')
         splash.show()
         app.processEvents()
 
@@ -107,7 +107,7 @@ class CANScopeSplash(QSplashScreen):
             Qt.WindowType.WindowMinimizeButtonHint |
             Qt.WindowType.CustomizeWindowHint
         )
-        self.setWindowTitle('CAN Scope — Starting…')
+        self.setWindowTitle('Osvanta Bus Log Analyzer — Starting…')
 
         self._version     = version
         self._status_text = 'Starting...'
@@ -120,7 +120,7 @@ class CANScopeSplash(QSplashScreen):
     def set_status(self, message: str) -> None:
         """Update the loading status text shown in the frosted-glass panel."""
         self._status_text = message
-        self.setWindowTitle(f'CAN Scope — {message}')
+        self.setWindowTitle(f'Osvanta Bus Log Analyzer — {message}')
         self._render()
         QApplication.processEvents()
 

@@ -77,7 +77,7 @@ jobs:
     env:
       # Turn fixture/Qt skips into failures — a green run must mean the
       # loading/decoding and GUI tests actually executed.
-      CANSCOPE_STRICT_FIXTURES: '1'
+      OSVANTA_STRICT_FIXTURES: '1'
       QT_QPA_PLATFORM: offscreen
     steps:
       - name: Checkout
@@ -120,13 +120,13 @@ jobs:
           pip install pyinstaller
 
       - name: Build portable EXE
-        run: pyinstaller CANScope.spec
+        run: pyinstaller BusLogAnalyzer.spec
 
       - name: Verify build output
         shell: pwsh
         run: |
-          if (!(Test-Path "dist\CANScope\CANScope.exe")) {
-            Write-Error "Build failed: CANScope.exe not found"
+          if (!(Test-Path "dist\BusLogAnalyzer\BusLogAnalyzer.exe")) {
+            Write-Error "Build failed: BusLogAnalyzer.exe not found"
             exit 1
           }
           Write-Host "Build succeeded."

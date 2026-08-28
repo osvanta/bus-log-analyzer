@@ -52,7 +52,7 @@ def _captured_qt_messages():
 
 
 def test_ctrl_alt_d_shortcut_toggles_debug_and_normal_mode(qapp):
-    window = MainWindow("CANScope", "test")
+    window = MainWindow("Osvanta Bus Log Analyzer", "test")
     window.show()
     qapp.processEvents()
 
@@ -92,14 +92,14 @@ def test_selecting_measurement_in_debug_mode_starts_plain_text_inspection(
     )
     monkeypatch.setattr("gui.main_window.dbc_required_for", lambda _path: False)
 
-    window = MainWindow("CANScope", "test")
+    window = MainWindow("Osvanta Bus Log Analyzer", "test")
     window.show()
     window.toggle_debug_mode()
     window.choose_blf()
     _wait_for_debug_worker(window, qapp)
 
     report = window._debug_window.report.toPlainText()
-    assert "CANScope LOAD DEBUG" in report
+    assert "OSVANTA BUS LOG ANALYZER LOAD DEBUG" in report
     assert "File: issue.csv" in report
     assert str(tmp_path) not in report
     assert not (tmp_path / "debug.json").exists()
@@ -136,7 +136,7 @@ def test_back_to_back_inspections_reuse_the_same_worker_thread(
 
     from core.channel_config import ChannelConfig
 
-    window = MainWindow("CANScope", "test")
+    window = MainWindow("Osvanta Bus Log Analyzer", "test")
     window.toggle_debug_mode()
 
     with _captured_qt_messages() as messages:
@@ -174,11 +174,11 @@ def test_closing_the_window_mid_inspection_tears_down_cleanly(
     def slow_inspect(path, app_version=""):
         inspection_started.set()
         time.sleep(0.3)
-        return "CANScope LOAD DEBUG\nslow inspection"
+        return "OSVANTA BUS LOG ANALYZER LOAD DEBUG\nslow inspection"
 
     monkeypatch.setattr("gui.main_window.inspect_measurement", slow_inspect)
 
-    window = MainWindow("CANScope", "test")
+    window = MainWindow("Osvanta Bus Log Analyzer", "test")
     window.toggle_debug_mode()
 
     with _captured_qt_messages() as messages:
@@ -202,7 +202,7 @@ def _prepared_window(monkeypatch, measurement) -> MainWindow:
     monkeypatch.setattr(
         QMessageBox, "critical", lambda *args, **kwargs: None
     )
-    window = MainWindow("CANScope", "test")
+    window = MainWindow("Osvanta Bus Log Analyzer", "test")
     window.measurement_path = str(measurement)
     return window
 
@@ -265,12 +265,29 @@ def test_load_failure_with_debug_mode_already_on_does_not_restart_the_report(
     window.close()
 
 
-def test_canscope_auto_debug_zero_suppresses_auto_launch(
+def test_legacy_canscope_auto_debug_still_honoured(
+    qapp, monkeypatch, tmp_path
+):
+    """The pre-rename env var still suppresses auto-launch."""
+    measurement = tmp_path / "issue.csv"
+    measurement.write_text("time,value\n0,1\n", encoding="utf-8")
+    monkeypatch.delenv("OSVANTA_AUTO_DEBUG", raising=False)
+    monkeypatch.setenv("CANSCOPE_AUTO_DEBUG", "0")
+    window = _prepared_window(monkeypatch, measurement)
+
+    window._on_worker_failed("decode blew up")
+    qapp.processEvents()
+
+    assert window._debug_window is None
+    window.close()
+
+
+def test_osvanta_auto_debug_zero_suppresses_auto_launch(
     qapp, monkeypatch, tmp_path
 ):
     measurement = tmp_path / "issue.csv"
     measurement.write_text("time,value\n0,1\n", encoding="utf-8")
-    monkeypatch.setenv("CANSCOPE_AUTO_DEBUG", "0")
+    monkeypatch.setenv("OSVANTA_AUTO_DEBUG", "0")
     window = _prepared_window(monkeypatch, measurement)
 
     window._on_worker_failed("decode blew up")

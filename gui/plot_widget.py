@@ -298,7 +298,7 @@ class _ReorderTable(QTableWidget):
     """QTableWidget that fires a custom internal MIME drag so row-reorder drops
     are distinguishable from external SignalTree drops."""
 
-    _ROW_REORDER_MIME = 'application/x-canscope-row-reorder'
+    _ROW_REORDER_MIME = 'application/x-osvanta-row-reorder'
 
     def __init__(self, rows: int, cols: int, parent=None) -> None:
         super().__init__(rows, cols, parent)

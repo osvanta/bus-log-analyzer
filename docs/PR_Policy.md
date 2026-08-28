@@ -31,7 +31,7 @@ fallback paths, decoded signal/sample counts, and loading progress messages.
 Read `docs/Project_structure.md` for the accepted loading/decoding architecture.
 
 ## What NOT to Modify Without Owner's permission:
-- `CANScope.spec` — PyInstaller build spec; modifying breaks the portable build.
+- `BusLogAnalyzer.spec` — PyInstaller build spec; modifying breaks the portable build.
 - The `APP_NAME` constant in `app.py` — affects window title and branding.
 
 ## Owner-only: release metadata

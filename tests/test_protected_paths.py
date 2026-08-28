@@ -60,7 +60,7 @@ def test_ci_and_policy_paths_are_protected(path):
         ("core/readers/blf_can_reader.py", "Validated loading/decoding pipeline"),
         ("requirements.txt", "Validated loading/decoding pipeline"),
         ("core/signal_store.py", "Protected core files"),
-        ("CANScope.spec", "Protected core files"),
+        ("BusLogAnalyzer.spec", "Protected core files"),
         ("CHANGELOG.md", "Owner-only release metadata"),
         ("app.py", "Owner-only release metadata"),
     ],

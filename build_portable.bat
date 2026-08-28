@@ -15,7 +15,7 @@ if exist .venv\Scripts\python.exe (
     set "PYEXE=python"
 )
 
-"%PYEXE%" -m PyInstaller CANScope.spec --noconfirm
+"%PYEXE%" -m PyInstaller BusLogAnalyzer.spec --noconfirm
 if errorlevel 1 (
     echo.
     echo Build failed.
@@ -23,14 +23,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist dist\CANScope\CANScope.exe (
+if not exist dist\BusLogAnalyzer\BusLogAnalyzer.exe (
     echo.
-    echo Build completed but CANScope.exe was not found.
+    echo Build completed but BusLogAnalyzer.exe was not found.
     pause
     exit /b 1
 )
 
 echo.
 echo Build successful.
-echo Output: dist\CANScope\
+echo Output: dist\BusLogAnalyzer\
 pause

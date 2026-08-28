@@ -259,14 +259,14 @@ class MDFCANReader:
                 # becoming another sequential loading phase.
                 raw_executor = ThreadPoolExecutor(
                     max_workers=1,
-                    thread_name_prefix="canscope-mf4-trace",
+                    thread_name_prefix="osvanta-mf4-trace",
                 )
                 raw_future = raw_executor.submit(
                     self._load_raw_frame_arrays,
                     asammdf,
                     raw_frame_batch,
                 )
-            # Expand CANScope's "All Channels" fallback to the concrete bus
+            # Expand the analyzer's "All Channels" fallback to the concrete bus
             # channels discovered by asammdf.  This prevents a channel-specific
             # database and the fallback database from both decoding the same bus.
             if channel_config is not None:

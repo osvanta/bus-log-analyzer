@@ -213,7 +213,7 @@ class MDFReader:
             )
             self.raw_trace_unavailable_reason = (
                 "This MDF contains both decoded signals and raw CAN frames. "
-                "CANScope loaded the existing decoded signals without a database, "
+                "Osvanta Bus Log Analyzer loaded the existing decoded signals without a database, "
                 "so the embedded raw frames are not available in CAN Trace. "
                 "Configure a DBC or ARXML database and load the measurement again "
                 "to decode and view those CAN frames."

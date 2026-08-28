@@ -115,7 +115,7 @@ class RawFrameStore:
         self._write_buf: bytearray = bytearray(_DATA_BYTES)
 
         # Create temp file immediately
-        fd, path = tempfile.mkstemp(prefix='canscope_', suffix='.rawdata')
+        fd, path = tempfile.mkstemp(prefix='osvanta_', suffix='.rawdata')
         self._data_path = path
         # Use a 1 MB write buffer — seal() calls flush() before mmap so this is safe.
         # buffering=0 (unbuffered) caused one write() syscall per frame (64 B each),

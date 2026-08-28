@@ -1,5 +1,5 @@
 #!/bin/sh
-# Pre-commit hook for the PUBLIC CANScope repo.
+# Pre-commit hook for the PUBLIC Osvanta Bus Log Analyzer repo.
 # 1. Blocks commits that touch the private diagnostics feature.
 # 2. Runs the test suite (carried over from tests/hooks/pre-commit).
 # Install with: tools/install-hooks.sh  (or tools\install-hooks.bat on Windows)
@@ -10,14 +10,14 @@ protected='^(core/diagnostics/|gui/diagnostics/|config/diagnostics/)'
 staged=$(git diff --cached --name-only)
 blocked=$(printf '%s\n' "$staged" | grep -E "$protected")
 if [ -n "$blocked" ]; then
-  echo "ERROR: this is the PUBLIC CANScope repo — diagnostics code must not be committed here." >&2
+  echo "ERROR: this is the PUBLIC Osvanta Bus Log Analyzer repo — diagnostics code must not be committed here." >&2
   echo "Blocked paths:" >&2
   printf '  %s\n' $blocked >&2
   echo "Make diagnostics changes in the private CANScope-AI repo instead." >&2
   exit 1
 fi
 
-echo "Running CANScope tests..."
+echo "Running Osvanta Bus Log Analyzer tests..."
 python -m pytest tests/ -q --tb=short
 STATUS=$?
 

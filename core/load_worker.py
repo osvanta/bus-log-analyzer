@@ -795,7 +795,7 @@ class LoadWorker(QObject):
 
         self.progress.emit(
             "WARNING: native DBC extraction failed; decoding each readable "
-            "raw CAN group with CANScope's bounded fallback."
+            "raw CAN group with the analyzer's bounded fallback."
         )
         try:
             self._run_can_raw_vectorized(_RecoveredRawArrays(), store)
@@ -930,7 +930,7 @@ class LoadWorker(QObject):
                 trace_store.close()
             self.progress.emit(
                 "WARNING: asammdf native extraction was unavailable; "
-                f"using CANScope's two-pass fallback ({exc})"
+                f"using the analyzer's two-pass fallback ({exc})"
             )
             self._run_can_raw_vectorized(reader, store)
             return

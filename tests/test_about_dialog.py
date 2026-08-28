@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture()
 def dialog(qapp):
-    dlg = AboutDialog("CAN Scope", "v00.00.60")
+    dlg = AboutDialog("Osvanta Bus Log Analyzer", "v00.01.00")
     yield dlg
     dlg.close()
     qapp.processEvents()
@@ -46,7 +46,7 @@ def test_about_text_carries_the_lgpl_notice_and_pointer(dialog):
     """LGPL-3.0 4(c) — name the LGPL components and point at the licence copies."""
     from gui.about_dialog import _ABOUT_HTML
 
-    text = _ABOUT_HTML.format(name="CAN Scope", version="v00.00.60")
+    text = _ABOUT_HTML.format(name="Osvanta Bus Log Analyzer", version="v00.01.00")
     assert "Lesser General Public License" in text
     assert "GNU GPL" in text
     for component in ("Qt", "PySide6", "python-can", "asammdf", "chardet"):
@@ -86,7 +86,7 @@ def test_every_bundled_licence_file_is_readable(dialog):
 def test_dialog_survives_missing_licence_files(qapp, monkeypatch, tmp_path):
     """A source checkout without generated licences must still open."""
     monkeypatch.setattr("gui.about_dialog._resource_root", lambda: tmp_path)
-    dlg = AboutDialog("CAN Scope", "v00.00.60")
+    dlg = AboutDialog("Osvanta Bus Log Analyzer", "v00.01.00")
     try:
         assert dlg._list.count() == 0
         assert not dlg._list.isEnabled()

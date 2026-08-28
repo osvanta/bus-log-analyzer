@@ -4,4 +4,4 @@
 #
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
-"""Core services for CAN Scope."""
+"""Core services for Osvanta Bus Log Analyzer."""

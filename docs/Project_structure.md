@@ -1,12 +1,12 @@
-canscope/
-├── app.py                        # Entry point, APP_NAME="CAN Scope", APP_VERSION
+bus-log-analyzer/
+├── app.py                        # Entry point, APP_NAME="Osvanta Bus Log Analyzer", APP_VERSION
 ├── config/
 │   └── diagnostics/
 │       ├── motor_control.yaml    # Fault rules for motor/inverter domain (user-editable)
 │       └── README.md             # Rule authoring guide
 ├── core/
 │   ├── models.py                 # RawFrame, DecodedSignalSample dataclasses
-│   ├── channel_config.py         # ChannelConfig: {channel → DBC or ARXML}, decoder cache, save/load .canscope_ch
+│   ├── channel_config.py         # ChannelConfig: {channel → DBC or ARXML}, decoder cache, save/load .osvanta_ch
 │   ├── load_worker.py            # QThread: native MDF arrays + batched CAN-raw vectorized decode paths
 │   ├── signal_store.py           # SignalStore, SignalSeries (array.array storage)
 │   ├── raw_frame_store.py        # Batched CAN Trace store: compact metadata + 64 B/frame mmap payload
@@ -46,7 +46,7 @@ canscope/
 │   ├── signal_tree.py            # SignalTreeWidget with live search
 │   ├── raw_frame_dialog.py       # Sliding-window CAN Trace (RawFrameStore, no cap)
 │   ├── dbc_manager.py            # Database Manager dialog: per-channel DBC/ARXML, match quality bars
-│   ├── splash.py                 # CANScopeSplash — minimisable, taskbar-visible splash screen
+│   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
 │   └── diagnostics/              # Diagnostics UI (non-modal window)
 │       ├── activation.py         # Wires Ctrl+Shift+A shortcut in MainWindow
 │       ├── window.py             # DiagnosticsWindow — domain selector, run controls, auto-plot on fault
@@ -55,10 +55,10 @@ canscope/
 │       └── worker.py             # AnalysisWorker / LLMWorker (background thread helpers)
 ├── resources/
 │   ├── splashscreen.png          # 1635 × 962 splash image
-│   ├── CANScope_ICON.png         # 1254 × 1254 app icon source
+│   ├── app_icon.png              # 1024 × 1024 app icon source
 │   └── app_icon.ico              # Multi-resolution ICO (256/128/64/48/32/16 px)
 ├── requirements.txt
-├── CANScope.spec                 # PyInstaller spec, bundles resources/ and config/
+├── BusLogAnalyzer.spec           # PyInstaller spec, bundles resources/ and config/
 └── .github/workflows/build.yml  # Auto-build on v*.*.* tag push
 
 

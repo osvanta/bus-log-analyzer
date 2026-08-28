@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install the shared pre-commit hook for the PUBLIC CANScope repo.
+# Install the shared pre-commit hook for the PUBLIC Osvanta Bus Log Analyzer repo.
 # Run once after cloning:  tools/install-hooks.sh
 #
 # Uses core.hooksPath so the hook stays tracked in-repo (tools/hooks/) instead

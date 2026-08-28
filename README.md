@@ -1,11 +1,15 @@
-# CAN Scope
+# Osvanta Bus Log Analyzer
 
 > A portable Windows application for loading automotive measurements, decoding CAN signals, inspecting raw frames, and plotting signal data interactively.
+
+> Formerly released as **CANScope**. The repository moved to
+> [github.com/osvanta/bus-log-analyzer](https://github.com/osvanta/bus-log-analyzer)
+> in August 2026.
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?logo=windows)
 ![License](https://img.shields.io/badge/License-MPL--2.0-green)
-![Release](https://img.shields.io/github/v/release/dinacaran/canscope)
+![Release](https://img.shields.io/github/v/release/osvanta/bus-log-analyzer)
 
 ## Screenshots
 
@@ -56,13 +60,13 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 
 ### Portable release
 
-Download the latest Windows ZIP from [Releases](https://github.com/dinacaran/canscope/releases), extract it, and run `CANScope.exe`. No installer or Python installation is required.
+Download the latest Windows ZIP from [Releases](https://github.com/osvanta/bus-log-analyzer/releases), extract it, and run `BusLogAnalyzer.exe`. No installer or Python installation is required.
 
 ### From source
 
 ```powershell
-git clone https://github.com/dinacaran/canscope.git
-cd canscope
+git clone https://github.com/osvanta/bus-log-analyzer.git
+cd bus-log-analyzer
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
@@ -110,7 +114,7 @@ Build the portable application with:
 .\build_portable.bat
 ```
 
-Output is written to `dist\CANScope\`. Pushing a `v*.*.*` tag runs the Windows build workflow and publishes a release ZIP.
+Output is written to `dist\BusLogAnalyzer\`. Pushing a `v*.*.*` tag runs the Windows build workflow and publishes a release ZIP.
 
 ## Repository layout
 
@@ -131,9 +135,9 @@ Runtime dependencies are maintained in [requirements.txt](requirements.txt).
 
 Release binaries are currently unsigned, so Windows SmartScreen may show a warning on first launch.
 
-CAN Scope is licensed under the [Mozilla Public License 2.0](LICENSE).
+Osvanta Bus Log Analyzer is licensed under the [Mozilla Public License 2.0](LICENSE).
 
-MPL-2.0 is a file-level copyleft license. You may use CAN Scope freely, including
+MPL-2.0 is a file-level copyleft license. You may use it freely, including
 inside commercial and proprietary products, and you may combine these files with
 files of your own under any terms you choose. The one obligation is reciprocal:
 if you distribute a modified version of a file that carries the MPL notice, the
@@ -143,11 +147,12 @@ Releases up to and including `v00.00.59` were published under the MIT License an
 remain available under those terms — see [LICENSE-MIT](LICENSE-MIT). The change to
 MPL-2.0 applies from `v00.00.60` onward.
 
-CAN Scope bundles third-party components under their own licenses, including
+Osvanta Bus Log Analyzer bundles third-party components under their own licenses, including
 LGPL-3.0 components (Qt via PySide6, python-can, asammdf, chardet). They are used
 unmodified and remain available from their upstream projects. See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full component list, and
 `licenses/` for the complete license texts — both ship inside the portable build.
 
-"CAN Scope" and "CANScope" are names used by this project. The license grants
-rights to the code, not to the project name.
+"Osvanta", "Osvanta Bus Log Analyzer", and the earlier names "CAN Scope" and
+"CANScope" are names used by this project. The license grants rights to the
+code, not to the project name.
