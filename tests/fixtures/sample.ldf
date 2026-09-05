@@ -1,0 +1,79 @@
+/* LIN description file for the Osvanta Bus Log Analyzer test suite.
+ *
+ * Kept deliberately small: two frames on one LIN cluster, with signal layouts
+ * that make decoded values easy to assert by hand.
+ *
+ *   0x20  DoorCmd     WindowPos  (byte 0, 8 bit)
+ *                     LockState  (byte 1, low 2 bit)
+ *   0x21  DoorStatus  MirrorAngle (byte 0, 8 bit)
+ *
+ * The Node_attributes section is not decoration: ldfparser rejects any LDF 2.0+
+ * file without it, so a fixture missing it fails to parse rather than loading
+ * with fewer frames.
+ */
+LIN_description_file;
+LIN_protocol_version = "2.1";
+LIN_language_version = "2.1";
+LIN_speed = 19.2 kbps;
+
+Nodes {
+  Master: MasterNode, 5 ms, 0.1 ms;
+  Slaves: DoorNode;
+}
+
+Signals {
+  WindowPos: 8, 0, MasterNode, DoorNode;
+  LockState: 2, 0, MasterNode, DoorNode;
+  MirrorAngle: 8, 0, DoorNode, MasterNode;
+}
+
+Frames {
+  DoorCmd: 0x20, MasterNode, 2 {
+    WindowPos, 0;
+    LockState, 8;
+  }
+  DoorStatus: 0x21, DoorNode, 1 {
+    MirrorAngle, 0;
+  }
+}
+
+Node_attributes {
+  DoorNode {
+    LIN_protocol = "2.1";
+    configured_NAD = 0x01;
+    initial_NAD = 0x01;
+    product_id = 0x0001, 0x0002, 0;
+    response_error = LockState;
+    P2_min = 50 ms;
+    ST_min = 0 ms;
+    configurable_frames {
+      DoorCmd;
+      DoorStatus;
+    }
+  }
+}
+
+Schedule_tables {
+  Normal {
+    DoorCmd delay 10 ms;
+    DoorStatus delay 10 ms;
+  }
+}
+
+/* Encodings become DBC value tables when the LDF is converted for the
+ * BLF/ASC decode path. They are here so that conversion is actually
+ * exercised: losing them would drop every enum label in the signal tree
+ * without dropping a single signal, which is invisible to a test that only
+ * counts frames.
+ */
+Signal_encoding_types {
+  LockEncoding {
+    logical_value, 0, "Unlocked";
+    logical_value, 1, "Locked";
+    logical_value, 2, "Fault";
+  }
+}
+
+Signal_representation {
+  LockEncoding: LockState;
+}

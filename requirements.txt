@@ -7,6 +7,10 @@ asammdf>=7.0
 # Required for asammdf native one-pass CAN bus extraction from MF4/MDF files.
 # Its format handlers are bundled explicitly by BusLogAnalyzer.spec.
 canmatrix>=1.0
+# canmatrix's .ldf handler imports ldfparser at module load; without it
+# canmatrix silently does not register the 'ldf' format and every LDF
+# fails deep inside asammdf with a bare KeyError. Required for LIN.
+ldfparser>=0.20
 pyinstaller>=6.0
 # YAML config loader for the diagnostics engine (rules in config/diagnostics/)
 pyyaml>=6.0

@@ -5,6 +5,44 @@
 > including v00.00.60 were published as **CAN Scope / CANScope**; the entries below
 > use the names in force at the time of each release.
 
+## [v00.01.01] — 2026-09-05: LIN bus support
+
+### Added — LIN measurements load and decode.
+
+Logs carrying LIN traffic now open and decode the way CAN logs do, from MF4 and
+MDF containers as well as BLF and ASC files. LIN channels appear alongside CAN
+channels in the signal tree, the CAN Trace and the Database Manager, and the bus
+is part of a channel's identity — CAN 1 and LIN 1 are two different channels and
+can carry two different databases.
+
+A BLF holding only LIN traffic previously opened as an empty measurement with no
+error, because the reader skipped every frame in it without saying so. Those
+files now decode. A BLF holding neither CAN nor LIN is refused with a message
+saying what it contains, rather than opening empty.
+
+### Added — LDF databases can be assigned to a channel.
+
+`.ldf` files can be selected in the Database Manager next to DBC and ARXML.
+Signal names, scaling and value tables come through unchanged, and a signal keeps
+the same name whether the recording is an MF4, a BLF or an ASC — so a plot
+configuration saved against one container opens against another.
+
+### Changed — database matching scores frame length, not frame ID alone.
+
+Every LIN cluster numbers its frames from zero, so two unrelated LIN databases
+routinely share every frame ID. The match percentage could not tell them apart
+and would offer either one at 100%, which meant the automatic assignment was a
+coin flip. LIN matching now compares frame length as well, which separates them.
+CAN matching is unchanged.
+
+### Added — a warning when frames are shorter than the message they matched.
+
+A database assigned to the wrong channel can decode without raising anything,
+filling the bytes the frame does not have with zeros and producing signals that
+look plausible but are flat. The load report now says how many frames were
+shorter than the message they matched and names those messages, so a wrong
+assignment is visible instead of silent.
+
 ## [v00.01.00] — 2026-08-28: Renamed to Osvanta Bus Log Analyzer
 
 ### Changed — the application, the executable and the release asset are renamed.

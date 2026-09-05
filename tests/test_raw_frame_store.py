@@ -224,3 +224,88 @@ def test_close_idempotent():
     store = _populated_store(1, sealed=True)
     store.close()
     store.close()   # second close must not raise
+
+
+# ── LIN frames in the shared trace ─────────────────────────────────────────
+
+def test_lin_frames_round_trip_through_the_shared_store():
+    """LIN rides in flag bit 3 — no record-layout change, no new column.
+
+    A 6-bit LIN ID fits the uint32 arbitration-ID column and a LIN payload is
+    at most 8 of the 64 available bytes, so the on-disk record is untouched.
+    """
+    from core.bus_types import BusType
+
+    store = RawFrameStore()
+    store.append(
+        timestamp=0.1, channel=1, arb_id=0x100, dlc=8, direction='Rx',
+        is_extended=False, is_fd=False, data=b'\x01\x02',
+        frame_name='EngineControl', decoded=True,
+    )
+    store.append(
+        timestamp=0.2, channel=1, arb_id=0x20, dlc=2, direction='Rx',
+        is_extended=False, is_fd=False, data=b'\x0a\x01',
+        frame_name='DoorCmd', decoded=True, bus=BusType.LIN,
+    )
+    store.seal()
+
+    can_record, lin_record = store.get_window([0, 1])
+
+    assert can_record.bus is BusType.CAN
+    assert can_record.channel_key == (BusType.CAN, 1)
+    assert lin_record.bus is BusType.LIN
+    assert lin_record.channel_key == (BusType.LIN, 1)
+    assert lin_record.arbitration_id == 0x20
+    assert lin_record.data[:2] == b'\x0a\x01'
+    store.close()
+
+
+def test_channel_one_on_each_bus_lists_and_filters_separately():
+    """The collision the bus bit exists to prevent.
+
+    Both frames sit on channel number 1. Filtering on the number alone would
+    return both; only the bus bit tells them apart.
+    """
+    from core.bus_types import BusType
+
+    store = RawFrameStore()
+    store.append(
+        timestamp=0.1, channel=1, arb_id=0x100, dlc=2, direction='Rx',
+        is_extended=False, is_fd=False, data=b'\x01', frame_name='Can',
+        decoded=True,
+    )
+    store.append(
+        timestamp=0.2, channel=1, arb_id=0x20, dlc=2, direction='Rx',
+        is_extended=False, is_fd=False, data=b'\x02', frame_name='Lin',
+        decoded=True, bus=BusType.LIN,
+    )
+    store.seal()
+
+    assert store.channel_keys() == [(BusType.CAN, 1), (BusType.LIN, 1)]
+
+    can_mask = store.build_match_mask("", (BusType.CAN, 1))
+    lin_mask = store.build_match_mask("", (BusType.LIN, 1))
+    assert list(can_mask) == [True, False]
+    assert list(lin_mask) == [False, True]
+    store.close()
+
+
+def test_integer_channel_filter_still_means_can():
+    """Backward compatibility for callers that pass a bare channel number."""
+    from core.bus_types import BusType
+
+    store = RawFrameStore()
+    store.append(
+        timestamp=0.1, channel=2, arb_id=0x100, dlc=2, direction='Rx',
+        is_extended=False, is_fd=False, data=b'\x01', frame_name='Can',
+        decoded=True,
+    )
+    store.append(
+        timestamp=0.2, channel=2, arb_id=0x20, dlc=2, direction='Rx',
+        is_extended=False, is_fd=False, data=b'\x02', frame_name='Lin',
+        decoded=True, bus=BusType.LIN,
+    )
+    store.seal()
+
+    assert list(store.build_match_mask("", 2)) == [True, False]
+    store.close()

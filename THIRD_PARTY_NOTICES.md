@@ -7,8 +7,8 @@ Full licence texts for every component listed here are in the `licenses/` direct
 next to this file. Nothing in this document modifies or limits the terms of those
 licences; where this summary and a licence text disagree, the licence text governs.
 
-Generated for Osvanta Bus Log Analyzer v00.01.00 against the dependency set in `requirements.txt`.
-Last reviewed 2026-08-12.
+Generated for Osvanta Bus Log Analyzer v00.01.01 against the dependency set in `requirements.txt`.
+Last reviewed 2026-09-05.
 
 ---
 
@@ -80,8 +80,12 @@ https://github.com/osvanta/bus-log-analyzer/issues and it will be provided.
 | `et_xmlfile` | 2.0.0 | MIT | [link](https://foss.heptapod.net/openpyxl/et_xmlfile) |
 | `idna` | 3.11 | BSD-3-Clause | [link](https://github.com/kjd/idna) |
 | `isal` | 1.8.0 | PSF-2.0 | [link](https://github.com/pycompression/python-isal) |
+| `Jinja2` | 3.1.6 | BSD-3-Clause | [link](https://github.com/pallets/jinja) |
+| `lark` | 1.3.1 | MIT | [link](https://github.com/lark-parser/lark) |
+| `ldfparser` | 0.26.0 | MIT | [link](https://github.com/c4deszes/ldfparser) |
 | `lxml` | 6.0.4 | BSD-3-Clause | [link](https://lxml.de/) |
 | `lz4` | 4.4.5 | BSD-3-Clause | [link](https://github.com/python-lz4/python-lz4) |
+| `MarkupSafe` | 3.0.3 | BSD-3-Clause | [link](https://github.com/pallets/markupsafe) |
 | `numexpr` | 2.14.1 | MIT | [link](https://github.com/pydata/numexpr) |
 | `numpy` | 2.2.6 | BSD-3-Clause | [link](https://numpy.org) |
 | `openpyxl` | 3.1.5 | MIT | [link](https://openpyxl.readthedocs.io) |

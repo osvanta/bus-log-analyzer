@@ -1,0 +1,11 @@
+VERSION "Osvanta Bus Log Analyzer test fixture"
+
+NS_ :
+
+BS_:
+
+BU_: ECU
+
+BO_ 32 CanLow: 8 ECU
+ SG_ CanLowValue : 0|16@1+ (1,0) [0|65535] "" ECU
+

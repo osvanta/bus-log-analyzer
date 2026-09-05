@@ -13,7 +13,12 @@ import numpy as np
 from core.readers.mdf_can_reader import MDFCANReader
 from core.readers.mdf_reader import LazyTextValues, MDFReader
 from core.load_worker import LoadWorker
+from core.bus_types import BusType
 from core.signal_store import SignalStore
+
+
+CAN1 = (BusType.CAN, 1)
+CAN2 = (BusType.CAN, 2)
 
 
 class _FakeMF4Reader:
@@ -118,7 +123,7 @@ def test_asammdf_metadata_preserves_channel_message_and_id():
         extracted, 0, "VehicleSpeed", channel_config=None
     )
 
-    assert result == (2, "VehicleStatus", 0x18FEF100)
+    assert result == (CAN2, "VehicleStatus", 0x18FEF100)
 
 
 def test_lazy_text_values_preserve_display_labels_without_eager_list():
@@ -237,10 +242,10 @@ def test_signal_metadata_callback_precedes_sample_array_read(tmp_path, monkeypat
     assert events[0] == "extract"
     assert events[1][0] == "metadata"
     assert events[1][1] == [
-        (1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")
+        (CAN1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")
     ]
     assert events[2] == "select"
-    assert rows[0][0] == (1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")
+    assert rows[0][0] == (CAN1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")
 
 
 def test_mixed_mdf_with_dbc_keeps_native_signals_and_appends_can_decode(
@@ -342,11 +347,11 @@ def test_mixed_mdf_with_dbc_keeps_native_signals_and_appends_can_decode(
     ))
 
     native_meta = (None, "RecorderDecoded", 0, "RecorderSpeed", "rpm")
-    dbc_meta = (1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")
+    dbc_meta = (CAN1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")
     assert metadata == [native_meta, dbc_meta]
     assert [row[0] for row in rows] == [native_meta, dbc_meta]
     assert events == ["extract", "native-select", "dbc-select"]
-    assert reader.dbc_trace_message_names == {(1, 0x123): "VehicleStatus"}
+    assert reader.dbc_trace_message_names == {(CAN1, 0x123): "VehicleStatus"}
 
 
 def test_mdf_composite_channel_is_emitted_as_one_raw_array_batch():
@@ -395,7 +400,7 @@ def test_mdf_composite_channel_is_emitted_as_one_raw_array_batch():
 
 
 def test_bus_mf4_native_arrays_populate_can_trace_in_bulk(tmp_path):
-    metadata = [(1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")]
+    metadata = [(CAN1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h")]
 
     class _Reader:
         source_description = "MF4 bus log + DBC"
@@ -453,7 +458,7 @@ def test_bus_mf4_native_arrays_populate_can_trace_in_bulk(tmp_path):
 
 def test_tree_update_preserves_nested_integer_key_payload(tmp_path):
     worker = LoadWorker(tmp_path / "bus.mf4")
-    payload = {1: {"VehicleStatus": ["VehicleSpeed"]}}
+    payload = {CAN1: {"VehicleStatus": ["VehicleSpeed"]}}
     received = []
 
     worker.tree_update.connect(received.append)
@@ -466,8 +471,8 @@ def test_bus_mf4_bulk_handoff_avoids_incremental_progress_and_duplicate_tree(
     tmp_path,
 ):
     metadata = [
-        (1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h"),
-        (1, "VehicleStatus", 0x123, "DriveState", ""),
+        (CAN1, "VehicleStatus", 0x123, "VehicleSpeed", "km/h"),
+        (CAN1, "VehicleStatus", 0x123, "DriveState", ""),
     ]
 
     class _Reader:
@@ -498,7 +503,7 @@ def test_bus_mf4_bulk_handoff_avoids_incremental_progress_and_duplicate_tree(
 
     assert len(tree_payloads) == 1
     assert tree_payloads[0] == {
-        1: {"VehicleStatus": ["VehicleSpeed", "DriveState"]}
+        CAN1: {"VehicleStatus": ["VehicleSpeed", "DriveState"]}
     }
     assert len(partial_updates) == 1
     assert not any(message.startswith("Imported ") for message in progress_messages)
@@ -536,7 +541,7 @@ def test_bus_mf4_replaces_metadata_tree_when_an_array_is_empty(tmp_path):
     worker._run_mdf_bus_arrays(_Reader(), store)
 
     assert len(tree_payloads) == 2
-    assert tree_payloads[-1] == {1: {"VehicleStatus": ["VehicleSpeed"]}}
+    assert tree_payloads[-1] == {CAN1: {"VehicleStatus": ["VehicleSpeed"]}}
 
 
 def test_predecoded_mdf_publishes_metadata_before_one_global_array_batch(

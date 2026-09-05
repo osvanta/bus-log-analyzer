@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from core.bus_types import BusType
+
 import threading
 import time
 from contextlib import contextmanager
@@ -374,8 +376,8 @@ def test_dbc_manager_records_databases_it_cannot_read(qapp, tmp_path):
     # which is where the unreadable database is noticed.
     dlg = DBCManagerDialog(
         channel_config=ChannelConfig.from_single_dbc(str(broken_dbc)),
-        channels_in_file=[1],
-        ids_per_channel={1: {0x100}},
+        channels_in_file=[(BusType.CAN, 1)],
+        ids_per_channel={(BusType.CAN, 1): {0x100}},
     )
     assert str(broken_dbc) in dlg.load_errors()
     dlg.deleteLater()
@@ -407,6 +409,9 @@ def test_unreadable_database_auto_launches_the_debug_report(
 
         def load_errors(self):
             return {str(broken_dbc): "Failed to load database file"}
+
+        def compatibility_warnings(self):
+            return []
 
     monkeypatch.setattr("gui.main_window.DBCManagerDialog", _AcceptingDialog)
     window = _prepared_window(monkeypatch, measurement)

@@ -17,6 +17,8 @@ tests are skipped rather than erroring out.
 """
 from __future__ import annotations
 
+from core.bus_types import BusType
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -127,7 +129,9 @@ def test_save_writes_measurement_path_and_legacy_blf_path(window, monkeypatch, t
 def test_save_preserves_channel_config(window, monkeypatch, tmp_path, sample_dbc_path):
     from core.channel_config import ChannelConfig
     window.measurement_path = str(tmp_path / "sample.mf4")
-    window.channel_config = ChannelConfig(name="Truck", channels={1: str(sample_dbc_path)})
+    window.channel_config = ChannelConfig(
+        name="Truck", channels={(BusType.CAN, 1): str(sample_dbc_path)}
+    )
 
     out = tmp_path / "config.json"
     _mock_save_dialog(monkeypatch, out)
@@ -135,7 +139,8 @@ def test_save_preserves_channel_config(window, monkeypatch, tmp_path, sample_dbc
 
     data = json.loads(out.read_text())
     assert data['channel_config']['name'] == 'Truck'
-    assert data['channel_config']['channels']['1'] == str(sample_dbc_path)
+    # Bus-prefixed key, matching the .osvanta_ch encoding.
+    assert data['channel_config']['channels']['CAN:1'] == str(sample_dbc_path)
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +225,7 @@ def test_mixed_mdf_notice_explains_decoded_first_loading(window, monkeypatch, tm
     title, message = QMessageBox.information.call_args[0][1:]
     assert title == "Mixed MDF content detected"
     assert "list the existing decoded signals first" in message
-    assert "assign a DBC or ARXML" in message
+    assert "assign a DBC, ARXML or LDF" in message
     assert "list both" in message
 
 

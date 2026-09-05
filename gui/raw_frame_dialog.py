@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from core.bus_types import channel_label
 from core.raw_frame_store import RawFrameStore
 
 _WINDOW = 5_000
@@ -79,12 +80,10 @@ class RawFrameDialog(QDialog):
 
         self.channel_combo = QComboBox()
         self.channel_combo.addItem('All Channels', None)
-        chs_seen = sorted(
-            {int(c) for c in raw_store.channels if c != 255},
-            key=lambda x: x,
-        )
-        for ch in chs_seen:
-            self.channel_combo.addItem(f'CAN {ch}', ch)
+        # Bus-tagged: CAN 1 and LIN 1 are different channels that happen to
+        # share a number, so filtering on the number alone would mix them.
+        for key in raw_store.channel_keys():
+            self.channel_combo.addItem(channel_label(key), key)
 
         self.expand_btn   = QPushButton('Expand All')
         self.collapse_btn = QPushButton('Collapse All')
@@ -292,7 +291,7 @@ class RawFrameDialog(QDialog):
 
         top_items: list[QTreeWidgetItem] = []
         for rec in records:
-            ch_text = f'CAN {rec.channel}' if rec.channel is not None else 'CAN ?'
+            ch_text = channel_label(rec.channel_key)
             id_text = f'{rec.arbitration_id:X}'
             data_hex = ' '.join(f'{b:02X}' for b in rec.data[:rec.dlc])
 
@@ -372,7 +371,7 @@ class RawFrameDialog(QDialog):
         # the single all-channels decoder set at load time.
         channel_config = getattr(self._raw_store, 'channel_config', None)
         if channel_config is not None:
-            decoder = channel_config.decoder_for(rec.channel)
+            decoder = channel_config.decoder_for(rec.bus, rec.channel)
         else:
             decoder = getattr(self._raw_store, 'decoder', None)
 

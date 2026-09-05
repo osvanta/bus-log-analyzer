@@ -5,7 +5,7 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-On-disk raw CAN frame store.
+On-disk raw bus frame store (CAN and LIN).
 
 Design goals
 ------------
@@ -22,17 +22,27 @@ Memory layout (in-process)
 Per frame, 18 bytes total:
     timestamps  float64  8 B   normalised to t=0
     channels    uint8    1 B   physical channel (1-indexed; 255 = unknown)
-    arb_ids     uint32   4 B   CAN arbitration ID
+    arb_ids     uint32   4 B   CAN arbitration ID / LIN frame ID
     dlcs        uint8    1 B   data length code
     directions  uint8    1 B   0=Rx, 1=Tx, 2=Unknown
-    flags       uint8    1 B   bit0=is_extended, bit1=is_fd, bit2=decoded
+    flags       uint8    1 B   bit0=is_extended, bit1=is_fd, bit2=decoded,
+                               bit3=is_lin
     name_ids    uint16   2 B   index into name_table
 
 name_table: list[str]  — unique message names (~100–500 entries, negligible)
 
+Mixed CAN and LIN
+-----------------
+LIN frames share this store rather than getting one of their own. They fit the
+existing layout without widening it: a 6-bit LIN frame ID fits ``arb_ids``, a
+LIN payload is at most 8 bytes, and the bus is recorded in a single previously
+unused flag bit. Channel numbering is per-bus, so ``CAN 1`` and ``LIN 1`` are
+distinct rows distinguished by that bit — which is why the channel filter takes
+a ``(bus, number)`` key rather than a bare integer.
+
 Disk layout
 -----------
-Fixed 64-byte records (CAN + CAN-FD), one per frame.
+Fixed 64-byte records (CAN + CAN-FD), one per frame. Unchanged by LIN support.
 Random access: ``offset = frame_index * _DATA_BYTES``
 
 Filter interface
@@ -54,6 +64,8 @@ from typing import NamedTuple
 
 import numpy as np
 
+from core.bus_types import BusChannel, BusType, coerce_channel_key
+
 
 # ── Constants ─────────────────────────────────────────────────────────────
 _DATA_BYTES        = 64          # bytes of raw data stored per frame (CAN FD max)
@@ -62,6 +74,12 @@ _ZEROS_64          = b'\x00' * _DATA_BYTES   # module-level constant — no allo
 _LARGE_STORE_LIMIT = 500_000     # frames; disable data-hex search above this
 
 _DIR_STRINGS = ['Rx', 'Tx', 'Unknown']
+
+# Flag bits packed into the uint8 `flags` column.
+FLAG_EXTENDED = 1
+FLAG_FD       = 2
+FLAG_DECODED  = 4
+FLAG_LIN      = 8      # bus discriminator; absent means CAN
 
 
 class RawFrameRecord(NamedTuple):
@@ -76,6 +94,14 @@ class RawFrameRecord(NamedTuple):
     decoded:       bool
     data:          bytes          # up to _DATA_BYTES bytes
     frame_name:    str            # from name_table
+    # Defaulted so the field can be appended without breaking positional
+    # construction in existing callers and tests.
+    bus:           BusType = BusType.CAN
+
+    @property
+    def channel_key(self) -> BusChannel | None:
+        """The frame's bus-tagged channel identity, or None if unknown."""
+        return None if self.channel is None else (self.bus, self.channel)
 
 
 class RawFrameStore:
@@ -127,7 +153,8 @@ class RawFrameStore:
     def append(self, timestamp: float, channel: int | None,
                arb_id: int, dlc: int, direction: str,
                is_extended: bool, is_fd: bool,
-               data: bytes, frame_name: str, decoded: bool) -> None:
+               data: bytes, frame_name: str, decoded: bool,
+               bus: BusType = BusType.CAN) -> None:
         """Append one frame.  O(1) amortised — no per-frame Python objects."""
         self.timestamps.append(timestamp)
         self.channels.append(channel if channel is not None else 255)
@@ -138,9 +165,10 @@ class RawFrameStore:
             _DIR_TX if direction == 'Tx' else _DIR_UNK
         )
         flags = (
-            (1 if is_extended else 0) |
-            (2 if is_fd       else 0) |
-            (4 if decoded     else 0)
+            (FLAG_EXTENDED if is_extended else 0) |
+            (FLAG_FD       if is_fd       else 0) |
+            (FLAG_DECODED  if decoded     else 0) |
+            (FLAG_LIN      if bus is BusType.LIN else 0)
         )
         self.flags.append(flags)
 
@@ -180,7 +208,9 @@ class RawFrameStore:
         self.arb_ids.append(arb_id & 0xFFFF_FFFF)
         self.dlcs.append(min(dlc, 255))
         self.directions.append(direction_int)
-        self.flags.append((1 if is_extended else 0) | (2 if is_fd else 0))
+        self.flags.append(
+            (FLAG_EXTENDED if is_extended else 0) | (FLAG_FD if is_fd else 0)
+        )
         self.name_ids.append(0)   # always '' for 2-pass path
 
         # Zero-copy disk write: zero the buffer, copy data in — no bytes alloc.
@@ -367,9 +397,10 @@ class RawFrameStore:
             fl  = self.flags[idx]
             nid = self.name_ids[idx]
 
-            is_extended = bool(fl & 1)
-            is_fd       = bool(fl & 2)
-            decoded     = bool(fl & 4)
+            is_extended = bool(fl & FLAG_EXTENDED)
+            is_fd       = bool(fl & FLAG_FD)
+            decoded     = bool(fl & FLAG_DECODED)
+            bus         = BusType.LIN if fl & FLAG_LIN else BusType.CAN
             direction   = _DIR_STRINGS[min(self.directions[idx], 2)]
             name        = self.name_table[nid] if nid < len(self.name_table) else ''
 
@@ -381,6 +412,7 @@ class RawFrameStore:
                 dlc=dlc, direction=direction,
                 is_extended=is_extended, is_fd=is_fd,
                 decoded=decoded, data=data, frame_name=name,
+                bus=bus,
             ))
         return result
 
@@ -402,15 +434,43 @@ class RawFrameStore:
 
     # ── Vectorised filter ─────────────────────────────────────────────────
 
+    def channel_keys(self) -> list[BusChannel]:
+        """
+        Return the distinct bus-tagged channels present, in stable order.
+
+        Used to populate the trace dialog's channel filter. The bus comes from
+        the flag bit, so ``CAN 1`` and ``LIN 1`` list separately even though
+        both store the channel number 1.
+        """
+        from core.bus_types import sort_key
+
+        if not len(self.timestamps):
+            return []
+        chs = np.frombuffer(self.channels, dtype=np.uint8)
+        fls = np.frombuffer(self.flags, dtype=np.uint8)
+        # Pack (bus bit, channel) into one uint16 so np.unique does the
+        # reduction in C over the whole store in a single pass.
+        packed = chs.astype(np.uint16)
+        packed |= ((fls & np.uint8(FLAG_LIN)) != 0).astype(np.uint16) << np.uint16(8)
+        keys = [
+            (BusType.LIN if value >> 8 else BusType.CAN, value & 0xFF)
+            for value in (int(v) for v in np.unique(packed))
+            if (value & 0xFF) != 255
+        ]
+        return sorted(keys, key=sort_key)
+
     def build_match_mask(
         self,
         needle: str,
-        channel_filter: int | None,
+        channel_filter: BusChannel | int | None,
     ) -> np.ndarray | None:
         """
         Return a boolean numpy array of length len(self) indicating which
         frames pass the filter.  Returns None when all frames match (no
         filter active) — callers treat None as "full range, zero extra RAM".
+
+        *channel_filter* is a ``(bus, number)`` key: filtering on the number
+        alone would show LIN 1 frames when the user asked for CAN 1.
 
         Uses numpy vectorised ops on in-memory arrays — no disk access,
         no Python per-frame loop for the common cases.
@@ -427,9 +487,13 @@ class RawFrameStore:
 
         # ── Channel filter (vectorised uint8 comparison) ──────────────────
         if channel_filter is not None:
+            # A bare integer filter is read as CAN, matching the raw-CAN
+            # formats that have no bus dimension to give.
+            bus, number = coerce_channel_key(channel_filter)
             chs = np.frombuffer(self.channels, dtype=np.uint8)
-            target = channel_filter if channel_filter is not None else 255
-            mask &= (chs == target)
+            fls = np.frombuffer(self.flags, dtype=np.uint8)
+            is_lin = (fls & np.uint8(FLAG_LIN)) != 0
+            mask &= (chs == number) & (is_lin == (bus is BusType.LIN))
 
         # ── Text needle filter ────────────────────────────────────────────
         if needle:

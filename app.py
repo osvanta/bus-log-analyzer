@@ -13,7 +13,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 APP_NAME    = "Osvanta Bus Log Analyzer"
-APP_VERSION = "v00.01.00"
+APP_VERSION = "v00.01.01"
 
 
 def main() -> int:

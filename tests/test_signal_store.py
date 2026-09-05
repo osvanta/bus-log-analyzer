@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from core.models import DecodedSignalSample
+from core.bus_types import BusType
 from core.signal_store import SignalStore, SignalSeries
 
 
@@ -55,7 +56,7 @@ def test_add_samples_two_signals(signal_store):
 
 def test_add_samples_channel_tracked(signal_store):
     signal_store.add_samples([_sample(0.001)])
-    assert 1 in signal_store.channels
+    assert (BusType.CAN, 1) in signal_store.channels
 
 
 # ── add_samples_direct (hot path) ─────────────────────────────────────────
@@ -129,9 +130,9 @@ def test_numpy_values_correct(signal_store):
 def test_build_tree_payload_structure(signal_store):
     signal_store.add_samples([_sample(0.001)])
     tree = signal_store.build_tree_payload()
-    assert 1 in tree
-    assert "EngineControl" in tree[1]
-    assert "EngSpeed" in tree[1]["EngineControl"]
+    assert (BusType.CAN, 1) in tree
+    assert "EngineControl" in tree[(BusType.CAN, 1)]
+    assert "EngSpeed" in tree[(BusType.CAN, 1)]["EngineControl"]
 
 
 def test_build_tree_payload_clears_dirty_flag(signal_store):

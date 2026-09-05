@@ -59,11 +59,20 @@ from core.calculated_signals import (
 from core.load_worker import LoadWorker
 from core.readers import (
     ALL_SUFFIXES,
+    database_mandatory_for,
     dbc_required_for,
     has_mixed_mdf_content,
     prescan_measurement,
 )
-from core.channel_config import ChannelConfig, ALL_CHANNELS_KEY
+from core.bus_types import (
+    BusChannel,
+    BusType,
+    channel_label,
+    decode_key,
+    encode_key,
+    sort_key,
+)
+from core.channel_config import ChannelConfig
 from gui.dbc_manager import DBCManagerDialog
 from core.signal_store import SignalStore
 from gui.plot_widget import PlotPanel
@@ -109,7 +118,10 @@ class MainWindow(QMainWindow):
         ] = []
         self._calc_source_store: SignalStore | None = None
         # Pre-scan cache: (path, channels, ids_per_channel)
-        self._prescan_cache: tuple[str, list[int], dict[int, set[int]]] | None = None
+        self._prescan_cache: tuple[
+            str, list[BusChannel], dict[BusChannel, set[int]],
+            dict[BusChannel, dict[int, int]],
+        ] | None = None
         # Full RawFrameStore channel/ID summaries are built only on an explicit
         # Database Manager refresh, then reused while this decoded store lives.
         self._channel_data_cache: tuple[
@@ -519,13 +531,13 @@ QToolButton:pressed { background-color: #1a2a3a; }
         ))
         self._start_next_debug_inspection()
 
-    def _debug_observed_ids(self) -> dict[int, set[int]]:
+    def _debug_observed_ids(self) -> dict[BusChannel, set[int]]:
         if (
             self._prescan_cache is not None
             and self._prescan_cache[0] == self.measurement_path
         ):
             return {
-                int(channel): set(frame_ids)
+                channel: set(frame_ids)
                 for channel, frame_ids in self._prescan_cache[2].items()
             }
         return {}
@@ -691,6 +703,13 @@ QToolButton:pressed { background-color: #1a2a3a; }
         )
         if not path:
             return
+        # Refused here rather than at Load + Decode: a BLF with no CAN traffic
+        # cannot be decoded by any database, so letting it through would send
+        # the user through channel scanning and database assignment before
+        # telling them the file was never usable. Nothing has been mutated yet,
+        # so the currently loaded measurement survives.
+        if not self._accept_measurement_content(path):
+            return
         temporary_handoff = (
             self._capture_temporary_plot_configuration()
             or self._temporary_plot_handoff
@@ -714,11 +733,16 @@ QToolButton:pressed { background-color: #1a2a3a; }
             self._update_status('Scanning channels…', 'Reading measurement file header')
             QApplication.processEvents()
             try:
-                chs, ids = prescan_measurement(path, progress=self._log)
-                if chs:
-                    self._prescan_cache = (path, chs, ids)
-                    self._log(f'Pre-scan: found {len(chs)} channel(s): '
-                              f'{", ".join(f"CAN {c}" for c in chs)}')
+                scan = prescan_measurement(path, progress=self._log)
+                if scan:
+                    self._prescan_cache = (
+                        path, scan.channels, scan.ids_per_channel,
+                        scan.lengths_per_channel,
+                    )
+                    self._log(
+                        f'Pre-scan: found {len(scan.channels)} channel(s): '
+                        + ", ".join(channel_label(k) for k in scan.channels)
+                    )
             except Exception as exc:
                 self._log(f'Pre-scan warning: {exc}')
 
@@ -728,6 +752,35 @@ QToolButton:pressed { background-color: #1a2a3a; }
             'Measurement file selected', self._next_step_message()
         )
         self._queue_measurement_debug_inspection(path)
+
+    def _accept_measurement_content(self, path: str) -> bool:
+        """Return whether *path* holds traffic this build can decode.
+
+        Only BLF is checked, and only for the case that otherwise fails
+        silently: python-can skips object types it does not model instead of
+        rejecting them, so a Vector log made entirely of some other bus loads
+        with zero frames and no error at all. CAN and LIN both decode now, so
+        this refuses only a log that carries neither.
+        """
+        if Path(path).suffix.lower() != '.blf':
+            return True
+
+        from core.readers.blf_content import blf_bus_content
+        content = blf_bus_content(path)
+        if content.has_can or content.has_lin or content.truncated:
+            return True
+
+        self._log(
+            f'Refused {Path(path).name}: contains no CAN or LIN frames.'
+        )
+        QMessageBox.warning(
+            self,
+            'No decodable bus',
+            f"'{Path(path).name}' contains no CAN or LIN frames.\n\n"
+            "Vector logs can also carry FlexRay, Ethernet, MOST and other "
+            "buses, which this application does not decode.",
+        )
+        return False
 
     def _show_mixed_mdf_notice(
         self,
@@ -748,7 +801,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
             'This MDF file contains both existing decoded signals and raw CAN frames.\n\n'
             'Osvanta Bus Log Analyzer will always list the existing decoded signals first.\n\n'
             'To additionally decode the embedded CAN frames, open Database Manager and '
-            'assign a DBC or ARXML file. On the next load, the analyzer will list both the '
+            'assign a DBC, ARXML or LDF file. On the next load, the analyzer will list both the '
             'existing decoded signals and the database-decoded CAN signals, and CAN Trace '
             'will show the raw frames.'
         )
@@ -912,10 +965,10 @@ QToolButton:pressed { background-color: #1a2a3a; }
         is computed in bounded NumPy chunks and cached for later refreshes.
         """
         cached_path = None
-        cached_chs: list[int] = []
-        cached_ids: dict[int, set[int]] = {}
+        cached_chs: list[BusChannel] = []
+        cached_ids: dict[BusChannel, set[int]] = {}
         if self._prescan_cache is not None:
-            cached_path, cached_chs, cached_ids = self._prescan_cache
+            cached_path, cached_chs, cached_ids, _lengths = self._prescan_cache
 
         rfs = getattr(self.store, 'raw_frame_store', None) if self.store else None
         raw_count = len(rfs) if rfs is not None else 0
@@ -948,36 +1001,43 @@ QToolButton:pressed { background-color: #1a2a3a; }
         # The user can request complete ID coverage with Refresh Match.
         if not full_scan:
             channels = (
-                {int(ch) for ch in self.store.channels if ch is not None}
+                {ch for ch in self.store.channels if ch is not None}
                 if self.store is not None else set()
             )
-            return sorted(channels), {}
+            return sorted(channels, key=sort_key), {}
 
         if raw_count > 0:
             import numpy as np
+            from core.raw_frame_store import FLAG_LIN
             chs  = np.frombuffer(rfs.channels, dtype=np.uint8)
             aids = np.frombuffer(rfs.arb_ids,  dtype=np.uint32)
-            ids_per_channel: dict[int, set[int]] = {}
+            flgs = np.frombuffer(rfs.flags,    dtype=np.uint8)
+            ids_per_channel: dict[BusChannel, set[int]] = {}
 
-            # Packing (channel, arbitration ID) into uint64 lets np.unique do
+            # Packing (bus, channel, frame ID) into uint64 lets np.unique do
             # the per-frame reduction in C. Chunking bounds temporary memory
-            # even when the store contains tens of millions of frames.
+            # even when the store contains tens of millions of frames. The bus
+            # bit has to travel with the channel or CAN 1 and LIN 1 would be
+            # reduced together and their frame IDs would merge.
             chunk_size = 500_000
             for start in range(0, len(chs), chunk_size):
                 stop = min(start + chunk_size, len(chs))
                 chunk_channels = chs[start:stop]
+                chunk_is_lin = (flgs[start:stop] & np.uint8(FLAG_LIN)) != 0
                 packed = aids[start:stop].astype(np.uint64, copy=True)
                 packed |= chunk_channels.astype(np.uint64) << np.uint64(32)
+                packed |= chunk_is_lin.astype(np.uint64) << np.uint64(40)
                 for packed_value in np.unique(packed):
                     value = int(packed_value)
-                    channel = value >> 32
+                    channel = (value >> 32) & 0xFF
                     if channel == 255:
                         continue
-                    ids_per_channel.setdefault(channel, set()).add(
+                    bus = BusType.LIN if (value >> 40) & 1 else BusType.CAN
+                    ids_per_channel.setdefault((bus, channel), set()).add(
                         value & 0xFFFF_FFFF
                     )
 
-            channels_in_file = sorted(ids_per_channel)
+            channels_in_file = sorted(ids_per_channel, key=sort_key)
             assert cache_key is not None
             self._channel_data_cache = (
                 cache_key,
@@ -994,8 +1054,24 @@ QToolButton:pressed { background-color: #1a2a3a; }
             if cached_path == self.measurement_path else {}
         )
         if self.store is not None:
-            channels.update(int(ch) for ch in self.store.channels if ch is not None)
-        return sorted(channels), ids_per_channel
+            channels.update(ch for ch in self.store.channels if ch is not None)
+        return sorted(channels, key=sort_key), ids_per_channel
+
+    def _prescan_lengths(self) -> dict[BusChannel, dict[int, int]]:
+        """Observed frame lengths for the loaded measurement, if scanned.
+
+        Only the pre-scan collects these; the RawFrameStore summary does
+        not carry a length column. That is enough — LIN clusters cycle a
+        handful of frames, so every length is seen long before the
+        pre-scan limit, and an empty result simply falls back to matching
+        on frame IDs alone.
+        """
+        if (
+            self._prescan_cache is not None
+            and self._prescan_cache[0] == self.measurement_path
+        ):
+            return self._prescan_cache[3]
+        return {}
 
     def choose_dbc(self) -> None:
         """Open the DBC Manager dialog to assign DBCs to channels."""
@@ -1007,6 +1083,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
             ids_per_channel  = ids_per_channel,
             parent           = self,
             data_provider    = lambda: self._collect_channel_data(full_scan=True),
+            lengths_per_channel = self._prescan_lengths(),
         )
         if dlg.exec() != DBCManagerDialog.DialogCode.Accepted:
             return
@@ -1028,6 +1105,12 @@ QToolButton:pressed { background-color: #1a2a3a; }
             for path, message in dlg.load_errors().items()
             if path in set(self.channel_config.all_dbc_paths())
         }
+        # Advisory: an LDF on a CAN channel is almost certainly a
+        # misassignment. It is reported, not blocked.
+        for warning in dlg.compatibility_warnings():
+            self._log(f'WARNING: {warning}')
+            QMessageBox.warning(self, 'Database / bus mismatch', warning)
+
         if broken:
             names = ', '.join(Path(path).name for path in broken)
             self._log(f'ERROR: database could not be read: {names}')
@@ -1546,7 +1629,12 @@ QToolButton:pressed { background-color: #1a2a3a; }
             'dbc_path': self.dbc_path,  # legacy single-DBC
             'channel_config': {
                 'name': self.channel_config.name,
-                'channels': {str(k): v for k, v in self.channel_config.channels.items()},
+                # Same "CAN:1" encoding the .osvanta_ch file uses. str() on a
+                # (BusType, int) tuple would write an unparseable repr.
+                'channels': {
+                    encode_key(k): v
+                    for k, v in self.channel_config.channels.items()
+                },
             },
             'signals': [
                 {
@@ -1614,7 +1702,12 @@ QToolButton:pressed { background-color: #1a2a3a; }
         if cfg_ch and isinstance(cfg_ch, dict):
             self.channel_config = ChannelConfig(
                 name=cfg_ch.get('name', 'Unnamed'),
-                channels={int(k): v for k, v in cfg_ch.get('channels', {}).items()},
+                # decode_key also reads the bare integer keys written by
+                # versions that predate LIN support, as CAN.
+                channels={
+                    decode_key(k): v
+                    for k, v in cfg_ch.get('channels', {}).items()
+                },
             )
         elif cfg_dbc:
             self.channel_config = ChannelConfig.from_single_dbc(cfg_dbc)
@@ -1776,7 +1869,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
         if dbc_required_for(cfg_mpath) and self.channel_config.is_empty():
             QMessageBox.warning(
                 self, 'Incomplete configuration',
-                'This measurement file requires a database (DBC or ARXML), '
+                'This measurement file requires a database (DBC, ARXML or LDF), '
                 'but the configuration file does not contain one.'
             )
             return
@@ -1816,7 +1909,10 @@ QToolButton:pressed { background-color: #1a2a3a; }
             )
             if reply == QMessageBox.StandardButton.Yes:
                 self.choose_dbc()
-            if self.channel_config.is_empty():
+            # Only refuse to load when the reader genuinely cannot open the
+            # file. A raw-LIN MDF still opens without a database and shows its
+            # LIN_Frame columns, so declining here must not block it.
+            if self.channel_config.is_empty() and database_mandatory_for(mpath):
                 self._update_status('Waiting for input', self._next_step_message())
                 return
         if pending_plot_keys is None and self._temporary_plot_handoff:

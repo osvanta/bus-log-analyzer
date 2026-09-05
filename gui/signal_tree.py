@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.bus_types import channel_label, sort_key, store_key_prefix
+
 
 class SignalTree(QTreeWidget):
     MIME_TYPE = "application/x-blfviewer-signal-key"
@@ -160,9 +162,16 @@ class SignalTreeWidget(QWidget):
             self.tree.addTopLevelItem(generated_root)
             generated_root.setExpanded(True)
 
-        for channel, message_map in sorted(self._payload.items(), key=lambda x: (999999 if x[0] is None else x[0])):
-            channel_label = f"CH{channel}" if channel is not None else "CH?"
-            channel_item = QTreeWidgetItem([channel_label])
+        for channel, message_map in sorted(
+            self._payload.items(), key=lambda item: sort_key(item[0])
+        ):
+            # Display text and signal key deliberately differ. The key is
+            # persisted in saved configs and must keep its historical "CH1"
+            # form for CAN, while the tree shows the friendlier "CAN 1" so a
+            # measurement carrying both buses is readable.
+            display_text = channel_label(channel)
+            key_prefix = store_key_prefix(channel)
+            channel_item = QTreeWidgetItem([display_text])
             added_channel = False
             for message_name, signals in sorted(message_map.items()):
                 message_item = QTreeWidgetItem([message_name])
@@ -179,7 +188,7 @@ class SignalTreeWidget(QWidget):
                         elif p_low not in s_low:
                             continue
                     signal_item = QTreeWidgetItem([signal_name])
-                    signal_item.setData(0, Qt.ItemDataRole.UserRole, f"{channel_label}::{message_name}::{signal_name}")
+                    signal_item.setData(0, Qt.ItemDataRole.UserRole, f"{key_prefix}::{message_name}::{signal_name}")
                     signal_item.setToolTip(0, "Double-click, right-click, Ctrl/Shift-select, or drag this signal to the plot area")
                     message_item.addChild(signal_item)
                     added_message = True

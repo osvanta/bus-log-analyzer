@@ -77,6 +77,9 @@ htmlcov/
 # and intentionally NOT committed (already caught by *.blf / *.asc above).
 # sample.dbc is a hand-written text fixture that IS committed — un-exclude it.
 !tests/fixtures/sample.dbc
+# sample_lowid.dbc puts a CAN message at 0x20, inside the 6-bit LIN ID range,
+# so the CAN/LIN collision test has something to decode against.
+!tests/fixtures/sample_lowid.dbc
 # ── Secrets ───────────────────────────────────────────────────────────────
 *.pem
 *.key

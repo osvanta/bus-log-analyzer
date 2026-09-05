@@ -25,12 +25,12 @@ from core.readers.mdf_reader import MDFContentInfo
 # ── Missing-DBC errors ─────────────────────────────────────────────────────
 
 def test_blf_without_dbc_raises(blf_path):
-    with pytest.raises(ValueError, match="DBC or ARXML"):
+    with pytest.raises(ValueError, match="DBC, ARXML or LDF"):
         reader_factory(str(blf_path), dbc_path=None)
 
 
 def test_asc_without_dbc_raises(asc_path):
-    with pytest.raises(ValueError, match="DBC or ARXML"):
+    with pytest.raises(ValueError, match="DBC, ARXML or LDF"):
         reader_factory(str(asc_path), dbc_path=None)
 
 

@@ -140,6 +140,29 @@ def load_database_file(
     if not resolved_path.exists():
         raise DBCLoadError(f"Database file not found: {resolved_path}")
 
+    if resolved_path.suffix.lower() == ".ldf":
+        # cantools cannot read an LDF, so the file is converted to DBC text
+        # first. A LIN signal is laid out inside its frame exactly as a CAN
+        # signal is, so past this point there is nothing LIN-specific left to
+        # handle and the whole decode path applies unchanged.
+        from core.readers.db_format import ldf_to_dbc_string
+        try:
+            dbc_text = ldf_to_dbc_string(str(resolved_path))
+        except Exception as exc:
+            raise DBCLoadError(
+                f"Failed to load LDF file '{resolved_path}': {exc}"
+            ) from exc
+        try:
+            db = cantools.database.load_string(
+                dbc_text, database_format="dbc", strict=False
+            )
+        except Exception as exc:
+            raise DBCLoadError(
+                f"Failed to load LDF file '{resolved_path}': the converted "
+                f"database would not parse: {exc}"
+            ) from exc
+        return db, ["LDF converted to DBC via canmatrix/ldfparser."]
+
     load_messages: list[str] = []
     if strict_first:
         try:

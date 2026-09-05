@@ -9,7 +9,7 @@
 from pathlib import Path
 import os
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # PyInstaller executes spec files without defining __file__.
 # Resolve the project root from the current working directory, which is
@@ -51,6 +51,13 @@ if _licence_dir.is_dir():
 # falls back to the slow frame-by-frame reader.
 canmatrix_format_imports = collect_submodules("canmatrix.formats")
 
+# ldfparser ships its lark grammars and jinja2 templates as package *data*,
+# which PyInstaller does not collect automatically. Without these an LDF parses
+# correctly in a source run and fails only inside the frozen build — the worst
+# place to discover it. canmatrix's .ldf handler imports ldfparser at module
+# load, so a missing grammar takes LIN decoding down with it.
+datas += collect_data_files("ldfparser")
+
 hiddenimports = [
     "PySide6.QtCore",
     "PySide6.QtGui",
@@ -63,6 +70,10 @@ hiddenimports = [
     "cantools.database",
     "cantools.database.can.formats.arxml",
     "lxml",
+    # LIN database support: canmatrix.formats.ldf -> ldfparser -> lark/jinja2
+    "ldfparser",
+    "lark",
+    "jinja2",
 ] + canmatrix_format_imports
 
 block_cipher = None

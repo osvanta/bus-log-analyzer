@@ -15,9 +15,65 @@ from typing import Iterable, Iterator
 import can
 from can.io import blf as _blf
 
+from core.raw_frame_store import FLAG_EXTENDED, FLAG_FD, FLAG_LIN
+
+
+# ── LIN object types ──────────────────────────────────────────────────────
+#
+# python-can models CAN only, so these come from Vector's own BLF layout.
+#
+# LIN_MESSAGE2 is what CANoe has written for two decades and is verified
+# against 7,275 real objects: every field position below was read back from a
+# Vector LIN log and cross-checked against the LDF that describes it.
+#
+# LIN_MESSAGE is the pre-2005 layout. It is implemented from the documented
+# struct and has NOT been checked against a real file — no sample exists here.
+_LIN_MESSAGE = 11
+_LIN_MESSAGE2 = 57
+
+# LinMessage2 body offsets, measured from the end of the object header:
+#   0 sof(Q)  8 eventBaudrate(L)  12 channel(H)  14 reserved
+#   16 synchBreakLength(Q)  24 synchDelLength(Q)
+#   32 supplierId(H)  34 messageId(H)  36 nad  37 id  38 dlc  39 checksumModel
+#   40 databyteTimestamps[9]  112 data[8]  120 crc(H)  122 dir
+_LIN2_CHANNEL = 12
+_LIN2_ID = 37
+_LIN2_DLC = 38
+_LIN2_DATA = 112
+_LIN2_DIR = 122
+_LIN2_MIN_BODY = 123
+
+# LinMessage body offsets: 0 channel(H)  2 id  3 dlc  4 data[8]
+_LIN1_CHANNEL = 0
+_LIN1_ID = 2
+_LIN1_DLC = 3
+_LIN1_DATA = 4
+_LIN1_MIN_BODY = 12
+
+# Every other LIN object — checksum, receive, send and sync errors, sleep,
+# wakeup, schedule changes, spikes, long dominant signals. These are bus
+# events, not frames; counting them keeps the tally honest without putting
+# rows in the trace that carry no payload.
+_LIN_EVENT_TYPES = frozenset(
+    {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 42, 43, 46, 58, 59, 60, 61, 62, 63, 64}
+)
+
 
 class _PackedBLFReader(can.BLFReader):
-    """python-can BLF container reader that yields raw columns, not Messages."""
+    """python-can BLF container reader that yields raw columns, not Messages.
+
+    Extends python-can with LIN, which its own reader skips silently rather
+    than rejecting — the reason a LIN-only log used to read as an empty file.
+
+    Yields ``(timestamp, channel, arb_id, dlc, direction, is_extended, is_fd,
+    is_lin, payload)``. LIN channel numbers are used exactly as stored: BLF
+    holds them 1-indexed, and unlike the CAN path there is no python-can
+    ``channel - 1`` to undo.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.lin_event_objects = 0
 
     def _parse_data(self, data: bytes):
         unpack_base = _blf.OBJ_HEADER_BASE_STRUCT.unpack_from
@@ -71,21 +127,21 @@ class _PackedBLFReader(can.BLFReader):
                 yield (
                     timestamp, channel, can_id & 0x1FFF_FFFF, dlc,
                     1 if msg_flags & _blf.DIR else 0,
-                    bool(can_id & _blf.CAN_MSG_EXT), False, payload[:dlc],
+                    bool(can_id & _blf.CAN_MSG_EXT), False, False, payload[:dlc],
                 )
             elif obj_type == _blf.CAN_ERROR_EXT:
                 members = unpack_error(data, pos)
                 channel, dlc, can_id, payload = members[0], members[5], members[7], members[9]
                 yield (
                     timestamp, channel, can_id & 0x1FFF_FFFF, dlc, 0,
-                    bool(can_id & _blf.CAN_MSG_EXT), False, payload[:dlc],
+                    bool(can_id & _blf.CAN_MSG_EXT), False, False, payload[:dlc],
                 )
             elif obj_type == _blf.CAN_FD_MESSAGE:
                 channel, msg_flags, dlc, can_id, _, _, fd_flags, valid_bytes, payload = unpack_fd(data, pos)
                 yield (
                     timestamp, channel, can_id & 0x1FFF_FFFF, dlc2len(dlc),
                     1 if msg_flags & _blf.DIR else 0,
-                    bool(can_id & _blf.CAN_MSG_EXT), bool(fd_flags & 0x1),
+                    bool(can_id & _blf.CAN_MSG_EXT), bool(fd_flags & 0x1), False,
                     payload[:valid_bytes],
                 )
             elif obj_type == _blf.CAN_FD_MESSAGE_64:
@@ -104,9 +160,45 @@ class _PackedBLFReader(can.BLFReader):
                 yield (
                     timestamp, channel, can_id & 0x1FFF_FFFF, dlc2len(dlc),
                     1 if direction else 0,
-                    bool(can_id & _blf.CAN_MSG_EXT), bool(fd_flags & 0x1000),
+                    bool(can_id & _blf.CAN_MSG_EXT), bool(fd_flags & 0x1000), False,
                     payload,
                 )
+            elif obj_type == _LIN_MESSAGE2:
+                body = data[pos:next_pos]
+                if len(body) >= _LIN2_MIN_BODY:
+                    dlc = min(body[_LIN2_DLC], 8)
+                    direction = body[_LIN2_DIR]
+                    yield (
+                        timestamp,
+                        int.from_bytes(
+                            body[_LIN2_CHANNEL:_LIN2_CHANNEL + 2], "little"
+                        ),
+                        # LIN frame IDs are 6-bit. Some writers store the
+                        # protected ID, whose top two bits are parity — masking
+                        # makes both forms agree with the LDF.
+                        body[_LIN2_ID] & 0x3F,
+                        dlc,
+                        0 if direction == 0 else 1 if direction == 1 else 2,
+                        False, False, True,
+                        body[_LIN2_DATA:_LIN2_DATA + dlc],
+                    )
+            elif obj_type == _LIN_MESSAGE:
+                body = data[pos:next_pos]
+                if len(body) >= _LIN1_MIN_BODY:
+                    dlc = min(body[_LIN1_DLC], 8)
+                    yield (
+                        timestamp,
+                        int.from_bytes(
+                            body[_LIN1_CHANNEL:_LIN1_CHANNEL + 2], "little"
+                        ),
+                        body[_LIN1_ID] & 0x3F,
+                        dlc,
+                        2,      # the v1 object carries no direction field
+                        False, False, True,
+                        body[_LIN1_DATA:_LIN1_DATA + dlc],
+                    )
+            elif obj_type in _LIN_EVENT_TYPES:
+                self.lin_event_objects += 1
 
             pos = next_pos
 
@@ -121,8 +213,19 @@ class BLFReaderService:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        # LIN bus events (sleep, wakeup, errors, schedule changes) seen by
+        # the last iter_raw_batches() pass. They are not frames, so they
+        # are counted rather than stored.
+        self.lin_event_objects = 0
 
     def __iter__(self) -> Iterator[RawFrame]:
+        """Yield RawFrame objects. **CAN only** — python-can skips LIN.
+
+        LoadWorker always takes iter_raw_batches() for BLF, so this and
+        iter_raw_tuples() are unreachable fallbacks. Said here rather than
+        left implicit: a caller that reached them would lose every LIN
+        frame without an error.
+        """
         if not self.path.exists():
             raise BLFReadError(f"BLF file not found: {self.path}")
 
@@ -160,6 +263,8 @@ class BLFReaderService:
         * ``data``         — raw bytes-like from python-can (bytearray / None)
 
         Used by the 2-pass vectorised loader (Bottleneck 1 / Pass 1 hot loop).
+
+        **CAN only** — see :meth:`__iter__`.
         """
         if not self.path.exists():
             raise BLFReadError(f"BLF file not found: {self.path}")
@@ -211,7 +316,7 @@ class BLFReaderService:
             with _PackedBLFReader(str(self.path)) as reader:
                 for (
                     timestamp, channel, arb_id, dlc, direction,
-                    is_extended, is_fd, data,
+                    is_extended, is_fd, is_lin, data,
                 ) in reader:
                     if base_ts is None:
                         base_ts = timestamp
@@ -221,8 +326,13 @@ class BLFReaderService:
                     arb_ids.append(arb_id)
                     dlcs.append(min(dlc, 255))
                     directions.append(direction)
+                    # The flags byte *is* the RawFrameStore flags column, so
+                    # the bus dimension rides along without widening the batch
+                    # or changing a single dtype.
                     flags.append(
-                        (1 if is_extended else 0) | (2 if is_fd else 0)
+                        (FLAG_EXTENDED if is_extended else 0)
+                        | (FLAG_FD if is_fd else 0)
+                        | (FLAG_LIN if is_lin else 0)
                     )
                     offset = slot * 64
                     data_len = min(len(data), 64)
@@ -241,6 +351,8 @@ class BLFReaderService:
                         directions = bytearray()
                         flags = bytearray()
                         data_block = bytearray(batch_size * 64)
+
+                self.lin_event_objects = reader.lin_event_objects
 
             if timestamps:
                 yield (

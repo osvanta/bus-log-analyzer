@@ -13,12 +13,27 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
+from core.bus_types import (
+    BusChannel,
+    BusType,
+    channel_label,
+    coerce_channel_key,
+    sort_key,
+    store_key_prefix,
+)
 from core.models import RawFrame
 from core.models import DecodedSignalSample
 
+
+#: Normalise a channel value to a bus-tagged key. Re-exported from
+#: core.bus_types so callers that already import from the store keep working
+#: and there is only one definition of "a bare integer means CAN".
+as_channel_key = coerce_channel_key
+
+
 @dataclass(slots=True)
 class SignalSeries:
-    channel: int | None
+    channel: BusChannel | None
     message_name: str
     message_id: int
     signal_name: str
@@ -35,8 +50,10 @@ class SignalSeries:
 
     @property
     def key(self) -> str:
-        channel_text = f"CH{self.channel}" if self.channel is not None else "CH?"
-        return f"{channel_text}::{self.message_name}::{self.signal_name}"
+        return (
+            f"{store_key_prefix(self.channel)}"
+            f"::{self.message_name}::{self.signal_name}"
+        )
 
     @property
     def latest_value(self) -> object:
@@ -70,25 +87,25 @@ class SignalSeries:
 class SignalStore:
     def __init__(self) -> None:
         self._series_by_key: dict[str, SignalSeries] = {}
-        self._signals_by_channel_message: dict[int | None, dict[str, list[str]]] = (
+        self._signals_by_channel_message: dict[BusChannel | None, dict[str, list[str]]] = (
             defaultdict(lambda: defaultdict(list))
         )
         # Hot-path cache: (channel, msg_name) → ordered list of SignalSeries refs.
         # Built lazily on first decoded frame for each (channel, msg_name); reused
         # for every subsequent frame so the inner loop avoids string-key concat
         # and dict lookup per signal sample.
-        self._msg_series_cache: dict[tuple[int | None, str], list[SignalSeries]] = {}
+        self._msg_series_cache: dict[tuple[BusChannel | None, str], list[SignalSeries]] = {}
         # Per-(channel, msg_name, sig_name) choices map provided by the decoder(s).
         # An empty/missing entry means "no labels" — series.has_labels stays False
         # and raw_values is never appended to.
-        self._choices_lookup: dict[tuple[int | None, str, str], dict] = {}
+        self._choices_lookup: dict[tuple[BusChannel | None, str, str], dict] = {}
         self._tree_dirty: bool = True
         self.total_frames    = 0
         self.decoded_frames  = 0
         self.total_samples   = 0
-        self.channels: set[int | None] = set()
-        self.channel_frame_counts: dict[int | None, int] = defaultdict(int)
-        self.message_hits: dict[tuple[int | None, str], int] = defaultdict(int)
+        self.channels: set[BusChannel | None] = set()
+        self.channel_frame_counts: dict[BusChannel | None, int] = defaultdict(int)
+        self.message_hits: dict[tuple[BusChannel | None, str], int] = defaultdict(int)
         self.unmatched_frames = 0
         self.first_frame_ids: list[str] = []
         self.diagnostics_text: str = ""
@@ -103,25 +120,39 @@ class SignalStore:
 
     def set_choices_lookup(
         self,
-        lookup: dict[tuple[int | None, str, str], dict],
+        lookup: dict[tuple[BusChannel | int | None, str, str], dict],
     ) -> None:
         """
         Provide the per-signal DBC choices map keyed by
         ``(channel, message_name, signal_name) → {int_key: label}``.
         Used at series-creation time to decide whether to maintain
         ``raw_values`` (label-bearing signals only).
+
+        Channel keys are normalised on the way in. The raw-CAN loops build this
+        lookup from integer channels; without normalising, every lookup against
+        a bus-tagged key would miss and enum signals would silently lose their
+        text labels.
         """
-        self._choices_lookup = lookup
+        self._choices_lookup = {
+            (as_channel_key(channel), message_name, signal_name): choices
+            for (channel, message_name, signal_name), choices in lookup.items()
+        }
 
     # ── Tree-dirty bookkeeping ────────────────────────────────────────────
 
     def is_tree_dirty(self) -> bool:
         return self._tree_dirty
 
-    def note_frame(self, frame: RawFrame, decoded: bool = False) -> None:
+    def note_frame(
+        self,
+        frame: RawFrame,
+        decoded: bool = False,
+        bus: BusType = BusType.CAN,
+    ) -> None:
         self.total_frames += 1
-        self.channels.add(frame.channel)
-        self.channel_frame_counts[frame.channel] += 1
+        channel = as_channel_key(frame.channel, bus)
+        self.channels.add(channel)
+        self.channel_frame_counts[channel] += 1
         if not decoded:
             self.unmatched_frames += 1
         if len(self.first_frame_ids) < 20:
@@ -130,9 +161,9 @@ class SignalStore:
                 if (frame.is_extended_id or frame.arbitration_id > 0x7FF)
                 else f"0x{frame.arbitration_id:03X}"
             )
-            label = f"CH{frame.channel}" if frame.channel is not None else "CH?"
             self.first_frame_ids.append(
-                f"{label} | {id_hex} | DLC={frame.dlc} | {frame.direction}"
+                f"{store_key_prefix(channel)} | {id_hex} | "
+                f"DLC={frame.dlc} | {frame.direction}"
             )
 
     def add_samples(self, samples: Iterable[DecodedSignalSample]) -> None:
@@ -141,22 +172,23 @@ class SignalStore:
             self.decoded_frames  += 1
             self.unmatched_frames = max(0, self.unmatched_frames - 1)
         for sample in sample_list:
-            self.channels.add(sample.channel)
-            self.message_hits[(sample.channel, sample.message_name)] += 1
-            key = self._make_key(sample.channel, sample.message_name, sample.signal_name)
+            channel = as_channel_key(sample.channel)
+            self.channels.add(channel)
+            self.message_hits[(channel, sample.message_name)] += 1
+            key = self._make_key(channel, sample.message_name, sample.signal_name)
             if key not in self._series_by_key:
                 series = SignalSeries(
-                    channel=sample.channel,
+                    channel=channel,
                     message_name=sample.message_name,
                     message_id=sample.message_id,
                     signal_name=sample.signal_name,
                     unit=sample.unit,
                     has_labels=bool(self._choices_lookup.get(
-                        (sample.channel, sample.message_name, sample.signal_name)
+                        (channel, sample.message_name, sample.signal_name)
                     )),
                 )
                 self._series_by_key[key] = series
-                sigs = self._signals_by_channel_message[sample.channel][sample.message_name]
+                sigs = self._signals_by_channel_message[channel][sample.message_name]
                 if sample.signal_name not in sigs:
                     sigs.append(sample.signal_name)
                 self._tree_dirty = True
@@ -190,7 +222,7 @@ class SignalStore:
         self.unmatched_frames = max(0, self.unmatched_frames - 1)
 
         first = samples[0]
-        channel  = first.channel
+        channel  = as_channel_key(first.channel)
         msg_name = first.message_name
         msg_key  = (channel, msg_name)
 
@@ -213,7 +245,7 @@ class SignalStore:
 
     def _build_msg_cache(
         self,
-        channel: int | None,
+        channel: BusChannel | None,
         msg_name: str,
         samples: list,
     ) -> list[SignalSeries]:
@@ -247,7 +279,7 @@ class SignalStore:
 
     def add_series_bulk(
         self,
-        channel: int | None,
+        channel: BusChannel | int | None,
         message_name: str,
         message_id: int,
         signal_name: str,
@@ -279,6 +311,7 @@ class SignalStore:
         if len(timestamps) == 0:
             return
 
+        channel = as_channel_key(channel)
         key = self._make_key(channel, message_name, signal_name)
         if key not in self._series_by_key:
             series = SignalSeries(
@@ -352,9 +385,9 @@ class SignalStore:
     def all_keys(self) -> list[str]:
         return sorted(self._series_by_key.keys())
 
-    def build_tree_payload(self) -> dict[int | None, dict[str, list[str]]]:
-        payload: dict[int | None, dict[str, list[str]]] = {}
-        for channel in sorted(self.channels, key=lambda x: (999999 if x is None else x)):
+    def build_tree_payload(self) -> dict[BusChannel | None, dict[str, list[str]]]:
+        payload: dict[BusChannel | None, dict[str, list[str]]] = {}
+        for channel in sorted(self.channels, key=sort_key):
             payload[channel] = {}
         for channel, message_map in self._signals_by_channel_message.items():
             payload.setdefault(channel, {})
@@ -367,9 +400,9 @@ class SignalStore:
     def channel_summary_text(self) -> str:
         if not self.channels:
             return 'Channels: 0'
-        ordered = sorted(self.channels, key=lambda x: (999999 if x is None else x))
+        ordered = sorted(self.channels, key=sort_key)
         parts = [
-            f"{'CH' + str(ch) if ch is not None else 'CH?'} "
+            f"{channel_label(ch)} "
             f"({self.channel_frame_counts.get(ch, 0):,} frames)"
             for ch in ordered
         ]
@@ -379,6 +412,8 @@ class SignalStore:
         return f"Channels: {len(ordered)} | " + ', '.join(parts) + raw_note
 
     @staticmethod
-    def _make_key(channel: int | None, message_name: str, signal_name: str) -> str:
-        channel_text = f"CH{channel}" if channel is not None else "CH?"
-        return f"{channel_text}::{message_name}::{signal_name}"
+    def _make_key(
+        channel: BusChannel | int | None, message_name: str, signal_name: str
+    ) -> str:
+        prefix = store_key_prefix(as_channel_key(channel))
+        return f"{prefix}::{message_name}::{signal_name}"

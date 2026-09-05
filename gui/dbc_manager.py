@@ -5,12 +5,16 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-DBC Manager dialog — assign DBC or ARXML database files to CAN channels.
+Database Manager dialog — assign DBC, ARXML or LDF database files to bus channels.
+
+Bus type is discovered from the measurement file, never chosen here: the
+dropdown lists the channels the file actually declares ("CAN 1", "LIN 1"), so a
+database can only ever be attached to a channel whose bus is already known.
 
 Layout:
 
     ┌──────────────────────────────────────────────────────────────────┐
-    │  DBC Manager                                              [Name: Truck ECU Setup] │
+    │  Database Manager                                         [Name: Truck ECU Setup] │
     ├─────────────────────┬──────────────────┬────────────────────────┤
     │  Database file      │  Assigned to     │  Match  (IDs in file)  │
     ├─────────────────────┼──────────────────┼────────────────────────┤
@@ -35,8 +39,17 @@ from PySide6.QtWidgets import (
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
-from core.channel_config import ChannelConfig, ALL_CHANNELS_KEY
-from core.dbc_decoder import load_database_file
+from core.bus_types import (
+    BusChannel,
+    BusType,
+    all_channels_key,
+    channel_label,
+    decode_key,
+    encode_key,
+    sort_key,
+)
+from core.channel_config import ChannelConfig
+from core.readers.db_format import compatibility_warning, database_message_lengths
 
 
 def _j1939_pgn(frame_id: int) -> int | None:
@@ -52,21 +65,17 @@ def _load_database_match_data(
     resolved_path: str,
     mtime_ns: int,
     file_size: int,
-) -> tuple[frozenset[int], dict[int, int]]:
-    """Parse match-only DBC metadata once per unchanged database file."""
+) -> tuple[frozenset[int], dict[int, int], dict[int, int]]:
+    """Parse match-only database metadata once per unchanged file."""
     # mtime_ns and file_size intentionally participate in the cache key.
     del mtime_ns, file_size
-    db, _load_messages = load_database_file(
-        resolved_path, strict_first=False
-    )
-    dbc_ids = frozenset(
-        int(message.frame_id) & 0x1FFFFFFF for message in db.messages
-    )
+    dbc_lengths = database_message_lengths(resolved_path)
+    dbc_ids = frozenset(dbc_lengths)
     dbc_pgn_by_id = {
         frame_id: pgn for frame_id in dbc_ids
         if (pgn := _j1939_pgn(frame_id)) is not None
     }
-    return dbc_ids, dbc_pgn_by_id
+    return dbc_ids, dbc_pgn_by_id, dbc_lengths
 
 
 class _DBCRow(QWidget):
@@ -75,8 +84,8 @@ class _DBCRow(QWidget):
     def __init__(
         self,
         dbc_path: str,
-        channels: list[int],          # available channel numbers from measurement
-        assigned_to: int,             # initially assigned channel
+        channels: list[BusChannel],   # bus-tagged channels from the measurement
+        assigned_to: BusChannel,      # initially assigned channel
         match_pct: float,             # 0.0–1.0 match quality
         match_text: str,              # e.g. "34 / 37 IDs"
         parent=None,
@@ -90,14 +99,37 @@ class _DBCRow(QWidget):
         name_lbl.setMinimumWidth(180)
         name_lbl.setMaximumWidth(260)
 
-        # Channel dropdown
+        # Channel dropdown. One "All <bus>" entry per bus present in the
+        # measurement, then that bus's concrete channels. The bus is shown
+        # but never chosen: it comes from what the file declares.
+        #
+        # Item data is the encoded "CAN:1" string, not the (bus, number) tuple.
+        # QComboBox.findData() compares wrapped Python objects by identity, so
+        # an equal-but-distinct tuple silently returns -1 and every row falls
+        # back to the first entry. A plain string round-trips through QVariant
+        # by value, which is what findData() needs.
         self.channel_combo = QComboBox()
-        self.channel_combo.addItem("All Channels", ALL_CHANNELS_KEY)
-        for ch in sorted(channels):
-            self.channel_combo.addItem(f"CAN {ch}", ch)
-        # Select initial assignment
-        idx = self.channel_combo.findData(assigned_to)
-        self.channel_combo.setCurrentIndex(max(0, idx))
+        # The assignment's own bus is always listed, even when the measurement
+        # declares no channel on it — a BLF pre-scan finds nothing at all when
+        # the log holds no CAN, and without this the only entry would be
+        # "All CAN", quietly re-homing an LDF onto CAN.
+        buses = sorted({bus for bus, _number in channels} | {assigned_to[0]})
+        for bus in buses:
+            fallback = all_channels_key(bus)
+            self.channel_combo.addItem(channel_label(fallback), encode_key(fallback))
+            for key in sorted(
+                (k for k in channels if k[0] == bus and k[1] != 0), key=sort_key
+            ):
+                self.channel_combo.addItem(channel_label(key), encode_key(key))
+        # Select initial assignment. A concrete channel the file never reported
+        # is added rather than dropped: falling back to index 0 would show an
+        # assignment the caller did not make, and it would be saved back.
+        encoded_assignment = encode_key(assigned_to)
+        idx = self.channel_combo.findData(encoded_assignment)
+        if idx < 0:
+            self.channel_combo.addItem(channel_label(assigned_to), encoded_assignment)
+            idx = self.channel_combo.count() - 1
+        self.channel_combo.setCurrentIndex(idx)
         self.channel_combo.setFixedWidth(130)
 
         # Match quality bar (stored as instance attrs for later refresh)
@@ -141,8 +173,9 @@ class _DBCRow(QWidget):
         row.addStretch()
         row.addWidget(rm_btn)
 
-    def assigned_channel(self) -> int:
-        return int(self.channel_combo.currentData())
+    def assigned_channel(self) -> BusChannel | None:
+        raw = self.channel_combo.currentData()
+        return decode_key(raw) if raw else None
 
     def update_match(self, pct: float, text: str) -> None:
         """Refresh the match quality bar and label."""
@@ -160,45 +193,51 @@ class _DBCRow(QWidget):
 
 class DBCManagerDialog(QDialog):
     """
-    DBC Manager — assign DBC files to CAN channels.
+    Database Manager — assign DBC, ARXML or LDF files to bus channels.
 
     Parameters
     ----------
     channel_config : ChannelConfig
         Current config (may be empty on first use).
-    channels_in_file : list[int]
-        Channel numbers seen in the currently loaded measurement.
-    ids_per_channel : dict[int, set[int]]
-        Arbitration IDs seen per channel — used to compute match quality.
+    channels_in_file : list[BusChannel]
+        Bus-tagged channels seen in the currently loaded measurement.
+    ids_per_channel : dict[BusChannel, set[int]]
+        Frame IDs seen per channel — used to compute match quality.
     parent : QWidget | None
     """
 
     def __init__(
         self,
         channel_config: ChannelConfig,
-        channels_in_file: list[int],
-        ids_per_channel: dict[int, set[int]],
+        channels_in_file: list[BusChannel],
+        ids_per_channel: dict[BusChannel, set[int]],
         parent=None,
         data_provider=None,
+        lengths_per_channel: dict[BusChannel, dict[int, int]] | None = None,
     ) -> None:
         """
         Parameters
         ----------
-        data_provider : callable() -> (list[int], dict[int, set[int]]) | None
+        data_provider : callable() -> (list[BusChannel], dict[BusChannel, set[int]]) | None
             Called by Refresh Match to get fresh channel/ID data from the
             main window.  Allows refresh to work even if the measurement
             was decoded after the dialog was opened.
         """
         super().__init__(parent)
-        self.setWindowTitle("DBC Manager — Channel Configuration")
+        self.setWindowTitle("Database Manager — Channel Configuration")
         self.setMinimumWidth(720)
         self.resize(760, 380)
 
-        self._channels_in_file = sorted(channels_in_file) if channels_in_file else []
+        self._channels_in_file = (
+            sorted(channels_in_file, key=sort_key) if channels_in_file else []
+        )
         self._ids_per_channel  = ids_per_channel
+        self._lengths_per_channel = lengths_per_channel or {}
         self._data_provider    = data_provider  # callable for refresh
         self._rows: list[_DBCRow] = []
-        self._file_match_data = self._normalise_file_match_data(ids_per_channel)
+        self._file_match_data = self._normalise_file_match_data(
+            ids_per_channel, self._lengths_per_channel
+        )
         # Databases that would not parse, keyed by path. _compute_match is
         # the only place that tries to read them, so it is where this is
         # filled in; the caller uses it to launch the forensic report.
@@ -291,7 +330,9 @@ class DBCManagerDialog(QDialog):
 
     def _update_channel_info(self) -> None:
         if self._channels_in_file:
-            ch_list = ", ".join(f"CAN {c}" for c in self._channels_in_file)
+            ch_list = ", ".join(
+                channel_label(key) for key in self._channels_in_file
+            )
             self._channel_info.setText(
                 f"Channels detected in measurement: {ch_list}"
             )
@@ -316,16 +357,36 @@ class DBCManagerDialog(QDialog):
         """Return the ChannelConfig as configured by the user."""
         cfg = ChannelConfig(name=self._name_edit.text().strip() or "Unnamed")
         for row in self._rows:
-            ch  = row.assigned_channel()
-            path = row.dbc_path
+            key = row.assigned_channel()
+            if key is None:
+                continue
             # Last assignment wins if two rows assign the same channel
-            cfg.channels[ch] = path
+            cfg.channels[key] = row.dbc_path
         return cfg
+
+    def compatibility_warnings(self) -> list[str]:
+        """
+        Return warnings for databases that look wrong for their bus.
+
+        Advisory only — an LDF on a CAN channel is flagged, a DBC on a LIN
+        channel is not, because LIN layouts are routinely shipped as DBC.
+        """
+        warnings = []
+        for row in self._rows:
+            key = row.assigned_channel()
+            if key is None:
+                continue
+            message = compatibility_warning(row.dbc_path, key[0])
+            if message:
+                warnings.append(message)
+        return warnings
 
     # ── Row management ────────────────────────────────────────────────────
 
-    def _add_row(self, dbc_path: str, preferred_channel: int | None = None) -> None:
-        """Add a DBC row, compute match quality, auto-suggest channel."""
+    def _add_row(
+        self, dbc_path: str, preferred_channel: BusChannel | None = None
+    ) -> None:
+        """Add a database row, compute match quality, auto-suggest channel."""
         pct, text, best_ch = self._compute_match(dbc_path)
 
         # Use preferred_channel if given, otherwise auto-suggest best match
@@ -361,19 +422,30 @@ class DBCManagerDialog(QDialog):
                 fresh_channels, fresh_ids = self._data_provider()
                 if fresh_channels:
                     self._ids_per_channel = fresh_ids
+                    # Lengths still come from the pre-scan: the refreshed
+                    # summary carries IDs only, and dropping them here would
+                    # quietly return LIN scoring to frame-IDs-alone in the one
+                    # flow a user reaches for to fix a bad assignment.
                     self._file_match_data = self._normalise_file_match_data(
-                        fresh_ids
+                        fresh_ids, self._lengths_per_channel
                     )
                     # Update channel dropdowns to include any newly seen channels
-                    new_chs = sorted(set(fresh_channels) - set(self._channels_in_file))
+                    new_chs = sorted(
+                        set(fresh_channels) - set(self._channels_in_file),
+                        key=sort_key,
+                    )
                     if new_chs:
                         self._channels_in_file = sorted(
-                            set(self._channels_in_file) | set(new_chs)
+                            set(self._channels_in_file) | set(new_chs),
+                            key=sort_key,
                         )
                         for row in self._rows:
-                            for ch in new_chs:
-                                if row.channel_combo.findData(ch) < 0:
-                                    row.channel_combo.addItem(f'CAN {ch}', ch)
+                            for key in new_chs:
+                                encoded = encode_key(key)
+                                if row.channel_combo.findData(encoded) < 0:
+                                    row.channel_combo.addItem(
+                                        channel_label(key), encoded
+                                    )
                         self._update_channel_info()
             except Exception:
                 pass
@@ -391,12 +463,12 @@ class DBCManagerDialog(QDialog):
             pct, text, best_ch = self._compute_match(row.dbc_path)
             row.update_match(pct, text)
             # Auto-suggest best channel if user hasn't changed it
-            if row.assigned_channel() == ALL_CHANNELS_KEY:
-                idx = row.channel_combo.findData(best_ch)
+            if row.assigned_channel() == all_channels_key(BusType.CAN):
+                idx = row.channel_combo.findData(encode_key(best_ch))
                 if idx >= 0:
                     row.channel_combo.setCurrentIndex(idx)
 
-    def _compute_match(self, dbc_path: str) -> tuple[float, str, int]:
+    def _compute_match(self, dbc_path: str) -> tuple[float, str, BusChannel]:
         """
         Return (pct, label_text, best_channel_int) for a DBC file.
 
@@ -409,32 +481,47 @@ class DBCManagerDialog(QDialog):
         This gives realistic match percentages for J1939 files where ECUs
         broadcast on different source addresses than the DBC template value.
         """
+        # An LDF describes a LIN cluster, so its natural home is All LIN when
+        # nothing better matches. Everything else defaults to All CAN.
+        default_ch = all_channels_key(
+            BusType.LIN if Path(dbc_path).suffix.lower() == '.ldf'
+            else BusType.CAN
+        )
         try:
             path = Path(dbc_path).resolve()
             stat = path.stat()
-            dbc_ids, dbc_pgn_by_id = _load_database_match_data(
+            dbc_ids, dbc_pgn_by_id, dbc_lengths = _load_database_match_data(
                 str(path), stat.st_mtime_ns, stat.st_size
             )
         except Exception as exc:
             self._load_errors[dbc_path] = str(exc)
-            return 0.0, "can't read database", ALL_CHANNELS_KEY
+            return 0.0, "can't read database", default_ch
         self._load_errors.pop(dbc_path, None)
 
         if not dbc_ids or not self._ids_per_channel:
-            return 0.0, "0 / 0 IDs", ALL_CHANNELS_KEY
+            return 0.0, "0 / 0 IDs", default_ch
 
-        best_ch    = ALL_CHANNELS_KEY
+        best_ch    = default_ch
         best_count = 0
         best_total = len(dbc_ids)
 
-        for ch, (file_ids_norm, file_pgns) in self._file_match_data.items():
+        for ch, (
+            file_ids_norm, file_pgns, file_lengths,
+        ) in self._file_match_data.items():
 
-            # Pass 1: exact ID match
-            exact_hits = len(dbc_ids & file_ids_norm)
+            # Pass 1: exact ID match, and where the measurement reported
+            # frame lengths, the length has to agree too.
+            matched_ids = dbc_ids & file_ids_norm
+            if file_lengths:
+                matched_ids = {
+                    frame_id for frame_id in matched_ids
+                    if file_lengths.get(frame_id) == dbc_lengths.get(frame_id)
+                }
+            exact_hits = len(matched_ids)
 
             # Pass 2: PGN fallback for IDs that didn't match exactly
             unmatched_dbc_pgns = {
-                dbc_pgn_by_id[fid] for fid in (dbc_ids - file_ids_norm)
+                dbc_pgn_by_id[fid] for fid in (dbc_ids - matched_ids)
                 if fid in dbc_pgn_by_id
             }
             pgn_hits = len(unmatched_dbc_pgns & file_pgns)
@@ -450,17 +537,37 @@ class DBCManagerDialog(QDialog):
 
     @staticmethod
     def _normalise_file_match_data(
-        ids_per_channel: dict[int, set[int]],
-    ) -> dict[int, tuple[frozenset[int], frozenset[int]]]:
-        """Prepare measurement ID/PGN sets once for all configured DBC rows."""
-        result: dict[int, tuple[frozenset[int], frozenset[int]]] = {}
+        ids_per_channel: dict[BusChannel, set[int]],
+        lengths_per_channel: dict[BusChannel, dict[int, int]] | None = None,
+    ) -> dict[BusChannel, tuple[frozenset[int], frozenset[int], dict[int, int]]]:
+        """
+        Prepare measurement ID/PGN/length data for all configured database rows.
+
+        The J1939 PGN pass is inert for LIN by construction: ``_j1939_pgn``
+        only fires above 0x7FF and LIN frame IDs are 6-bit.
+
+        Frame lengths are what tell two LIN clusters apart. They all number
+        their frames from 0, so two unrelated LDFs routinely declare the same
+        IDs and score 100% against the wrong channel — in the CANoe sample,
+        Door.ldf matches every ID on both LIN channels and only the lengths
+        say which one it describes. The lengths dict is empty for CAN, where
+        the pre-scan does not collect them, so CAN scoring is untouched.
+        """
+        lengths_per_channel = lengths_per_channel or {}
+        result: dict[
+            BusChannel, tuple[frozenset[int], frozenset[int], dict[int, int]]
+        ] = {}
         for channel, file_ids in ids_per_channel.items():
             normalised = frozenset(fid & 0x1FFFFFFF for fid in file_ids)
             pgns = frozenset(
                 pgn for frame_id in normalised
                 if (pgn := _j1939_pgn(frame_id)) is not None
             )
-            result[channel] = (normalised, pgns)
+            lengths = {
+                frame_id & 0x1FFFFFFF: length
+                for frame_id, length in lengths_per_channel.get(channel, {}).items()
+            }
+            result[channel] = (normalised, pgns, lengths)
         return result
 
     # ── Slots ─────────────────────────────────────────────────────────────
@@ -468,7 +575,8 @@ class DBCManagerDialog(QDialog):
     def _on_add_dbc(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Add database file(s)", "",
-            "CAN databases (*.dbc *.arxml);;DBC files (*.dbc);;ARXML files (*.arxml);;All files (*)"
+            "Databases (*.dbc *.arxml *.ldf);;DBC files (*.dbc);;"
+            "ARXML files (*.arxml);;LDF files (*.ldf);;All files (*)"
         )
         for path in paths:
             self._add_row(path)

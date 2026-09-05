@@ -1,0 +1,61 @@
+/* Second LIN cluster for the Osvanta Bus Log Analyzer test suite.
+ *
+ * Deliberately uses the SAME frame IDs as sample.ldf with the OPPOSITE
+ * lengths:
+ *
+ *   0x20  Latch      1 byte   (sample.ldf: 2 bytes)
+ *   0x21  Seat       2 bytes  (sample.ldf: 1 byte)
+ *
+ * Frame IDs alone therefore cannot tell the two databases apart — matching
+ * has to consider frame length as well. That is not a contrived case: in the
+ * real CANoe LIN log both clusters use 0x00-0x06 and only the lengths differ,
+ * and an ID-only match sends the wrong LDF to the wrong channel.
+ */
+LIN_description_file;
+LIN_protocol_version = "2.1";
+LIN_language_version = "2.1";
+LIN_speed = 19.2 kbps;
+
+Nodes {
+  Master: AltMaster, 5 ms, 0.1 ms;
+  Slaves: AltNode;
+}
+
+Signals {
+  LatchState: 8, 0, AltMaster, AltNode;
+  SeatPos: 8, 0, AltNode, AltMaster;
+  SeatHeat: 4, 0, AltNode, AltMaster;
+}
+
+Frames {
+  Latch: 0x20, AltMaster, 1 {
+    LatchState, 0;
+  }
+  Seat: 0x21, AltNode, 2 {
+    SeatPos, 0;
+    SeatHeat, 8;
+  }
+}
+
+Node_attributes {
+  AltNode {
+    LIN_protocol = "2.1";
+    configured_NAD = 0x02;
+    initial_NAD = 0x02;
+    product_id = 0x0003, 0x0004, 0;
+    response_error = LatchState;
+    P2_min = 50 ms;
+    ST_min = 0 ms;
+    configurable_frames {
+      Latch;
+      Seat;
+    }
+  }
+}
+
+Schedule_tables {
+  Normal {
+    Latch delay 10 ms;
+    Seat delay 10 ms;
+  }
+}

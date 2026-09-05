@@ -12,6 +12,7 @@ from typing import Iterator
 
 import numpy as np
 
+from core.bus_types import BusType
 from core.models import DecodedSignalSample
 from core.readers.mdf_recovery import (
     make_bounded_mdf4_copy,
@@ -33,10 +34,25 @@ class MDFContentInfo:
 
     has_raw_can: bool = False
     has_decoded_signals: bool = False
+    has_raw_lin: bool = False
+
+    @property
+    def has_raw_bus(self) -> bool:
+        """Whether the file carries raw bus frames of any supported bus type."""
+        return self.has_raw_can or self.has_raw_lin
 
     @property
     def is_mixed(self) -> bool:
-        return self.has_raw_can and self.has_decoded_signals
+        return self.has_raw_bus and self.has_decoded_signals
+
+    def bus_types(self) -> list[BusType]:
+        """Return the raw bus types present, in a stable order."""
+        buses = []
+        if self.has_raw_can:
+            buses.append(BusType.CAN)
+        if self.has_raw_lin:
+            buses.append(BusType.LIN)
+        return buses
 
 
 def _is_text(arr) -> bool:
@@ -174,9 +190,10 @@ class MDFReader:
     metadata_first_arrays: bool = True
     raw_trace_unavailable_reason: str = (
         "This is a pre-decoded MDF file. It contains signal channels but no "
-        "CAN_DataFrame records (CAN ID, DLC, direction, and payload bytes), so "
-        "an authentic CAN Trace cannot be reconstructed. Load the original "
-        "bus-logged MF4/MDF, BLF, or ASC file to view CAN Trace."
+        "CAN_DataFrame or LIN_Frame records (frame ID, DLC, direction, and "
+        "payload bytes), so an authentic bus trace cannot be reconstructed. "
+        "Load the original bus-logged MF4/MDF, BLF, or ASC file to view "
+        "CAN Trace."
     )
 
     # Cache the complete classification so dbc_required_for(), reader_factory(),
@@ -205,18 +222,29 @@ class MDFReader:
             "No database required — signals are pre-decoded.",
             "Using metadata-first global channel-array fast path.",
         ]
+        bus_names = " and ".join(bus.value for bus in content.bus_types())
         if content.is_mixed:
             self.load_messages.insert(
                 2,
-                "Mixed MDF: loading existing decoded signals; embedded raw CAN "
-                "frames require a DBC/ARXML and a reload.",
+                f"Mixed MDF: loading existing decoded signals; embedded raw "
+                f"{bus_names} frames require a database and a reload.",
             )
             self.raw_trace_unavailable_reason = (
-                "This MDF contains both decoded signals and raw CAN frames. "
-                "Osvanta Bus Log Analyzer loaded the existing decoded signals without a database, "
-                "so the embedded raw frames are not available in CAN Trace. "
-                "Configure a DBC or ARXML database and load the measurement again "
-                "to decode and view those CAN frames."
+                f"This MDF contains both decoded signals and raw {bus_names} "
+                "frames. Osvanta Bus Log Analyzer loaded the existing decoded signals without a "
+                "database, so the embedded raw frames are not available in "
+                f"CAN Trace. Configure a database for the {bus_names} channels "
+                "and load the measurement again to decode and view those frames."
+            )
+        elif content.has_raw_bus:
+            # Raw bus groups with no database configured. The file still opens
+            # and its raw frame columns stay visible — assigning a database
+            # turns them into decoded signals on the next load.
+            self.load_messages.insert(
+                1,
+                f"Raw {bus_names} frames are listed as their structural "
+                f"columns. Assign a database to the {bus_names} channels and "
+                "reload to decode them into signals.",
             )
 
     # ── Protocol iterator (fallback, not used by LoadWorker fast path) ────
@@ -319,16 +347,33 @@ class MDFReader:
     # ── Internal ──────────────────────────────────────────────────────────
 
     @staticmethod
-    def _is_raw_can_group(group) -> bool:
-        """Return whether *group* contains an ASAM raw CAN frame structure."""
+    def _has_frame_channel(group, prefix: str) -> bool:
+        """Return whether *group* carries an ASAM raw frame structure *prefix*."""
+        dotted = f"{prefix}."
         for channel in getattr(group, "channels", ()):
             name = str(getattr(channel, "name", "") or "")
-            if name == "CAN_DataFrame" or name.startswith("CAN_DataFrame."):
+            if name == prefix or name.startswith(dotted):
                 return True
         return False
 
     @staticmethod
+    def _is_raw_can_group(group) -> bool:
+        """Return whether *group* contains an ASAM raw CAN frame structure."""
+        return MDFReader._has_frame_channel(group, "CAN_DataFrame")
+
+    @staticmethod
+    def _is_raw_lin_group(group) -> bool:
+        """Return whether *group* contains an ASAM raw LIN frame structure."""
+        return MDFReader._has_frame_channel(group, "LIN_Frame")
+
+    @staticmethod
     def _group_has_decoded_signals(group) -> bool:
+        # A raw bus group is structure, not engineering data. Its members
+        # (LIN_Frame.ID, LIN_Frame.DataBytes, …) are ordinary channels and
+        # would otherwise be counted as decoded signals, which is what made a
+        # LIN-only file look pre-decoded and load without a database.
+        if MDFReader._is_raw_can_group(group) or MDFReader._is_raw_lin_group(group):
+            return False
         for channel in getattr(group, "channels", ()):
             if getattr(channel, "channel_type", -1) == 1:
                 continue
@@ -347,6 +392,7 @@ class MDFReader:
             return cached
 
         has_raw_can = False
+        has_raw_lin = False
         has_decoded_signals = False
         try:
             import asammdf
@@ -362,9 +408,11 @@ class MDFReader:
                 for group in mdf.groups:
                     if MDFReader._is_raw_can_group(group):
                         has_raw_can = True
+                    elif MDFReader._is_raw_lin_group(group):
+                        has_raw_lin = True
                     elif MDFReader._group_has_decoded_signals(group):
                         has_decoded_signals = True
-                    if has_raw_can and has_decoded_signals:
+                    if has_raw_can and has_raw_lin and has_decoded_signals:
                         break
             finally:
                 try:
@@ -375,25 +423,32 @@ class MDFReader:
         except Exception:
             pass
 
-        result = MDFContentInfo(has_raw_can, has_decoded_signals)
+        result = MDFContentInfo(has_raw_can, has_decoded_signals, has_raw_lin)
         MDFReader._content_cache[resolved] = result
         return result
 
     @staticmethod
     def is_bus_logging(mdf_path: str | Path) -> bool:
         """
-        Probe an MDF file to determine if it contains raw CAN bus frames
+        Probe an MDF file to determine if it contains raw bus frames
         (ASAM MDF bus logging format) rather than pre-decoded signals.
 
-        Bus logging MDF files store frames as ``CAN_DataFrame.*`` channels
-        per the ASAM MDF bus logging standard.  The probe reads only channel
-        group metadata — no sample data loaded.  Cost: < 50 ms on first call;
-        subsequent calls for the same path return the cached result instantly.
+        Bus logging MDF files store frames as ``CAN_DataFrame.*`` or
+        ``LIN_Frame.*`` channels per the ASAM MDF bus logging standard.  The
+        probe reads only channel group metadata — no sample data loaded.
+        Cost: < 50 ms on first call; subsequent calls for the same path return
+        the cached result instantly.
 
-        Returns True when the file contains CAN_DataFrame channels. Callers
-        use :meth:`content_info` to distinguish raw-only from mixed files.
+        Returns True when the file contains raw frames of either bus type.
+        Callers use :meth:`content_info` to distinguish raw-only from mixed
+        files, and :meth:`bus_types_in_file` to learn which buses are present.
         """
-        return MDFReader.content_info(mdf_path).has_raw_can
+        return MDFReader.content_info(mdf_path).has_raw_bus
+
+    @staticmethod
+    def bus_types_in_file(mdf_path: str | Path) -> list[BusType]:
+        """Return which raw bus types *mdf_path* actually contains."""
+        return MDFReader.content_info(mdf_path).bus_types()
 
     @staticmethod
     def _iter_arrays(

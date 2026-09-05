@@ -135,6 +135,68 @@ def asc_path() -> Path:
     return path
 
 
+@pytest.fixture(scope="session")
+def lin_blf_path() -> Path:
+    """A BLF holding LIN traffic and no CAN — python-can reads zero frames."""
+    path = FIXTURES_DIR / "sample_lin.blf"
+    if not path.exists():
+        try:
+            subprocess.check_call(
+                [sys.executable, str(FIXTURES_DIR / "_generate.py")],
+                timeout=60,
+            )
+        except Exception as exc:
+            skip_or_fail(f"Could not generate sample_lin.blf: {exc}")
+    if not path.exists():
+        skip_or_fail("sample_lin.blf not found — run tests/fixtures/_generate.py")
+    return path
+
+
+@pytest.fixture(scope="session")
+def lin_asc_path() -> Path:
+    """The ASC twin of sample_lin.blf — identical traffic, different parser."""
+    path = FIXTURES_DIR / "sample_lin.asc"
+    if not path.exists():
+        try:
+            subprocess.check_call(
+                [sys.executable, str(FIXTURES_DIR / "_generate.py")],
+                timeout=60,
+            )
+        except Exception as exc:
+            skip_or_fail(f"Could not generate sample_lin.asc: {exc}")
+    if not path.exists():
+        skip_or_fail("sample_lin.asc not found — run tests/fixtures/_generate.py")
+    return path
+
+
+@pytest.fixture(scope="session")
+def alt_ldf_path() -> Path:
+    """A second LIN cluster: same frame IDs as sample.ldf, opposite lengths."""
+    return FIXTURES_DIR / "sample_alt.ldf"
+
+
+@pytest.fixture(scope="session")
+def sample_ldf_path() -> Path:
+    """Committed LDF fixture — text, so it lives in git like sample.dbc."""
+    return FIXTURES_DIR / "sample.ldf"
+
+
+@pytest.fixture(scope="session")
+def lin_mf4_path() -> Path:
+    """LIN bus-logging MF4, generated like the other binary fixtures."""
+    path = FIXTURES_DIR / "sample_lin.mf4"
+    if not path.exists():
+        try:
+            subprocess.check_call(
+                [sys.executable, str(FIXTURES_DIR / "_generate.py")],
+                timeout=60,
+            )
+        except Exception as exc:
+            skip_or_fail(f"Could not generate sample_lin.mf4: {exc}")
+    if not path.exists():
+        skip_or_fail("sample_lin.mf4 not found — run tests/fixtures/_generate.py")
+    return path
+
 # ── Decoder fixture (function-scoped so stats are clean per test) ──────────
 
 @pytest.fixture()
@@ -400,3 +462,28 @@ def panel(qapp):
     finally:
         p.close()
         qapp.processEvents()
+
+
+@pytest.fixture(scope="session")
+def mixed_bus_blf_path() -> Path:
+    """CAN 1 and LIN 1 both carrying frame 0x20 — the bus-collision case."""
+    path = FIXTURES_DIR / "sample_mixed_bus.blf"
+    if not path.exists():
+        try:
+            subprocess.check_call(
+                [sys.executable, str(FIXTURES_DIR / "_generate.py")],
+                timeout=60,
+            )
+        except Exception as exc:
+            skip_or_fail(f"Could not generate sample_mixed_bus.blf: {exc}")
+    if not path.exists():
+        skip_or_fail(
+            "sample_mixed_bus.blf not found — run tests/fixtures/_generate.py"
+        )
+    return path
+
+
+@pytest.fixture(scope="session")
+def low_id_dbc_path() -> Path:
+    """A DBC whose only message sits at 0x20, inside the 6-bit LIN ID range."""
+    return FIXTURES_DIR / "sample_lowid.dbc"

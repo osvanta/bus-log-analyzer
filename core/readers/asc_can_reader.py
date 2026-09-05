@@ -14,6 +14,7 @@ import can
 
 from core.models import RawFrame
 from core.dbc_decoder import DBCDecoder
+from core.raw_frame_store import FLAG_EXTENDED, FLAG_FD, FLAG_LIN
 from core.models import DecodedSignalSample
 
 
@@ -38,6 +39,85 @@ def _parse_payload_tail(tail: bytes, data_len: int, numeric_base: int) -> bytes:
         return binascii.unhexlify(b"".join(fields[:data_len]))
     fields = tail.split(None, data_len)
     return bytes(int(value, 10) for value in fields[:data_len])
+
+
+# ASC marks a LIN event where a CAN line carries its channel number.
+_LIN_MARKERS = (b'Li', b'LIN')
+_LIN_DIRECTIONS = {b'rx': 0, b'tx': 1, b'txrq': 1}
+
+
+def _parse_lin_line(line: bytes, numeric_base: int):
+    """Parse one Vector ASC LIN frame line, or return ``None`` to skip it.
+
+    ``<time> Li <ch> <id> [<name>] <dir> [<checksum model>] <dlc> <data…>``
+    followed by ``checksum = …  SOF = …  BR = …``.
+
+    Parsed by anchoring rather than by column position: the direction token is
+    located first, then the next integer after it is the length, then exactly
+    that many payload tokens are taken, stopping at the first ``key = value``
+    field. Which optional columns CANoe emits — a symbolic frame name, the
+    checksum model, the trailing measurements — is exactly what varies between
+    versions and configurations, so a fixed column count would be brittle in
+    the one place there is no sample to test against.
+
+    Bus events (sync errors, wakeups, sleep-mode changes, schedule changes)
+    have no direction token and therefore fall out here as ``None``.
+    """
+    tokens = line.split()
+    if len(tokens) < 6 or tokens[1] not in _LIN_MARKERS:
+        return None
+
+    direction_index = next(
+        (
+            index
+            for index in range(3, min(len(tokens), 7))
+            if tokens[index].lower() in _LIN_DIRECTIONS
+        ),
+        -1,
+    )
+    if direction_index < 0:
+        return None
+
+    length_index = next(
+        (
+            index
+            for index in range(direction_index + 1, min(len(tokens), direction_index + 4))
+            if tokens[index].isdigit()
+        ),
+        -1,
+    )
+    if length_index < 0:
+        return None
+
+    try:
+        timestamp = float(tokens[0])
+        channel = int(tokens[2])
+        # LIN frame IDs are 6-bit; mask so a logged protected ID (parity in the
+        # top two bits) still matches the database.
+        arb_id = int(tokens[3], numeric_base) & 0x3F
+        data_len = min(int(tokens[length_index]), 8)
+    except (ValueError, IndexError):
+        return None
+
+    payload = bytearray()
+    for token in tokens[length_index + 1:length_index + 1 + data_len]:
+        if b'=' in token:
+            break
+        try:
+            payload.append(int(token, numeric_base))
+        except ValueError:
+            return None
+    if len(payload) != data_len:
+        return None
+
+    return (
+        timestamp,
+        channel,
+        arb_id,
+        data_len,
+        _LIN_DIRECTIONS[tokens[direction_index].lower()],
+        bytes(payload),
+    )
 
 
 class ASCCANReader:
@@ -187,8 +267,21 @@ class ASCCANReader:
                     # does not allocate and discard every unused trailing
                     # status field.  Non-standard lines use the general parser
                     # below without changing accepted ASC variants.
+                    is_lin = False
+                    if b' Li ' in line[:32] or b' LIN ' in line[:32]:
+                        parsed = _parse_lin_line(line, numeric_base)
+                        if parsed is None:
+                            continue
+                        (
+                            timestamp, channel, arb_id, data_len,
+                            direction_value, payload,
+                        ) = parsed
+                        extended = False
+                        is_fd = False
+                        is_lin = True
+
                     fixed_canfd = False
-                    if numeric_base == 16 and len(line) >= 79 \
+                    if not is_lin and numeric_base == 16 and len(line) >= 79 \
                             and line[12:17] == b'CANFD':
                         try:
                             timestamp = float(line[:12])
@@ -215,7 +308,7 @@ class ASCCANReader:
                         except (ValueError, IndexError, binascii.Error):
                             fixed_canfd = False
 
-                    if not fixed_canfd:
+                    if not fixed_canfd and not is_lin:
                         try:
                             # Split only the stable ASC prefix.  The final
                             # element retains payload + trailing CAN-FD
@@ -297,7 +390,13 @@ class ASCCANReader:
                     arb_ids.append(arb_id & 0xFFFF_FFFF)
                     dlcs.append(data_len)
                     directions.append(direction_value)
-                    flags.append((1 if extended else 0) | (2 if is_fd else 0))
+                    # The flags byte is the RawFrameStore flags column, so
+                    # the bus travels with the frame at no extra width.
+                    flags.append(
+                        (FLAG_EXTENDED if extended else 0)
+                        | (FLAG_FD if is_fd else 0)
+                        | (FLAG_LIN if is_lin else 0)
+                    )
                     offset = slot * 64
                     if payload:
                         data_block[offset:offset + len(payload)] = payload

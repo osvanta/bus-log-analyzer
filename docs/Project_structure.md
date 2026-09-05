@@ -6,22 +6,24 @@ bus-log-analyzer/
 │       └── README.md             # Rule authoring guide
 ├── core/
 │   ├── models.py                 # RawFrame, DecodedSignalSample dataclasses
-│   ├── channel_config.py         # ChannelConfig: {channel → DBC or ARXML}, decoder cache, save/load .osvanta_ch
+│   ├── bus_types.py              # BusType (CAN/LIN), (bus, channel) identity, label/sort/encode helpers
+│   ├── channel_config.py         # ChannelConfig: {(bus, channel) → DBC/ARXML/LDF}, decoder cache, save/load .osvanta_ch (v3)
 │   ├── load_worker.py            # QThread: native MDF arrays + batched CAN-raw vectorized decode paths
 │   ├── signal_store.py           # SignalStore, SignalSeries (array.array storage)
-│   ├── raw_frame_store.py        # Batched CAN Trace store: compact metadata + 64 B/frame mmap payload
-│   ├── dbc_decoder.py            # DBCDecoder with 3-level cache — accepts .dbc and .arxml
+│   ├── raw_frame_store.py        # Batched CAN+LIN Trace store: compact metadata + 64 B/frame mmap payload
+│   ├── dbc_decoder.py            # DBCDecoder with 3-level cache — .dbc, .arxml, .ldf (via DBC conversion)
 │   ├── vectorized_decoder.py     # NumPy DBC decode, sparse multiplex filtering, cantools fallback
-│   ├── blf_reader.py             # python-can BLF decompression into packed column batches
+│   ├── blf_reader.py             # BLF decompression into packed column batches; CAN + LIN objects
 │   ├── export.py                 # CSV export
 │   ├── readers/
-│   │   ├── __init__.py           # reader_factory() + dbc_required_for() — format detection
-│   │   ├── db_format.py          # SUPPORTED_DB_SUFFIXES, is_database_file(), db_format_label()
+│   │   ├── __init__.py           # reader_factory(), dbc_required_for(), bus-tagged prescan_measurement()
+│   │   ├── db_format.py          # SUPPORTED_DB_SUFFIXES (.dbc/.arxml/.ldf), LDF→DBC conversion, message lengths
 │   │   ├── base.py               # MeasurementReader protocol
 │   │   ├── blf_can_reader.py     # BLF packed-batch + DBC/ARXML vectorized pipeline
-│   │   ├── asc_can_reader.py     # Direct classic CAN/CAN-FD ASC column-array parser
-│   │   ├── mdf_reader.py         # Pre-decoded MDF batched arrays + bus-logging probe
-│   │   ├── mdf_can_reader.py     # Native asammdf bus extraction; python-can raw fallback
+│   │   ├── blf_content.py        # Which buses a BLF holds; catches logs that read as empty
+│   │   ├── asc_can_reader.py     # Direct classic CAN/CAN-FD/LIN ASC column-array parser
+│   │   ├── mdf_reader.py         # Pre-decoded MDF batched arrays + CAN/LIN bus-logging probe
+│   │   ├── mdf_can_reader.py     # Native asammdf CAN+LIN bus extraction; python-can raw fallback
 │   │   └── csv_reader.py         # Wide and narrow CSV
 │   └── diagnostics/              # AI-powered diagnostics engine (Ctrl+Shift+A)
 │       ├── __init__.py
@@ -44,8 +46,8 @@ bus-log-analyzer/
 │   ├── main_window.py            # MainWindow, toolbar, config save/load, plot_finding()
 │   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time()
 │   ├── signal_tree.py            # SignalTreeWidget with live search
-│   ├── raw_frame_dialog.py       # Sliding-window CAN Trace (RawFrameStore, no cap)
-│   ├── dbc_manager.py            # Database Manager dialog: per-channel DBC/ARXML, match quality bars
+│   ├── raw_frame_dialog.py       # Sliding-window CAN/LIN Trace (RawFrameStore, no cap)
+│   ├── dbc_manager.py            # Database Manager dialog: per-bus-channel DBC/ARXML/LDF, match quality bars
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
 │   └── diagnostics/              # Diagnostics UI (non-modal window)
 │       ├── activation.py         # Wires Ctrl+Shift+A shortcut in MainWindow
@@ -58,7 +60,7 @@ bus-log-analyzer/
 │   ├── app_icon.png              # 1024 × 1024 app icon source
 │   └── app_icon.ico              # Multi-resolution ICO (256/128/64/48/32/16 px)
 ├── requirements.txt
-├── BusLogAnalyzer.spec           # PyInstaller spec, bundles resources/ and config/
+├── BusLogAnalyzer.spec           # PyInstaller spec, bundles resources/, config/ and ldfparser grammars
 └── .github/workflows/build.yml  # Auto-build on v*.*.* tag push
 
 
@@ -75,8 +77,11 @@ from the project owner. See `AGENTS.md` for the complete protected-file list.
 2. `core/readers/__init__.py` detects the measurement format, distinguishes
    pre-decoded MDF from MDF bus logging, enforces DBC/ARXML requirements, and
    constructs the correct reader.
-3. `core/channel_config.py` maps physical CAN channels to DBC/ARXML files and
-   caches decoders. Channel `0` is the all-channels fallback.
+3. `core/channel_config.py` maps physical bus channels to DBC/ARXML/LDF files
+   and caches decoders. Channels are identified by `(bus, number)` rather than a
+   bare integer, because `CAN 1` and `LIN 1` can both exist in one MF4 and would
+   otherwise collide. Channel `0` is the all-channels fallback **per bus**, so an
+   All-LIN database is never handed to CAN extraction.
 
 ### LoadWorker dispatch
 
@@ -89,12 +94,87 @@ one accepted path:
   The older raw-frame vectorized path remains a compatibility fallback.
 - **Pre-decoded MF4/MDF:** `MDFReader.iter_channel_arrays()` batches channels
   by MDF channel group and imports arrays directly without a DBC.
-- **ASC + DBC/ARXML:** `ASCCANReader.iter_raw_batches()` parses classic CAN and
-  CAN-FD ASC text directly into packed column batches without allocating a
-  `can.Message` or `RawFrame` per record.
-- **BLF + DBC/ARXML:** `BLFReaderService.iter_raw_batches()` uses python-can for
+- **ASC + database:** `ASCCANReader.iter_raw_batches()` parses classic CAN,
+  CAN-FD and LIN ASC text directly into packed column batches without
+  allocating a `can.Message` or `RawFrame` per record.
+- **BLF + database:** `BLFReaderService.iter_raw_batches()` uses python-can for
   BLF container decompression and emits packed column batches without
-  per-frame tuples at the LoadWorker boundary.
+  per-frame tuples at the LoadWorker boundary. LIN objects, which python-can
+  skips, are parsed by `_PackedBLFReader` itself.
+
+The bulk vectorised decode reads the bus back out of the raw-frame flags and
+keys decoders by `(bus, channel)` through `ChannelConfig.bus_decoder_map()`.
+The remaining per-frame loops still match against `RawFrame.channel`, a bare
+integer, and keep using `ChannelConfig.can_decoder_map()`: handing them the
+bus-tagged mapping would fill the lookup with tuple keys no integer can match,
+and decoding would silently yield nothing instead of raising.
+
+### LIN bus logging (MF4/MDF, BLF and ASC)
+
+MF4/MDF decodes LIN through the same `extract_bus_logging()` call as CAN, with
+both databases passed in one `database_files={"CAN": [...], "LIN": [...]}`
+argument. BLF and ASC take a different route to the same result — see
+**LIN from BLF and ASC** below.
+
+- Bus type is **discovered from the file, never chosen by the user**: CAN groups
+  appear as `CAN_DataFrame`, LIN groups as `LIN_Frame`, each with its own
+  `BusChannel` numbering. `MDFCANReader._decoded_group_metadata()` recovers the
+  bus from asammdf's acquisition source (`LIN{n}.LIN_Frame.ID=0x{id}`), so a
+  database's file extension is never used to infer the bus — a `.dbc` legitimately
+  describes a LIN cluster.
+- `.ldf` support requires `ldfparser`, which is what makes `canmatrix.formats.ldf`
+  importable. `db_format.ldf_support_available()` checks this up front because a
+  missing ldfparser otherwise surfaces as a bare `KeyError` from inside asammdf.
+- LIN frames share the CAN Trace store rather than a separate one: a 6-bit LIN ID
+  fits the uint32 ID column, a LIN payload is at most 8 of 64 bytes, and the bus
+  is carried in a previously unused flag bit. The 64-byte record layout is
+  unchanged.
+### LIN from BLF and ASC
+
+python-can models CAN only: its BLF reader *skips* LIN objects and its ASC
+reader has no LIN handling at all, so a LIN-only Vector log used to load as an
+empty measurement with no error and nothing to point at.
+
+- **The LDF becomes DBC text, and the existing pipeline does the rest.**
+  `db_format.ldf_to_dbc_string()` reads the LDF with canmatrix/ldfparser and
+  dumps DBC into memory; `load_database_file()` hands that to cantools. A LIN
+  signal is laid out inside its frame exactly as a CAN signal is, so past that
+  point there is no LIN-specific decoding — `DBCDecoder`, `VectorizedDBC`, the
+  match bar and the debug inspector all apply unchanged. The conversion
+  preserves frame IDs, bit layouts, scaling and value tables, and produces the
+  same names and values as asammdf's own LDF handling, which is what keeps a
+  signal key such as `LIN1::DoorCmd::WindowPos` stable across containers.
+- **The bus rides in the flags byte.** `_PackedBLFReader` and the ASC batch
+  parser already emit the byte that *is* the `RawFrameStore` flags column, so
+  setting `FLAG_LIN` carries the bus end to end without widening a batch tuple
+  or changing a dtype.
+- **`_PackedBLFReader` parses `LIN_MESSAGE2` (57) and `LIN_MESSAGE` (11).**
+  Type 57's field offsets are verified against a real 7,275-object CANoe log;
+  type 11 is the pre-2005 layout, implemented from the documented struct and
+  unverified. Other LIN objects — errors, sleep, wakeup, schedule changes — are
+  counted and skipped: they are bus events, not frames.
+- **LIN channel numbers are used as stored.** BLF holds them 1-indexed; the CAN
+  path adds one only to undo python-can's own `channel - 1`, which the packed
+  reader bypasses.
+- **The bulk decode groups on `(bus, channel, arb_id)`**, with the bus in bit 40.
+  LIN IDs are 6-bit and overlap the low CAN range, so CAN 1 and LIN 1 can carry
+  the same frame ID; grouping without the bus merges them and lets one
+  database decode both. `ChannelConfig.bus_decoder_map()` is the bus-tagged
+  counterpart to `can_decoder_map()` for this one loop.
+- **Match scoring uses frame length as well as frame ID for LIN.** Every LIN
+  cluster numbers from 0, so unrelated LDFs routinely declare the same IDs — in
+  the CANoe sample, `Door.ldf` scores a perfect ID match against *both* LIN
+  channels and belongs to one. `PrescanResult.lengths_per_channel` carries the
+  observed lengths; it is empty for CAN, so CAN scoring is unchanged.
+- **A short frame decodes from padding rather than failing**, because
+  `VectorizedDBC` slices a fixed 64-byte record. `LoadWorker` counts frames
+  shorter than the message they matched and reports the total — the visible
+  symptom of a database on the wrong channel.
+- `blf_content.py` scans object types — stopping at the first CAN object, so a
+  normal CAN log costs one container — and `reader_factory` refuses a BLF
+  holding *neither* CAN nor LIN. That check runs **before** the database check:
+  no database can help a file with no decodable frames.
+- An `.ldf` is still refused for raw CAN CSV, which has no bus dimension.
 
 ### CAN-raw storage and decode
 
@@ -113,14 +193,28 @@ one accepted path:
 
 ### Accepted behavioral invariants
 
-- Physical CAN channel numbering remains consistent across BLF, ASC, and MDF.
+- Physical channel numbering remains consistent across BLF, ASC, and MDF, and is
+  now qualified by bus so `CAN 1` and `LIN 1` stay distinct.
+- Signal keys keep their historical `CH<n>::Message::Signal` form for CAN. They are
+  persisted in saved session configs, so changing them would break every stored
+  plot; LIN uses `LIN<n>::` and the friendlier `CAN 1` / `LIN 1` labels are display
+  only.
+- Channel configs written before version 3 have bare integer keys, predate LIN
+  support, and load as CAN.
 - All decoded timestamps share one recording-wide zero origin.
 - DBC/ARXML channel-specific mappings and all-channel fallback semantics remain
   unchanged.
 - MF4/MDF native extraction, ASC direct-array parsing, BLF packed batches,
   sparse multiplex handling, fallback behavior, and progress logging remain
   unchanged.
-- BLF/ASC continue to populate CAN Trace through `RawFrameStore`.
+- BLF/ASC continue to populate CAN Trace through `RawFrameStore`, now including
+  LIN frames, tagged by flag bit rather than by a widened record.
+- LIN channel numbers in BLF are used as stored (1-indexed); only the CAN path
+  compensates for python-can's `channel - 1`.
+- An LDF decodes to the same message names, signal names and values whether the
+  measurement is an MF4 (asammdf) or a BLF/ASC (LDF→DBC conversion). A saved
+  plot configuration must keep working when the same cluster is recorded in a
+  different container.
 - MF4/MDF native fast loading does not materialize CAN Trace; its compatibility
   fallback behavior remains unchanged.
 - Signal names, message names/IDs, units, enum display values, decoded sample

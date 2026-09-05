@@ -36,8 +36,10 @@ import re
 import can
 import numpy as np
 
+from core.bus_types import BusType
 from core.models import RawFrame, DecodedSignalSample
 from core.dbc_decoder import DBCDecoder
+from core.raw_frame_store import FLAG_LIN
 from core.readers.mdf_reader import MDFReader, _channel_failure_text
 from core.readers.mdf_recovery import (
     make_bounded_mdf4_copy,
@@ -185,14 +187,19 @@ class MDFCANReader:
         except ImportError as exc:
             raise MDFCANReadError("asammdf is required for MF4 bus decoding.") from exc
 
-        databases = []
+        # asammdf takes one dict keyed by bus type, so CAN and LIN databases
+        # go in together and are extracted in a single pass over the file.
+        # Keying by bus is what stops a LIN database being offered to CAN
+        # extraction (and vice versa) — the two buses number their channels
+        # independently, so a flat list would cross-apply on channel number.
+        databases: dict[str, list[tuple[str, int]]] = {}
         if channel_config is not None:
-            databases = [
-                (path, int(channel))
-                for channel, path in channel_config.channels.items()
-            ]
+            for bus in (BusType.CAN, BusType.LIN):
+                pairs = channel_config.databases_for_bus(bus)
+                if pairs:
+                    databases[bus.value] = pairs
         if not databases:
-            databases = [(str(self._dbc_path), 0)]
+            databases = {BusType.CAN.value: [(str(self._dbc_path), 0)]}
 
         source = native_source = extracted = None
         recovery_path = None
@@ -271,19 +278,21 @@ class MDFCANReader:
             # database and the fallback database from both decoding the same bus.
             if channel_config is not None:
                 try:
-                    can_map = source._mdf.bus_logging_map.get("CAN", {})
-                    concrete = []
-                    for channel in can_map:
-                        path = channel_config.dbc_path_for(int(channel))
-                        if path:
-                            concrete.append((path, int(channel)))
-                    if concrete:
-                        databases = list(dict.fromkeys(concrete))
+                    bus_logging_map = source._mdf.bus_logging_map
+                    for bus in (BusType.CAN, BusType.LIN):
+                        discovered = bus_logging_map.get(bus.value, {})
+                        concrete = []
+                        for channel in discovered:
+                            path = channel_config.dbc_path_for(bus, int(channel))
+                            if path:
+                                concrete.append((path, int(channel)))
+                        if concrete:
+                            databases[bus.value] = list(dict.fromkeys(concrete))
                 except Exception:
                     pass
             try:
                 extracted = source.extract_bus_logging(
-                    database_files={"CAN": databases},
+                    database_files=databases,
                     ignore_value2text_conversion=False,
                     progress=progress,
                 )
@@ -422,9 +431,13 @@ class MDFCANReader:
         raw_source = None
         try:
             raw_source = asammdf.MDF(str(self._path), use_display_names=False)
-            return self._emit_raw_frame_arrays(
+            total = self._emit_raw_frame_arrays(
                 raw_source, callback, self._record_channel_error
             )
+            total += self._emit_raw_lin_frame_arrays(
+                raw_source, callback, self._record_channel_error
+            )
+            return total
         finally:
             if raw_source is not None:
                 try:
@@ -507,8 +520,104 @@ class MDFCANReader:
         return total
 
     @staticmethod
+    def _emit_raw_lin_frame_arrays(source, callback, channel_error=None) -> int:
+        """
+        Read each MDF ``LIN_Frame`` group as one structured array.
+
+        LIN frames go into the same trace store as CAN rather than a store of
+        their own: a 6-bit LIN ID fits the uint32 arbitration-ID column, a LIN
+        payload is at most 8 of the 64 available bytes, and the bus is carried
+        by a single previously unused flag bit. Nothing in the record layout
+        changes.
+
+        LIN has no equivalent of IDE, EDL or direction — every frame is
+        standard-ID, non-FD, and the ASAM LIN_Frame structure has no Dir field,
+        so direction is reported as Unknown rather than invented.
+        """
+        total = 0
+        for group_idx, group in enumerate(source.groups):
+            parent_idx = None
+            for channel_idx, channel in enumerate(group.channels):
+                if (getattr(channel, "name", "") or "") == "LIN_Frame":
+                    parent_idx = channel_idx
+                    break
+            if parent_idx is None:
+                continue
+            group_name = MDFReader._group_name(source, group_idx)
+            try:
+                signal = source.get(
+                    group=group_idx,
+                    index=parent_idx,
+                    raw=True,
+                )
+                samples = np.asarray(signal.samples)
+                field_names = samples.dtype.names or ()
+
+                def field(suffix, required=True):
+                    exact = f"LIN_Frame.{suffix}"
+                    name = exact if exact in field_names else next(
+                        (item for item in field_names if item.endswith(f".{suffix}")),
+                        None,
+                    )
+                    if name is None:
+                        if required:
+                            raise MDFCANReadError(
+                                f"Raw LIN channel '{exact}' is missing from "
+                                f"group {group_idx}."
+                            )
+                        return None
+                    return samples[name]
+
+                timestamps = np.asarray(signal.timestamps, dtype=np.float64)
+                arb_ids = field("ID")
+                data_rows = field("DataBytes")
+                count = len(timestamps)
+
+                channels = field("BusChannel", required=False)
+                if channels is None:
+                    # Single-bus recorders may omit BusChannel entirely.
+                    channels = np.ones(count, dtype=np.uint8)
+                data_lengths = field("DataLength", required=False)
+                if data_lengths is None:
+                    data_lengths = field("ReceivedDataByteCount", required=False)
+                if data_lengths is None:
+                    data_lengths = np.full(count, 8, dtype=np.uint8)
+                directions = field("Dir", required=False)
+                if directions is None:
+                    directions = np.full(count, 2, dtype=np.uint8)
+
+                flags = np.full(count, FLAG_LIN, dtype=np.uint8)
+
+                callback(
+                    timestamps,
+                    channels,
+                    arb_ids,
+                    data_lengths,
+                    directions,
+                    flags,
+                    data_rows,
+                )
+                total += count
+            except Exception as exc:
+                if channel_error is None:
+                    raise
+                channel_error(group_name, "LIN_Frame", exc)
+        return total
+
+    @staticmethod
     def _decoded_group_metadata(extracted, group_idx, signal_name, channel_config):
-        """Recover CAN channel/message identity from asammdf group metadata."""
+        """
+        Recover bus/channel/message identity from asammdf group metadata.
+
+        asammdf stamps each extracted group with an acquisition source whose
+        path is ``CAN{n}.CAN_DataFrame.ID=0x{id} EXT={bool}`` or
+        ``LIN{n}.LIN_Frame.ID=0x{id}``, and gives each signal a display name of
+        the form ``{BUS}{n}.{message}.{signal}``.  Both carry the bus, so the
+        bus never has to be guessed from the database's file extension — which
+        would be wrong anyway, since a DBC legitimately describes a LIN cluster.
+
+        Returns ``((bus, channel) | None, message_name, message_id)``.
+        """
         group = extracted.groups[group_idx]
         channel_group = getattr(group, "channel_group", None)
         source = getattr(channel_group, "acq_source", None)
@@ -516,9 +625,13 @@ class MDFCANReader:
         acq_name = str(getattr(channel_group, "acq_name", "") or "")
         text = f"{source_path} {acq_name}"
 
-        channel_match = re.search(r"\bCAN(\d+)\b", text, re.IGNORECASE)
+        channel_match = re.search(r"\b(CAN|LIN)(\d+)\b", text, re.IGNORECASE)
         id_match = re.search(r"\bID=0x([0-9A-F]+)", text, re.IGNORECASE)
-        channel = int(channel_match.group(1)) if channel_match else None
+        channel_key = None
+        bus = BusType.CAN
+        if channel_match:
+            bus = BusType(channel_match.group(1).upper())
+            channel_key = (bus, int(channel_match.group(2)))
         message_id = int(id_match.group(1), 16) if id_match else 0
 
         message_name = ""
@@ -529,7 +642,7 @@ class MDFCANReader:
                     continue
                 display_names = getattr(group.channels[ci], "display_names", {}) or {}
                 for display_name in display_names:
-                    match = re.match(r"CAN\d+\.(.+)\.[^.]+$", display_name)
+                    match = re.match(r"(?:CAN|LIN)\d+\.(.+)\.[^.]+$", display_name)
                     if match:
                         message_name = match.group(1)
                         break
@@ -540,20 +653,28 @@ class MDFCANReader:
 
         if not message_name and channel_config is not None and message_id:
             try:
-                decoder = channel_config.decoder_for(channel)
-                if decoder is not None:
-                    from core.vectorized_decoder import VectorizedDBC
-                    candidates = VectorizedDBC(decoder).get_candidates(
-                        message_id, is_extended=(message_id > 0x7FF)
-                    )
-                    if candidates:
-                        message_name = candidates[0].name
+                number = channel_key[1] if channel_key else None
+                # An LDF is unreadable by cantools, so building a DBCDecoder
+                # for one only raises — and would do so once per signal.
+                # asammdf's own display names already named the message in
+                # that case; fall through to the synthetic name instead.
+                assigned = channel_config.dbc_path_for(bus, number)
+                if assigned and Path(assigned).suffix.lower() != ".ldf":
+                    decoder = channel_config.decoder_for(bus, number)
+                    if decoder is not None:
+                        from core.vectorized_decoder import VectorizedDBC
+                        candidates = VectorizedDBC(decoder).get_candidates(
+                            message_id, is_extended=(message_id > 0x7FF)
+                        )
+                        if candidates:
+                            message_name = candidates[0].name
             except Exception:
                 pass
 
         if not message_name:
-            message_name = f"CAN_DataFrame_{message_id:X}"
-        return channel, message_name, message_id
+            prefix = "LIN_Frame" if bus is BusType.LIN else "CAN_DataFrame"
+            message_name = f"{prefix}_{message_id:X}"
+        return channel_key, message_name, message_id
 
     # ── Extended iterator (used by LoadWorker) ────────────────────────────
 

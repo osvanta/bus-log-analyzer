@@ -14,8 +14,15 @@ from PySide6.QtCore import QObject, Signal, Slot
 from core.readers import reader_factory
 from core.readers.base import MeasurementReader
 from core.signal_store import SignalStore
-from core.raw_frame_store import RawFrameStore
-from core.channel_config import ChannelConfig, ALL_CHANNELS_KEY
+from core.raw_frame_store import FLAG_LIN, RawFrameStore
+from core.bus_types import (
+    ALL_CHANNELS_NUMBER,
+    BusChannel,
+    BusType,
+    store_key_prefix,
+)
+from core.channel_config import ChannelConfig
+from core.signal_store import as_channel_key
 
 # ── Streaming constants ───────────────────────────────────────────────────
 _CAN_TREE_INTERVAL     = 10_000   # was 2 000 — build_tree_payload() sorts all signals; every 2k frames was ~250 rebuilds for 500k frames
@@ -47,10 +54,24 @@ def _bulk_compute_store_stats(store, rfs) -> None:
 
     # Channel set + per-channel frame counts (single numpy unique pass)
     unique_chs, counts = np.unique(channels_np, return_counts=True)
+    is_lin_np = (flags_np & np.uint8(FLAG_LIN)) != 0
     for ch_byte, cnt in zip(unique_chs.tolist(), counts.tolist()):
-        ch = None if ch_byte == 255 else ch_byte
-        store.channels.add(ch)
-        store.channel_frame_counts[ch] = cnt
+        if ch_byte == 255:
+            store.channels.add(None)
+            store.channel_frame_counts[None] = cnt
+            continue
+        # A channel number can appear on both buses; split the count so
+        # "CAN 1" and "LIN 1" are reported separately rather than merged.
+        selected = channels_np == ch_byte
+        for bus, bus_mask in (
+            (BusType.CAN, selected & ~is_lin_np),
+            (BusType.LIN, selected & is_lin_np),
+        ):
+            bus_count = int(bus_mask.sum())
+            if bus_count:
+                key = (bus, int(ch_byte))
+                store.channels.add(key)
+                store.channel_frame_counts[key] = bus_count
 
     store.total_frames    = n
     store.unmatched_frames = n  # corrected to n - decoded_total by Pass 2
@@ -68,7 +89,10 @@ def _bulk_compute_store_stats(store, rfs) -> None:
             f"0x{aid:08X}" if (bool(fl & 1) or aid > 0x7FF)
             else f"0x{aid:03X}"
         )
-        label = f"CH{ch}" if ch is not None else "CH?"
+        label = store_key_prefix(
+            None if ch is None
+            else ((BusType.LIN if fl & FLAG_LIN else BusType.CAN), ch)
+        )
         store.first_frame_ids.append(
             f"{label} | {id_hex} | DLC={dlc} | {direction}"
         )
@@ -208,13 +232,16 @@ class LoadWorker(QObject):
         if cfg:
             cfg.build_all_decoders()
 
-        # Channel → decoder map (None = "All Channels" fallback)
-        _decoder_map: dict[int | None, object | None] = {}
+        # (bus, channel) → decoder, with (bus, 0) as that bus's fallback.
+        #
+        # This loop is the one that *can* be bus-aware: it reads the bus back
+        # out of the raw-frame flags, so a LIN 1 frame finds the LDF and a
+        # CAN 1 frame finds the DBC even though both are channel 1. The
+        # per-frame loops elsewhere still use can_decoder_map(), which is
+        # integer-keyed for the formats that carry CAN only.
+        _decoder_map: dict[BusChannel, object | None] = {}
         if cfg:
-            dec_cache = cfg._decoder_cache
-            for ch_key, path in cfg.channels.items():
-                actual_ch = None if ch_key == ALL_CHANNELS_KEY else ch_key
-                _decoder_map[actual_ch] = dec_cache.get(path)
+            _decoder_map = cfg.bus_decoder_map()
 
         # Choices lookup so SignalStore knows which signals carry display labels.
         choices_lookup: dict[tuple[int | None, str, str], dict] = {}
@@ -366,6 +393,7 @@ class LoadWorker(QObject):
         timestamps_np = np.frombuffer(rfs.timestamps, dtype=np.float64)
         channels_np   = np.frombuffer(rfs.channels,   dtype=np.uint8)
         arb_ids_np    = np.frombuffer(rfs.arb_ids,    dtype=np.uint32)
+        dlcs_np       = np.frombuffer(rfs.dlcs,       dtype=np.uint8)
         # Mmap → [N, 64] uint8 view (zero-copy); rows are zero-padded.
         data_view = np.frombuffer(
             rfs._mmap, dtype=np.uint8, count=n * 64
@@ -376,10 +404,17 @@ class LoadWorker(QObject):
         flags_np    = np.asarray(memoryview(rfs.flags))
         name_ids_np = np.asarray(memoryview(rfs.name_ids))
 
-        # Build (channel, arb_id) groups
+        # Build (bus, channel, arb_id) groups. The bus goes in bit 40, above
+        # the 8-bit channel at 32 and the 32-bit ID: CAN 1 and LIN 1 are
+        # different channels that happen to share a number, so grouping on the
+        # number alone would decode one bus's frames against the other's
+        # database. Bit 41 is already spoken for by the trace-name encoding.
+        is_lin_np = (flags_np & np.uint8(FLAG_LIN)) != 0
         combined = (
-            channels_np.astype(np.uint64) << np.uint64(32)
-        ) | arb_ids_np.astype(np.uint64)
+            (is_lin_np.astype(np.uint64) << np.uint64(40))
+            | (channels_np.astype(np.uint64) << np.uint64(32))
+            | arb_ids_np.astype(np.uint64)
+        )
         sort_idx = np.argsort(combined, kind='stable')
         sorted_combined = combined[sort_idx]
         boundaries = np.concatenate((
@@ -390,6 +425,8 @@ class LoadWorker(QObject):
 
         vec_dbcs: dict[int, VectorizedDBC] = {}
         decoded_total    = 0
+        dlc_short_total  = 0
+        dlc_short_names: set[str] = set()
         decoded_groups   = 0
         no_signals_total = 0
         total_groups     = len(boundaries) - 1
@@ -401,11 +438,17 @@ class LoadWorker(QObject):
             start, end = int(boundaries[g]), int(boundaries[g + 1])
             group_idx  = sort_idx[start:end]
 
-            ch_byte = int(channels_np[group_idx[0]])
-            arb_id  = int(arb_ids_np[group_idx[0]])
-            ch      = None if ch_byte == 255 else ch_byte
+            first    = group_idx[0]
+            ch_byte  = int(channels_np[first])
+            arb_id   = int(arb_ids_np[first])
+            bus      = BusType.LIN if is_lin_np[first] else BusType.CAN
+            ch       = None if ch_byte == 255 else ch_byte
+            ch_key   = as_channel_key(ch, bus)
 
-            decoder = _decoder_map.get(ch) or _decoder_map.get(None)
+            decoder = (
+                _decoder_map.get(ch_key)
+                or _decoder_map.get((bus, ALL_CHANNELS_NUMBER))
+            )
             if decoder is None:
                 continue
 
@@ -423,6 +466,21 @@ class LoadWorker(QObject):
             msg_name = message.name
             msg_id   = int(getattr(message, 'frame_id', arb_id))
             msg_dec  = vec.get_message_decoder(message)
+
+            # Frames shorter than the message they matched decode from the
+            # zero padding of the fixed 64-byte record rather than failing, so
+            # a database meant for a different cluster produces plausible
+            # zeros instead of an error. Counting the shortfall is what makes
+            # that visible — on LIN especially, where unrelated clusters
+            # reuse the same low frame IDs and only the lengths differ.
+            expected_length = int(getattr(message, 'length', 0) or 0)
+            if expected_length:
+                short_rows = int(
+                    (dlcs_np[group_idx] < expected_length).sum()
+                )
+                if short_rows:
+                    dlc_short_total += short_rows
+                    dlc_short_names.add(msg_name)
 
             try:
                 sig_results = msg_dec.decode(data_view[group_idx])
@@ -499,7 +557,7 @@ class LoadWorker(QObject):
                     has_labels = False
                     raw_values = []
                 store.add_series_bulk(
-                    channel      = ch,
+                    channel      = ch_key,
                     message_name = msg_name,
                     message_id   = msg_id,
                     signal_name  = sig_name,
@@ -555,10 +613,22 @@ class LoadWorker(QObject):
             f"signals: {n_sigs:,} | frames: {decoded_total:,}{hint} | "
             f"elapsed: {decode_elapsed:.1f} s"
         )
+        if dlc_short_total:
+            named = ", ".join(sorted(dlc_short_names)[:5])
+            more = (
+                f" and {len(dlc_short_names) - 5} more"
+                if len(dlc_short_names) > 5 else ""
+            )
+            self.progress.emit(
+                f"WARNING: {dlc_short_total:,} frame(s) were shorter than the "
+                f"message they matched ({named}{more}). Those signals decoded "
+                "from padding, not from the bus — usually a database assigned "
+                "to the wrong channel."
+            )
 
         # Trace tab: needs decoder + config for on-demand signal expansion.
         if cfg:
-            rfs.decoder        = cfg.decoder_for(None)
+            rfs.decoder        = cfg.decoder_for(BusType.CAN, None)
             rfs.channel_config = cfg
 
         # Publish the completed hierarchy once.  Intermediate group updates
@@ -645,12 +715,10 @@ class LoadWorker(QObject):
         # Pre-compute channel→decoder map so the hot loop pays one dict.get()
         # instead of a Python function call + property access + two dict lookups
         # per frame.  Unknown channels seen mid-file are resolved once and cached.
+        # CAN-only, integer-keyed by design — see can_decoder_map().
         _decoder_map: dict[int | None, object | None] = {}
         if cfg:
-            dec_cache = cfg._decoder_cache
-            for ch_key, path in cfg.channels.items():
-                actual_ch = None if ch_key == ALL_CHANNELS_KEY else ch_key
-                _decoder_map[actual_ch] = dec_cache.get(path)
+            _decoder_map = cfg.can_decoder_map()
             _fallback_dec = _decoder_map.get(None)
         else:
             _fallback_dec = None
@@ -685,7 +753,7 @@ class LoadWorker(QObject):
                     decoder = _decoder_map[ch]
                 else:
                     # First time seeing this channel — resolve once and cache
-                    decoder = cfg.decoder_for(ch) or _fallback_dec
+                    decoder = cfg.decoder_for(BusType.CAN, ch) or _fallback_dec
                     _decoder_map[ch] = decoder
                 samples = decoder.decode_frame(frame) if decoder else []
             else:
@@ -734,7 +802,7 @@ class LoadWorker(QObject):
 
         # Attach the first available decoder to rfs for on-demand signal decode
         if cfg:
-            rfs.decoder = cfg.decoder_for(None)  # All-channels or first
+            rfs.decoder = cfg.decoder_for(BusType.CAN, None)  # All-channels or first
             rfs.channel_config = cfg              # full config for per-channel decode
 
         # Diagnostics
@@ -827,8 +895,8 @@ class LoadWorker(QObject):
         stage_start = time.perf_counter()
         self.progress.emit("Decoding MF4 bus log with asammdf (one pass)...")
         cfg = self._channel_config
-        metadata_keys: set[tuple[int | None, str, str]] | None = None
-        trace_message_names: dict[tuple[int | None, int], str] = {}
+        metadata_keys: set[tuple[BusChannel | None, str, str]] | None = None
+        trace_message_names: dict[tuple[BusChannel | None, int], str] = {}
 
         trace_store = (
             RawFrameStore()
@@ -878,6 +946,13 @@ class LoadWorker(QObject):
                 signal_name,
                 _unit,
             ) in metadata_rows:
+                # Normalise exactly as SignalStore does. The metadata tree is
+                # compared against the store's finished tree below to decide
+                # whether a second full Qt rebuild is needed; if one side kept
+                # bare integer channels and the other bus-tagged keys, they
+                # would never compare equal and every load would pay for a
+                # duplicate rebuild.
+                channel = as_channel_key(channel)
                 messages = payload.setdefault(channel, {})
                 signals = messages.setdefault(message_name, [])
                 if signal_name not in signals:
@@ -897,7 +972,7 @@ class LoadWorker(QObject):
                     _unit,
                 ) in metadata_rows:
                     trace_message_names.setdefault(
-                        (channel, int(message_id)), message_name
+                        (as_channel_key(channel), int(message_id)), message_name
                     )
             else:
                 trace_message_names.update(reader_trace_names)
@@ -980,12 +1055,21 @@ class LoadWorker(QObject):
                 flags_np = np.frombuffer(trace_store.flags, dtype=np.uint8)
                 name_ids_np = np.frombuffer(trace_store.name_ids, dtype=np.uint16)
 
+                # Bit 34 carries the bus so a CAN 1 message name is never
+                # applied to a LIN 1 frame with the same ID, and vice versa.
                 encoded_to_name: dict[int, str] = {}
                 for (channel, message_id), message_name in trace_message_names.items():
-                    channel_byte = 255 if channel is None else int(channel) & 0xFF
+                    key = as_channel_key(channel)
+                    if key is None:
+                        channel_byte, is_lin = 255, 0
+                    else:
+                        bus, number = key
+                        channel_byte = int(number) & 0xFF
+                        is_lin = 1 if bus is BusType.LIN else 0
                     is_extended = 1 if int(message_id) > 0x7FF else 0
                     encoded = (
-                        (channel_byte << 33)
+                        (is_lin << 41)
+                        | (channel_byte << 33)
                         | (is_extended << 32)
                         | (int(message_id) & 0xFFFF_FFFF)
                     )
@@ -1009,6 +1093,9 @@ class LoadWorker(QObject):
                         key_name_ids[idx] = name_id
 
                     frame_keys = (
+                        ((flags_np.astype(np.uint64) & np.uint64(FLAG_LIN))
+                         // np.uint64(FLAG_LIN)) << np.uint64(41)
+                    ) | (
                         channels_np.astype(np.uint64) << np.uint64(33)
                     ) | (
                         (flags_np.astype(np.uint64) & np.uint64(1))
@@ -1032,7 +1119,7 @@ class LoadWorker(QObject):
             store.decoded_frames = trace_decoded_frames
             store.unmatched_frames = trace_frames - trace_decoded_frames
             if cfg:
-                trace_store.decoder = cfg.decoder_for(None)
+                trace_store.decoder = cfg.decoder_for(BusType.CAN, None)
                 trace_store.channel_config = cfg
             self.progress.emit(
                 f"CAN Trace ready: {trace_frames:,} raw frames "

@@ -19,6 +19,14 @@ from datetime import datetime
 from importlib import metadata
 from pathlib import Path
 from typing import Iterable, Mapping
+
+from core.bus_types import (
+    BusChannel,
+    all_channels_key,
+    channel_label,
+    coerce_channel_key,
+    sort_key,
+)
 import gc
 import platform
 import struct
@@ -1083,6 +1091,13 @@ class _Inspection:
             classification = "MDF-RAW-BLOCK-LINK"
             layer = "MDF4 HD/DG/CG structural links"
             dbc_involved = "NO - file structure failed before DBC decoding"
+        elif any("BLF bus content" in item for item in self.failures):
+            # The file is intact and readable; it just carries a bus this
+            # build does not decode. Reporting that as a structure or reader
+            # failure would point the investigation at the wrong layer.
+            classification = "UNSUPPORTED-BUS-CONTENT"
+            layer = "Measurement contains no CAN or LIN traffic"
+            dbc_involved = "NO - no decodable frames exist"
         elif self.failures:
             classification = "MDF-STRUCTURE-OR-READER"
             layer = "MDF/CAN measurement loading"
@@ -1184,6 +1199,46 @@ def inspect_measurement(
             ]
         )
         inspection.probe("Deep MDF probe", "WARN", f"not applicable to {suffix}")
+        if suffix == ".blf":
+            # A BLF whose bus this build does not model loads as an empty
+            # measurement, and nothing else in this report would say why.
+            # Naming the bus content puts the cause next to the symptom.
+            from core.readers.blf_content import blf_bus_content
+            content = blf_bus_content(path)
+            if content.has_can:
+                # No LIN count here: the scan stops at the first CAN object,
+                # so any LIN total would be whatever happened to precede it
+                # rather than what the file holds.
+                inspection.probe("BLF bus content", "PASS", "CAN frames present")
+            elif content.has_lin:
+                body.extend(
+                    [
+                        "",
+                        "BUS CONTENT",
+                        f"  LIN frames: {content.lin_objects:,} | CAN frames: 0",
+                        "  A LIN cluster needs an LDF (or a DBC describing the "
+                        "same layout) assigned to its LIN channel.",
+                    ]
+                )
+                inspection.probe(
+                    "BLF bus content",
+                    "PASS",
+                    f"LIN-only ({content.lin_objects:,} LIN frames)",
+                )
+            elif not content.truncated:
+                body.extend(
+                    [
+                        "",
+                        "BUS CONTENT",
+                        "  No CAN or LIN frames found.",
+                        "  python-can reads CAN objects from BLF and this "
+                        "application adds LIN; a log carrying only FlexRay, "
+                        "Ethernet or MOST has nothing to decode.",
+                    ]
+                )
+                inspection.probe(
+                    "BLF bus content", "FAIL", "no CAN or LIN frames"
+                )
         return inspection.result_text(body)
 
     try:
@@ -1372,11 +1427,72 @@ def _database_candidates(decoder, frame_id: int) -> list[object]:
     return candidates
 
 
-def inspect_databases(
-    channel_mappings: Mapping[int, str],
-    observed_ids: Mapping[int, Iterable[int]] | None = None,
+def _inspect_ldf(
+    path: Path,
+    assigned: list[BusChannel],
+    fallback_bus,
+    lines: list[str],
+    overall: str,
 ) -> str:
-    """Return a redacted text inspection of configured DBC/ARXML databases."""
+    """Append an LDF's contents to the report and return the updated status.
+
+    Kept separate from the DBC/ARXML block rather than folded into it: that
+    block reads cantools attributes throughout (``is_extended_frame``,
+    ``is_fd``, multiplexer ids) which have no counterpart in a LIN cluster, so
+    sharing it would mean reporting fields that cannot apply.
+    """
+    from core.readers.db_format import compatibility_warning, ldf_support_available
+
+    lines.append("  Format: LDF (LIN description file)")
+
+    available, message = ldf_support_available()
+    if not available:
+        lines.append(f"  LOAD FAIL {message}")
+        return "FAIL"
+
+    try:
+        import canmatrix.formats
+        matrices = canmatrix.formats.loadp(str(path), import_type="ldf")
+    except Exception as exc:
+        lines.append(f"  LOAD FAIL {type(exc).__name__}: {_redact(str(exc), [path])}")
+        return "FAIL"
+
+    frames = [frame for matrix in matrices.values() for frame in matrix]
+    if not frames:
+        lines.append("  LOAD FAIL no LIN cluster found in this file")
+        return "FAIL"
+
+    signal_count = sum(len(frame.signals) for frame in frames)
+    lines.append("  LOAD PASS ldfparser via canmatrix")
+    lines.append(f"  Frames: {len(frames):,} | Signals: {signal_count:,}")
+    frame_ids = sorted(int(frame.arbitration_id.id) for frame in frames)
+    lines.append(
+        "  Frame IDs: " + ", ".join(f"0x{fid:02X}" for fid in frame_ids[:32])
+        + (" ..." if len(frame_ids) > 32 else "")
+    )
+
+    # An LDF on a CAN channel is the assignment that silently produces nothing,
+    # so it is called out here rather than left for the user to spot.
+    buses = {key[0] for key in assigned}
+    if fallback_bus is not None:
+        buses.add(fallback_bus)
+    warnings = [
+        warning
+        for warning in (compatibility_warning(str(path), bus) for bus in sorted(buses))
+        if warning
+    ]
+    for warning in warnings:
+        lines.append(f"  ASSIGNMENT WARN {warning}")
+    if warnings and overall == "PASS":
+        return "WARN"
+    return overall
+
+
+def inspect_databases(
+    channel_mappings: Mapping[BusChannel, str],
+    observed_ids: Mapping[BusChannel, Iterable[int]] | None = None,
+) -> str:
+    """Return a redacted text inspection of configured databases."""
     lines = [
         "",
         "=" * 100,
@@ -1388,31 +1504,43 @@ def inspect_databases(
 
     from core.dbc_decoder import DBCDecoder
 
+    channel_mappings = {
+        coerce_channel_key(channel): path
+        for channel, path in channel_mappings.items()
+    }
     observed = {
-        int(channel): {int(frame_id) for frame_id in frame_ids}
+        coerce_channel_key(channel): {int(frame_id) for frame_id in frame_ids}
         for channel, frame_ids in (observed_ids or {}).items()
     }
     unique_paths = list(dict.fromkeys(str(path) for path in channel_mappings.values()))
-    path_to_channels: dict[str, list[int]] = {path: [] for path in unique_paths}
-    fallback_path = channel_mappings.get(0)
-    for channel, path in channel_mappings.items():
-        if int(channel) != 0:
-            path_to_channels[str(path)].append(int(channel))
-    if fallback_path:
+    path_to_channels: dict[str, list[BusChannel]] = {path: [] for path in unique_paths}
+    # Fallbacks are per-bus now: a config can carry both an All-CAN and an
+    # All-LIN database, and each only covers its own bus.
+    fallback_paths = {
+        key[0]: path for key, path in channel_mappings.items() if key[1] == 0
+    }
+    for key, path in channel_mappings.items():
+        if key[1] != 0:
+            path_to_channels[str(path)].append(key)
+    for bus, fallback_path in fallback_paths.items():
         for channel in observed:
-            if channel not in channel_mappings:
+            if channel[0] == bus and channel not in channel_mappings:
                 path_to_channels[str(fallback_path)].append(channel)
 
+    fallback_by_path = {path: bus for bus, path in fallback_paths.items()}
     overall = "PASS"
     for raw_path in unique_paths:
         path = Path(raw_path)
-        assigned = sorted(set(path_to_channels.get(raw_path, [])))
-        if raw_path == fallback_path:
-            assignment = "All Channels" + (
-                f" (observed {','.join(map(str, assigned))})" if assigned else ""
-            )
+        assigned = sorted(set(path_to_channels.get(raw_path, [])), key=sort_key)
+        if raw_path in fallback_by_path:
+            observed_text = ",".join(channel_label(k) for k in assigned)
+            assignment = channel_label(
+                all_channels_key(fallback_by_path[raw_path])
+            ) + (f" (observed {observed_text})" if assigned else "")
         else:
-            assignment = ",".join(f"CAN {channel}" for channel in assigned) or "(none)"
+            assignment = ",".join(
+                channel_label(key) for key in assigned
+            ) or "(none)"
         lines.extend(
             [
                 "",
@@ -1426,6 +1554,16 @@ def inspect_databases(
             continue
         stat = path.stat()
         lines.append(f"  Size: {stat.st_size:,} bytes")
+
+        if path.suffix.lower() == ".ldf":
+            # cantools cannot read an LDF at all, so routing one through
+            # DBCDecoder reports a format error and hides whatever the real
+            # problem was. canmatrix/ldfparser is the parser that actually
+            # applies to this file.
+            overall = _inspect_ldf(path, assigned, fallback_by_path.get(raw_path),
+                                   lines, overall)
+            continue
+
         try:
             decoder = DBCDecoder(path)
             database = decoder.database
