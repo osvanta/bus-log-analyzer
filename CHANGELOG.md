@@ -4,6 +4,9 @@
 > repository moved to `github.com/osvanta/bus-log-analyzer`. Releases up to and
 > including v00.00.60 were published as **CAN Scope / CANScope**; the entries below
 > use the names in force at the time of each release.
+## [v00.01.02] — 2026-09-10: LIN bus support
+
+### line type option added in right click menu
 
 ## [v00.01.01] — 2026-09-05: LIN bus support
 
