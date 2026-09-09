@@ -218,6 +218,7 @@ class MainWindow(QMainWindow):
         )
         self.plot_panel.backgroundColorChanged.connect(self._on_background_color_changed)
         self.plot_panel.signalColorChanged.connect(self._on_signal_color_changed)
+        self.plot_panel.signalLineStyleChanged.connect(self._on_signal_line_style_changed)
 
         button_row = QWidget()
         button_layout = QHBoxLayout(button_row)
@@ -835,7 +836,9 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
         config = {
             'type': 'canscope_temporary_plot_config',
-            'version': 1,
+            # v2 added 'line_style'. Readers treat it as optional, so a v1 file
+            # still restores — it just carries no styles.
+            'version': 2,
             'plot_type': plot_type,
             'signals': [
                 {
@@ -846,6 +849,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
                     'axis_visible': self.plot_panel._items[key].axis_visible,
                     'own_axis': self.plot_panel._items[key].own_axis,
                     'multistack_id': self.plot_panel._items[key].multistack_id,
+                    'line_style': self.plot_panel._items[key].line_style,
                 }
                 for key in keys
             ],
@@ -898,6 +902,12 @@ QToolButton:pressed { background-color: #1a2a3a; }
             str(signal['key']): int(signal['multistack_id'])
             for signal in signals if 'multistack_id' in signal
         }
+        # Line styles are held by the plot panel, which applies them as each
+        # series is added — no separate restore pass needed.
+        self.plot_panel.set_pending_line_styles({
+            str(signal['key']): str(signal['line_style'])
+            for signal in signals if signal.get('line_style')
+        })
         plot_type = str(data.get('plot_type', 'normal'))
         self._pending_plot_type = (
             plot_type if plot_type in {'normal', 'multi_axis', 'stacked', 'multistack'}
@@ -1644,6 +1654,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
                     'axis_visible': self.plot_panel._items[k].axis_visible,
                     'own_axis':     self.plot_panel._items[k].own_axis,
                     'multistack_id': self.plot_panel._items[k].multistack_id,
+                    'line_style':   self.plot_panel._items[k].line_style,
                 }
                 for k in self.plot_panel.plotted_keys()
             ],
@@ -1719,6 +1730,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
         pending_axis_visible = {}
         pending_own_axis     = {}
         pending_multistack   = {}
+        pending_line_styles  = {}
         for s in signals_data:
             if isinstance(s, str):
                 pending_keys.append(s)
@@ -1736,7 +1748,13 @@ QToolButton:pressed { background-color: #1a2a3a; }
                         pending_own_axis[k] = bool(s['own_axis'])
                     if 'multistack_id' in s:
                         pending_multistack[k] = int(s['multistack_id'])
+                    if s.get('line_style'):
+                        pending_line_styles[k] = str(s['line_style'])
         pending_colors = dict(data.get('signal_colors') or {})
+        # Queue styles on the plot panel: it applies them as each series is
+        # added, which covers both the reuse-current-data path below and the
+        # post-decode reload. Absent from a pre-v2 config → default style.
+        self.plot_panel.set_pending_line_styles(pending_line_styles)
         generated_errors = self.calculated_signals.replace_definitions(
             data.get('generated_signals') or []
         )
@@ -1816,6 +1834,10 @@ QToolButton:pressed { background-color: #1a2a3a; }
             self.add_signals_to_plot(pending_keys)
             for key, color in pending_colors.items():
                 self.plot_panel.set_series_color(key, color)
+            # A key that was already plotted is not re-added, so the pending
+            # queue never sees it — apply those styles directly.
+            for key, style in pending_line_styles.items():
+                self.plot_panel.set_series_line_style(key, style)
             # Restore visibility and group assignments
             needs_rebuild = False
             for key in pending_keys:
@@ -2542,6 +2564,9 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _on_signal_color_changed(self, key: str, color: str) -> None:
         self._log(f'Signal color changed: {key} -> {color}')
+
+    def _on_signal_line_style_changed(self, key: str, style: str) -> None:
+        self._log(f'Signal line style changed: {key} -> {style}')
 
     def _set_ready_status(self) -> None:
         self._update_status('Ready', "Click 'Open File' to load BLF / ASC / MF4 / MDF / CSV.")

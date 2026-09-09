@@ -96,6 +96,30 @@ class _LeftAxis(pg.AxisItem):
             QTimer.singleShot(0, self._apply_title_pos)
 
 
+#: Line styles offered for a plotted signal, in menu order.
+#: This dict is the single source of truth: the context menu is built from it,
+#: saved configurations store its keys, and any name not found here falls back
+#: to DEFAULT_LINE_STYLE — so a config written by a newer version still loads.
+LINE_STYLES: dict[str, tuple[str, Qt.PenStyle]] = {
+    'solid':   ('Solid',    Qt.PenStyle.SolidLine),
+    'dash':    ('Dashed',   Qt.PenStyle.DashLine),
+    'dot':     ('Dotted',   Qt.PenStyle.DotLine),
+    'dashdot': ('Dash-dot', Qt.PenStyle.DashDotLine),
+}
+
+DEFAULT_LINE_STYLE = 'solid'
+
+
+def normalise_line_style(name: object) -> str:
+    """Return a known line-style key, falling back to the default."""
+    return str(name) if name in LINE_STYLES else DEFAULT_LINE_STYLE
+
+
+def pen_style(name: object) -> Qt.PenStyle:
+    """Map a line-style key to its Qt pen style."""
+    return LINE_STYLES[normalise_line_style(name)][1]
+
+
 @dataclass(slots=True)
 class PlottedSignal:
     key: str
@@ -111,6 +135,7 @@ class PlottedSignal:
     unit_group: str = ''        # multi-axis mode: normalized unit-group key
     own_axis: bool = False      # multi-axis mode: detach onto individual Y axis
     multistack_id: int = -1     # MultiStack row; -1 means not assigned yet
+    line_style: str = DEFAULT_LINE_STYLE   # key into LINE_STYLES
 
 
 
@@ -350,6 +375,7 @@ class PlotPanel(QWidget):
     signalDroppedToStack = Signal(list, int)
     backgroundColorChanged = Signal(str)
     signalColorChanged = Signal(str, str)
+    signalLineStyleChanged = Signal(str, str)
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -403,6 +429,10 @@ class PlotPanel(QWidget):
         # Limited to _UNDO_DEPTH entries (oldest dropped first).
         self._undo_stack: list[tuple[dict, str | None]] = []
         self._UNDO_DEPTH: int = 3
+        # Line styles waiting for their series to be added. A configuration is
+        # loaded before the measurement finishes decoding, so the style has to
+        # survive until add_series() sees the key. Entries are consumed on use.
+        self._pending_line_styles: dict[str, str] = {}
         self._cursor1_enabled: bool = True   # mirrors button default
         # Signal name display flags (default: signal name only)
         self._name_show_channel: bool = False
@@ -1179,6 +1209,7 @@ class PlotPanel(QWidget):
             curve=None,
             color=color,
             multistack_id=multistack_id,
+            line_style=self._pending_line_styles.pop(key, DEFAULT_LINE_STYLE),
         )
         if self._current_key is None:
             self._current_key = key
@@ -1939,10 +1970,12 @@ class PlotPanel(QWidget):
         elif self._show_points:
             width = (self._SELECTED_POINTS_LINE_WIDTH if selected
                      else self._POINTS_LINE_WIDTH)
-            pen = pg.mkPen(color=plotted.color, width=width)
+            pen = pg.mkPen(color=plotted.color, width=width,
+                           style=pen_style(plotted.line_style))
         else:
             width = self._SELECTED_LINE_WIDTH if selected else self._LINE_WIDTH
-            pen = pg.mkPen(color=plotted.color, width=width)
+            pen = pg.mkPen(color=plotted.color, width=width,
+                           style=pen_style(plotted.line_style))
 
         if set_data:
             # np.asarray on array.array('d') is zero-copy via the buffer
@@ -2527,6 +2560,36 @@ class PlotPanel(QWidget):
     def series_colors(self) -> dict[str, str]:
         return {k: v.color for k, v in self._items.items()}
 
+    def set_series_line_style(self, key: str, style: str) -> None:
+        """Set one series' line style. Unknown names fall back to the default."""
+        plotted = self._items.get(key)
+        if plotted is None:
+            return
+        style = normalise_line_style(style)
+        if plotted.line_style == style:
+            return
+        self._push_undo()
+        plotted.line_style = style
+        # Cheap pen-only update: the data arrays are not re-read.
+        self._apply_curve_style(plotted, set_data=False,
+                                selected=key in self.selected_keys())
+        self.signalLineStyleChanged.emit(key, style)
+
+    def series_line_styles(self) -> dict[str, str]:
+        return {k: v.line_style for k, v in self._items.items()}
+
+    def set_pending_line_styles(self, styles: dict[str, str]) -> None:
+        """Queue line styles for series that are not plotted yet.
+
+        A configuration is applied before its measurement has finished
+        decoding, so styles have to wait for ``add_series`` to see each key.
+        Replaces any previous queue; each entry is consumed once.
+        """
+        self._pending_line_styles = {
+            str(key): normalise_line_style(style)
+            for key, style in (styles or {}).items()
+        }
+
     def set_background_color(self, color: str) -> None:
         self._background_color = color
         self.plot.setBackground(color)
@@ -2775,7 +2838,8 @@ class PlotPanel(QWidget):
     def _push_undo(self) -> None:
         """
         Snapshot current plot state onto the undo stack.
-        Snapshot captures: signal key order, per-signal color, current selection.
+        Snapshot captures: signal key order, per-signal color and line style,
+        current selection.
         SeriesSignal objects are NOT deep-copied (their data is immutable after load).
         """
         snapshot = {
@@ -2790,6 +2854,7 @@ class PlotPanel(QWidget):
                 axis_visible=v.axis_visible,
                 own_axis=v.own_axis,
                 multistack_id=v.multistack_id,
+                line_style=v.line_style,
             )
             for k, v in self._items.items()
         }
@@ -3546,6 +3611,25 @@ class PlotPanel(QWidget):
             act_color.triggered.connect(lambda: self._choose_color_for_key(str(selected_keys[0])))
         act_color.setEnabled(has_one)
         menu.addAction(act_color)
+
+        # Line style — same single-selection rule as colour
+        key_one = str(selected_keys[0]) if has_one else ''
+        current_style = (
+            self._items[key_one].line_style if key_one in self._items else None
+        )
+        style_menu = self._make_menu(menu)
+        style_menu.setTitle('Line style')
+        for name, (label, _qt_style) in LINE_STYLES.items():
+            style_act = QAction(label, style_menu, checkable=True)
+            style_act.setChecked(name == current_style)
+            if has_one:
+                style_act.triggered.connect(
+                    lambda _checked=False, k=key_one, n=name:
+                    self.set_series_line_style(k, n)
+                )
+            style_menu.addAction(style_act)
+        style_menu.setEnabled(has_one)
+        menu.addMenu(style_menu)
         menu.addSeparator()
 
         rm_label = ('Remove selected signals' if len(selected_keys) > 1

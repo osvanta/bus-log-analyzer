@@ -119,7 +119,7 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
     saved = json.loads(temporary_config.read_text(encoding="utf-8"))
     assert saved == {
         "type": "canscope_temporary_plot_config",
-        "version": 1,
+        "version": 2,
         "plot_type": "stacked",
         "signals": [
             {
@@ -130,6 +130,7 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
                 "axis_visible": True,
                 "own_axis": False,
                 "multistack_id": -1,
+                "line_style": "solid",
             }
         ],
     }
