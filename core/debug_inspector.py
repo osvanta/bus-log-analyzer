@@ -1408,23 +1408,7 @@ def inspect_measurement(
 
 
 def _database_candidates(decoder, frame_id: int) -> list[object]:
-    candidates: list[object] = []
-    seen: set[int] = set()
-    for lookup in (frame_id, frame_id & 0x1FFFFFFF, frame_id & 0x7FF):
-        for message in decoder._messages_exact.get(lookup, []):
-            marker = id(message)
-            if marker not in seen:
-                seen.add(marker)
-                candidates.append(message)
-    if frame_id > 0x7FF:
-        pgn = decoder._extract_j1939_pgn(frame_id)
-        if pgn is not None:
-            for message in decoder._messages_pgn.get(pgn, []):
-                marker = id(message)
-                if marker not in seen:
-                    seen.add(marker)
-                    candidates.append(message)
-    return candidates
+    return decoder.candidates_for(frame_id, frame_id > 0x7FF)
 
 
 def _inspect_ldf(

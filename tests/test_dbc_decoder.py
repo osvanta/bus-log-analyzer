@@ -307,3 +307,97 @@ def test_diagnostics_text_contains_no_signals_counter(decoder, frame_diag):
     text = decoder.diagnostics_text()
     assert "Matched, no signals:" in text
     assert "1" in text
+
+
+# ── J1939 source-address matching (issue #13) ─────────────────────────────
+
+_J1939_DBC = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: MCU BMS ENG
+
+BO_ 2566834927 DM1_239: 8 MCU
+ SG_ DM1_239_DTC1 : 16|32@1+ (1,0) [0|4294967295] "" Vector__XXX
+
+BO_ 2566834931 DM1_243: 8 BMS
+ SG_ DM1_243_DTC1 : 16|32@1+ (1,0) [0|4294967295] "" Vector__XXX
+
+BO_ 2566840320 VehicleDist: 8 ENG
+ SG_ TotalDist : 0|32@1+ (0.125,0) [0|526385151.9] "km" Vector__XXX
+"""
+
+
+@pytest.fixture
+def j1939_decoder(tmp_path):
+    """DM1 (PGN 0xFECA) at SAs 0xEF and 0xF3; VD (PGN 0xFEE0) at SA 0x00 only."""
+    from core.dbc_decoder import DBCDecoder
+
+    path = tmp_path / "j1939.dbc"
+    path.write_text(_J1939_DBC, encoding="utf-8")
+    return DBCDecoder(str(path))
+
+
+def _j1939_frame(arb_id: int, dtc: int = 0) -> RawFrame:
+    data = bytes([0x00, 0xFF]) + dtc.to_bytes(4, "little") + bytes([0xFF, 0xFF])
+    return RawFrame(
+        timestamp=0.0, channel=1, arbitration_id=arb_id,
+        is_extended_id=True, is_fd=False, dlc=8,
+        data=data, direction="Rx",
+    )
+
+
+def _names(messages) -> list[str]:
+    return [m.name for m in messages]
+
+
+@pytest.mark.parametrize("arb_id", [0x18FECA13, 0x18FECAE6])
+def test_j1939_undefined_sa_of_multi_sa_pgn_stays_undecoded(j1939_decoder, arb_id):
+    assert j1939_decoder.candidates_for(arb_id, True) == []
+    assert j1939_decoder.decode_frame(_j1939_frame(arb_id)) == []
+
+
+@pytest.mark.parametrize("arb_id, name", [
+    (0x18FECAEF, "DM1_239"),
+    (0x18FECAF3, "DM1_243"),
+])
+def test_j1939_defined_sa_matches_only_its_own_message(j1939_decoder, arb_id, name):
+    assert _names(j1939_decoder.candidates_for(arb_id, True)) == [name]
+
+
+def test_j1939_sa_match_ignores_priority(j1939_decoder):
+    # Priority 7 instead of the DBC's 6: same PGN and SA, still DM1_239.
+    samples = j1939_decoder.decode_frame(_j1939_frame(0x1CFECAEF, dtc=61765))
+    assert [(s.signal_name, s.value) for s in samples] == [("DM1_239_DTC1", 61765)]
+
+
+def test_j1939_single_sa_pgn_keeps_placeholder_fallback(j1939_decoder):
+    # VehicleDist is defined once, at SA 0x00; any sender's frame decodes into it.
+    assert _names(j1939_decoder.candidates_for(0x18FEE0FE, True)) == ["VehicleDist"]
+
+
+def test_vectorized_candidates_follow_decoder(j1939_decoder):
+    from core.vectorized_decoder import VectorizedDBC
+
+    vec = VectorizedDBC(j1939_decoder)
+    assert vec.get_candidates(0x18FECA13, is_extended=True) == []
+    assert _names(vec.get_candidates(0x18FECAEF, is_extended=True)) == ["DM1_239"]
+    assert _names(vec.get_candidates(0x18FEE0FE, is_extended=True)) == ["VehicleDist"]
+
+
+def test_j1939_dm1_trace_holds_only_its_own_node(j1939_decoder):
+    # Four nodes send DM1 in the same millisecond; only SA 0xEF has a DTC.
+    frames = [
+        _j1939_frame(0x18FECAEF, dtc=61765),
+        _j1939_frame(0x18FECA13),
+        _j1939_frame(0x18FECAE6),
+        _j1939_frame(0x18FECAF3),
+    ]
+    by_signal: dict[str, list] = {}
+    for frame in frames:
+        for s in j1939_decoder.decode_frame(frame):
+            by_signal.setdefault(s.signal_name, []).append(s.value)
+    assert by_signal == {"DM1_239_DTC1": [61765], "DM1_243_DTC1": [0]}

@@ -243,6 +243,13 @@ class DBCDecoder:
         # Primary lookup: arbitration_id → [message, ...]
         self._messages_exact: dict[int, list[Any]] = {}
         self._messages_pgn:   dict[int, list[Any]] = {}
+        # (PGN, source address) → [message, ...]. Used for the PGNs in
+        # _pgn_sa_specific, which the database defines at more than one SA:
+        # their frames only decode into the message for their own SA, and an
+        # SA the database does not define stays undecoded instead of
+        # borrowing another node's message.
+        self._messages_pgn_sa: dict[tuple[int, int], list[Any]] = {}
+        self._pgn_sa_specific: set[int] = set()
 
         # Perf: per-frame candidate cache (same ID seen repeatedly → reuse result)
         self._candidate_cache: dict[int, list[Any]] = {}
@@ -291,11 +298,19 @@ class DBCDecoder:
                 pgn = self._extract_j1939_pgn(frame_id)
                 if pgn is not None:
                     self._messages_pgn.setdefault(pgn, []).append(message)
+                    self._messages_pgn_sa.setdefault(
+                        (pgn, frame_id & 0xFF), []
+                    ).append(message)
 
             # Perf: pre-cache signal choices so decode_frame avoids getattr per sample
             for signal in getattr(message, "signals", []):
                 choices = getattr(signal, "choices", None) or {}
                 self._choices_cache[(message.name, signal.name)] = dict(choices)
+
+        self._pgn_sa_specific = {
+            pgn for pgn, messages in self._messages_pgn.items()
+            if len({int(m.frame_id) & 0xFF for m in messages}) > 1
+        }
 
     # ── Decode kwargs — built once, reused every frame ────────────────────
 
@@ -329,16 +344,15 @@ class DBCDecoder:
         ps = (can_id >> 8) & 0xFF
         return (pf << 8) if pf < 240 else ((pf << 8) | ps)
 
-    def _get_candidates(self, frame: RawFrame) -> list[Any]:
+    def candidates_for(self, arb_id: int, is_extended: bool) -> list[Any]:
         """
-        Return message candidates for this frame's arbitration_id.
-        Result is cached after first lookup — same ID seen in every periodic frame.
-        """
-        arb_id = frame.arbitration_id
-        cached = self._candidate_cache.get(arb_id)
-        if cached is not None:
-            return cached
+        Return the messages that may decode ``arb_id``, best match first.
 
+        Exact and masked ID matches come first. Extended frames then fall back
+        to J1939 PGN matching: a PGN the database defines at a single source
+        address matches any SA (the DBC's SA is a placeholder), while a PGN
+        defined at several SAs only matches the message for the frame's SA.
+        """
         seen: set[tuple[str, int]] = set()
         candidates: list[Any] = []
 
@@ -354,12 +368,29 @@ class DBCDecoder:
                 add(msg)
 
         # J1939 PGN fallback
-        if frame.is_extended_id or arb_id > 0x7FF:
+        if is_extended or arb_id > 0x7FF:
             pgn = self._extract_j1939_pgn(arb_id)
             if pgn is not None:
-                for msg in self._messages_pgn.get(pgn, []):
+                if pgn in self._pgn_sa_specific:
+                    matches = self._messages_pgn_sa.get((pgn, arb_id & 0xFF), [])
+                else:
+                    matches = self._messages_pgn.get(pgn, [])
+                for msg in matches:
                     add(msg)
 
+        return candidates
+
+    def _get_candidates(self, frame: RawFrame) -> list[Any]:
+        """
+        Return message candidates for this frame's arbitration_id.
+        Result is cached after first lookup — same ID seen in every periodic frame.
+        """
+        arb_id = frame.arbitration_id
+        cached = self._candidate_cache.get(arb_id)
+        if cached is not None:
+            return cached
+
+        candidates = self.candidates_for(arb_id, frame.is_extended_id)
         self._candidate_cache[arb_id] = candidates
         return candidates
 
