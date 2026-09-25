@@ -401,3 +401,65 @@ def test_j1939_dm1_trace_holds_only_its_own_node(j1939_decoder):
         for s in j1939_decoder.decode_frame(frame):
             by_signal.setdefault(s.signal_name, []).append(s.value)
     assert by_signal == {"DM1_239_DTC1": [61765], "DM1_243_DTC1": [0]}
+
+
+# ── Standard vs extended IDs ──────────────────────────────────────────────
+
+_MIXED_ID_DBC = """\
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: GW MCU
+
+BO_ 531 Std213: 8 GW
+ SG_ Counter : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 2566834927 DM1: 8 MCU
+ SG_ DTC1 : 16|32@1+ (1,0) [0|4294967295] "" Vector__XXX
+"""
+
+
+@pytest.fixture
+def mixed_id_decoder(tmp_path):
+    """Standard 0x213 and extended 0x18FECAEF (DM1, defined at SA 0xEF only)."""
+    from core.dbc_decoder import DBCDecoder
+
+    path = tmp_path / "mixed.dbc"
+    path.write_text(_MIXED_ID_DBC, encoding="utf-8")
+    return DBCDecoder(str(path))
+
+
+def _frame(arb_id: int, is_extended: bool) -> RawFrame:
+    return RawFrame(
+        timestamp=0.0, channel=1, arbitration_id=arb_id,
+        is_extended_id=is_extended, is_fd=False, dlc=8,
+        data=bytes(8), direction="Rx",
+    )
+
+
+def test_extended_frame_does_not_match_standard_message_on_its_low_bits(mixed_id_decoder):
+    # 0x18FECA13 & 0x7FF == 0x213. The frame is DM1 from SA 0x13.
+    assert _names(mixed_id_decoder.candidates_for(0x18FECA13, True)) == ["DM1"]
+
+
+def test_standard_frame_does_not_match_extended_message_on_its_low_bits(mixed_id_decoder):
+    # 0x18FECAEF & 0x7FF == 0x2EF.
+    assert mixed_id_decoder.candidates_for(0x2EF, False) == []
+
+
+def test_each_frame_type_still_matches_its_own_messages(mixed_id_decoder):
+    assert _names(mixed_id_decoder.candidates_for(0x213, False)) == ["Std213"]
+    assert _names(mixed_id_decoder.candidates_for(0x18FECAEF, True)) == ["DM1"]
+    # An ID that still carries the DBC's extended flag bit matches too.
+    assert _names(mixed_id_decoder.candidates_for(0x98FECAEF, True)) == ["DM1"]
+
+
+def test_standard_and_extended_frame_with_the_same_id_decode_apart(mixed_id_decoder):
+    standard = mixed_id_decoder.decode_frame(_frame(0x213, is_extended=False))
+    extended = mixed_id_decoder.decode_frame(_frame(0x213, is_extended=True))
+
+    assert [s.message_name for s in standard] == ["Std213"]
+    assert extended == []

@@ -262,8 +262,9 @@ class DBCDecoder:
         self._decode_signature = None
         self._decode_kwargs_cache: dict[str, Any] | None = None   # perf: built once
 
-        # Primary lookup: arbitration_id → [message, ...]
-        self._messages_exact: dict[int, list[Any]] = {}
+        # Primary lookup: (is_extended, arbitration_id) → [message, ...]. A
+        # standard and an extended frame never match each other's messages.
+        self._messages_exact: dict[tuple[bool, int], list[Any]] = {}
         self._messages_pgn:   dict[int, list[Any]] = {}
         # (PGN, source address) → [message, ...]. Used for the PGNs in
         # _pgn_sa_specific, which the database defines at more than one SA:
@@ -274,7 +275,7 @@ class DBCDecoder:
         self._pgn_sa_specific: set[int] = set()
 
         # Perf: per-frame candidate cache (same ID seen repeatedly → reuse result)
-        self._candidate_cache: dict[int, list[Any]] = {}
+        self._candidate_cache: dict[tuple[int, bool], list[Any]] = {}
 
         # Perf: per-signal choices dict cached at build time (avoids getattr per sample)
         # key = (message_name, signal_name) → {int_key: label_str}
@@ -310,12 +311,12 @@ class DBCDecoder:
                 self._dbc_message_ids_preview.append(
                     f"{message.name} | {frame_id_text} | len={getattr(message, 'length', '?')}"
                 )
-            # Register under all masked variants (exact, 29-bit, 11-bit)
-            for fid in (frame_id, frame_id & 0x1FFFFFFF, frame_id & 0x7FF):
-                if fid >= 0:
-                    self._messages_exact.setdefault(fid, []).append(message)
-            # J1939 PGN index
             is_extended = bool(getattr(message, "is_extended_frame", False)) or frame_id > 0x7FF
+            # Register under the exact ID and the ID without the extended flag bit
+            for fid in (frame_id, frame_id & 0x1FFFFFFF):
+                if fid >= 0:
+                    self._messages_exact.setdefault((is_extended, fid), []).append(message)
+            # J1939 PGN index
             if is_extended:
                 pgn = self._extract_j1939_pgn(frame_id)
                 if pgn is not None:
@@ -370,10 +371,12 @@ class DBCDecoder:
         """
         Return the messages that may decode ``arb_id``, best match first.
 
-        Exact and masked ID matches come first. Extended frames then fall back
-        to J1939 PGN matching: a PGN the database defines at a single source
-        address matches any SA (the DBC's SA is a placeholder), while a PGN
-        defined at several SAs only matches the message for the frame's SA.
+        Exact ID matches come first, among messages of the frame's own type:
+        a standard frame only matches standard messages and an extended frame
+        only extended ones. Extended frames then fall back to J1939 PGN
+        matching: a PGN the database defines at a single source address
+        matches any SA (the DBC's SA is a placeholder), while a PGN defined at
+        several SAs only matches the message for the frame's SA.
         """
         seen: set[tuple[str, int]] = set()
         candidates: list[Any] = []
@@ -384,13 +387,15 @@ class DBCDecoder:
                 seen.add(key)
                 candidates.append(msg)
 
-        # Exact + masked lookups
-        for lookup_id in (arb_id, arb_id & 0x1FFFFFFF, arb_id & 0x7FF):
-            for msg in self._messages_exact.get(lookup_id, []):
+        extended = is_extended or arb_id > 0x7FF
+
+        # Exact lookups, with and without the extended flag bit
+        for lookup_id in (arb_id, arb_id & 0x1FFFFFFF):
+            for msg in self._messages_exact.get((extended, lookup_id), []):
                 add(msg)
 
         # J1939 PGN fallback
-        if is_extended or arb_id > 0x7FF:
+        if extended:
             pgn = self._extract_j1939_pgn(arb_id)
             if pgn is not None:
                 if pgn in self._pgn_sa_specific:
@@ -407,13 +412,13 @@ class DBCDecoder:
         Return message candidates for this frame's arbitration_id.
         Result is cached after first lookup — same ID seen in every periodic frame.
         """
-        arb_id = frame.arbitration_id
-        cached = self._candidate_cache.get(arb_id)
+        cache_key = (frame.arbitration_id, bool(frame.is_extended_id))
+        cached = self._candidate_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        candidates = self.candidates_for(arb_id, frame.is_extended_id)
-        self._candidate_cache[arb_id] = candidates
+        candidates = self.candidates_for(*cache_key)
+        self._candidate_cache[cache_key] = candidates
         return candidates
 
     # ── Frame decode ──────────────────────────────────────────────────────
