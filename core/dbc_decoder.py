@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Hashable, Iterable
 import inspect
 import xml.etree.ElementTree as ET
 
@@ -231,6 +231,28 @@ def load_database_file(
         load_messages.append("The original ARXML file was not modified.")
         load_messages.append("Database loaded in ARXML compatibility mode.")
         return db, load_messages
+
+
+def source_address_message_name(message_name: str, source_address: int) -> str:
+    """Name the series of one J1939 sender of a message that several send."""
+    return f"{message_name} [SA 0x{source_address:02X}]"
+
+
+def multi_sender_messages(matches: Iterable[tuple[Hashable, int]]) -> set[Hashable]:
+    """
+    Return the keys matched by extended frames from more than one source address.
+
+    *matches* pairs a key identifying a database message with the ID of a
+    frame that decoded into it. A J1939 message matched through its PGN
+    placeholder can be sent by several ECUs; their series are kept apart
+    instead of interleaving, e.g. one ECU reporting a switch and another
+    reporting it as not available.
+    """
+    sources: dict[Hashable, set[int]] = {}
+    for key, frame_id in matches:
+        if frame_id > 0x7FF:
+            sources.setdefault(key, set()).add(frame_id & 0xFF)
+    return {key for key, addresses in sources.items() if len(addresses) > 1}
 
 
 class DBCDecoder:
