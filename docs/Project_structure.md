@@ -215,7 +215,12 @@ empty measurement with no error and nothing to point at.
   measurement is an MF4 (asammdf) or a BLF/ASC (LDF→DBC conversion). A saved
   plot configuration must keep working when the same cluster is recorded in a
   different container.
-- MF4/MDF native fast loading does not materialize CAN Trace; its compatibility
-  fallback behavior remains unchanged.
+- MF4/MDF native fast loading builds CAN Trace from whole bus-logging channel
+  groups in bulk. The groups arrive one bus channel at a time, so the rows are
+  then put in timestamp order (`RawFrameStore.sort_by_time()`, stable) — the
+  trace dialog's jump-to-time is a binary search that relies on it. BLF, ASC
+  and CSV traces keep file order and are never sorted. The compatibility
+  fallback (python-can's `MF4Reader`, which already merges groups by time)
+  remains unchanged.
 - Signal names, message names/IDs, units, enum display values, decoded sample
   counts, and tree hierarchy must remain stable for the validated fixtures.

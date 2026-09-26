@@ -1026,6 +1026,17 @@ class LoadWorker(QObject):
             self.progress.emit(
                 f"WARNING: CAN Trace could not be loaded ({trace_warning})"
             )
+        if trace_store is not None and trace_frames:
+            # The reader appends one channel group at a time, so a file with a
+            # group per bus channel arrives channel by channel, not in time
+            # order. Sorting here also covers the recovery path below, which
+            # rebuilds its trace from this store's row order.
+            try:
+                trace_store.sort_by_time()
+            except Exception as exc:
+                self.progress.emit(
+                    f"WARNING: CAN Trace left in file order ({exc})"
+                )
         if (
             trace_store is not None
             and trace_frames

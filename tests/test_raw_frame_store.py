@@ -309,3 +309,152 @@ def test_integer_channel_filter_still_means_can():
 
     assert list(store.build_match_mask("", 2)) == [True, False]
     store.close()
+
+
+# ── sort_by_time ─────────────────────────────────────────────────────────
+
+def _channel_by_half(number: int) -> int:
+    return 1 if number < 50 else 2
+
+
+def _numbered_store(timestamps, channel_of=lambda number: 1) -> RawFrameStore:
+    """
+    One row per timestamp. Every column, and both ends of the 64-byte payload
+    record, is derived from the row's own number, so a row that lost its
+    payload or any single column in a reorder no longer agrees with itself.
+    """
+    from core.bus_types import BusType
+
+    store = RawFrameStore()
+    for number, timestamp in enumerate(timestamps):
+        payload = bytearray(64)
+        payload[0] = payload[63] = number
+        store.append(
+            timestamp=timestamp, channel=channel_of(number),
+            arb_id=0x100 + number, dlc=64 + number % 3,
+            direction=('Rx', 'Tx', 'Unknown')[number % 3],
+            is_extended=number % 2 == 1, is_fd=True, data=bytes(payload),
+            frame_name=f'Msg{number}', decoded=number % 4 == 0,
+            bus=BusType.LIN if number % 5 == 0 else BusType.CAN,
+        )
+    return store
+
+
+def _assert_rows_intact(store: RawFrameStore, channel_of=lambda number: 1) -> None:
+    from core.bus_types import BusType
+
+    for record in store.get_window(range(len(store))):
+        number = record.arbitration_id - 0x100
+        assert record.data[0] == record.data[63] == number
+        assert record.dlc == 64 + number % 3
+        assert record.direction == ('Rx', 'Tx', 'Unknown')[number % 3]
+        assert record.is_extended == (number % 2 == 1)
+        assert record.decoded == (number % 4 == 0)
+        assert record.bus is (BusType.LIN if number % 5 == 0 else BusType.CAN)
+        assert record.frame_name == f'Msg{number}'
+        assert record.channel == channel_of(number)
+
+
+def test_sort_by_time_interleaves_channel_groups_and_keeps_each_row_whole():
+    # Appended one channel group after the other, as the MF4 bus-logging
+    # path does: CAN 1 on even milliseconds, then CAN 2 on odd ones.
+    timestamps = ([i * 0.002 for i in range(50)]
+                  + [i * 0.002 + 0.001 for i in range(50)])
+    store = _numbered_store(timestamps, _channel_by_half)
+
+    assert store.sort_by_time() is True
+    store.seal()
+
+    times = np.frombuffer(store.timestamps, dtype=np.float64)
+    assert np.all(np.diff(times) > 0)
+    assert np.frombuffer(store.channels, dtype=np.uint8)[:4].tolist() == [1, 2, 1, 2]
+    _assert_rows_intact(store, _channel_by_half)
+    store.close()
+
+
+def test_sort_by_time_is_stable_for_equal_timestamps():
+    count = 3_000
+    numbers = np.arange(count)
+    timestamps = ((-numbers) % 3).astype(np.float64)       # 0, 2, 1, 0, 2, 1 ...
+    store = RawFrameStore()
+    store.append_numpy_batch(
+        timestamps=timestamps,
+        channels=np.ones(count, dtype=np.uint8),
+        arb_ids=numbers.astype(np.uint32),
+        dlcs=np.full(count, 4, dtype=np.uint8),
+        directions=np.zeros(count, dtype=np.uint8),
+        flags=np.zeros(count, dtype=np.uint8),
+        data_rows=numbers.astype('<u4').view(np.uint8).reshape(count, 4),
+    )
+
+    store.sort_by_time()
+    store.seal()
+
+    arb_ids = np.frombuffer(store.arb_ids, dtype=np.uint32)
+    assert arb_ids.tolist() == numbers[np.argsort(timestamps, kind='stable')].tolist()
+    payload_numbers = [int.from_bytes(record.data, 'little')
+                       for record in store.get_window(range(count))]
+    assert payload_numbers == arb_ids.tolist()
+    store.close()
+
+
+def test_sort_by_time_leaves_an_ordered_store_untouched():
+    store = _numbered_store([0.0, 0.1, 0.1, 0.2])    # equal neighbours are in order
+    data_path = store._data_path
+
+    assert store.sort_by_time() is False
+    assert store._data_path == data_path, "an ordered store was rewritten"
+    store.seal()
+    assert np.frombuffer(store.arb_ids, dtype=np.uint32).tolist() == [
+        0x100, 0x101, 0x102, 0x103]
+    _assert_rows_intact(store)
+    store.close()
+
+
+def test_sort_by_time_refuses_a_sealed_store():
+    store = _numbered_store([0.2, 0.1])
+    store.seal()
+
+    with pytest.raises(RuntimeError, match="before seal"):
+        store.sort_by_time()
+    store.close()
+
+
+def test_a_failed_sort_leaves_the_store_as_it_was(monkeypatch):
+    import os
+    import tempfile
+
+    store = _numbered_store([0.3, 0.1, 0.2])
+    data_path = store._data_path
+    created = []
+    real_mkstemp, real_fdopen = tempfile.mkstemp, os.fdopen
+
+    def mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        created.append(path)
+        return fd, path
+
+    class FullDisk:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def write(self, _data):
+            raise OSError("No space left on device")
+
+        def close(self):
+            self._handle.close()
+
+    monkeypatch.setattr(tempfile, "mkstemp", mkstemp)
+    monkeypatch.setattr(os, "fdopen",
+                        lambda fd, *a, **k: FullDisk(real_fdopen(fd, *a, **k)))
+    with pytest.raises(OSError, match="No space"):
+        store.sort_by_time()
+    monkeypatch.undo()
+
+    assert len(created) == 1 and not os.path.exists(created[0]), \
+        "the half-written copy was left behind"
+    assert store._data_path == data_path
+    assert np.frombuffer(store.timestamps, dtype=np.float64).tolist() == [0.3, 0.1, 0.2]
+    store.seal()
+    _assert_rows_intact(store)
+    store.close()
