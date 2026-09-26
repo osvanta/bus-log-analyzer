@@ -1550,8 +1550,8 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self._calc_thread.started.connect(self._calc_worker.run)
         self._calc_worker.finished.connect(self._on_calculation_finished)
         self._calc_worker.failed.connect(self._on_calculation_failed)
-        self._calc_worker.finished.connect(self._calc_worker.deleteLater)
-        self._calc_worker.failed.connect(self._calc_worker.deleteLater)
+        # No deleteLater here: _cleanup_calculation deletes the worker on the
+        # GUI thread once this thread has stopped.
         self._calc_worker.finished.connect(self._calc_thread.quit)
         self._calc_worker.failed.connect(self._calc_thread.quit)
         self._calc_thread.finished.connect(self._cleanup_calculation)
@@ -1624,6 +1624,11 @@ QToolButton:pressed { background-color: #1a2a3a; }
     def _cleanup_calculation(self) -> None:
         if self._calc_thread is not None:
             self._calc_thread.deleteLater()
+        # The worker has no parent, so dropping this last reference deletes it
+        # here, on the GUI thread, after its thread has stopped. Deleted on its
+        # own thread instead, its destructor held a Qt signal-slot mutex while
+        # waiting for the GIL, and the GUI thread could hold the GIL while
+        # waiting for that same mutex: the app froze.
         self._calc_worker = None
         self._calc_thread = None
         self._calc_active_request = None

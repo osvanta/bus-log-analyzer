@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import array
+import threading
 import time
 
 import pytest
@@ -24,6 +25,7 @@ from core.formula_library import load_formula_library, save_formula_library
 from core.signal_store import SignalSeries
 from gui.calculated_signal_dialog import (
     CalculatedSignalDialog,
+    CalculationWorker,
     _FORMULA_HELP_SIGNAL,
     _formula_help_examples,
 )
@@ -213,6 +215,37 @@ def test_large_preflight_can_cancel_before_worker_starts(window, monkeypatch):
 
     assert window._calc_thread is None
     assert not window.calculated_signals.contains_key(definition.key)
+
+
+@pytest.mark.parametrize("outcome", ["finished", "failed"])
+def test_calculation_worker_is_deleted_on_the_gui_thread(window, qapp, monkeypatch, outcome):
+    # Deleted on its own thread, the worker's destructor waits for the GIL while
+    # holding a Qt signal-slot mutex; the GUI thread, holding the GIL, can be
+    # waiting for that same mutex. That deadlock froze the app and the suite.
+    deleted_on = []
+
+    class _TrackedWorker(CalculationWorker):
+        def __init__(self, *args) -> None:
+            super().__init__(*args)
+            self.destroyed.connect(
+                lambda *_: deleted_on.append(threading.get_ident()),
+                Qt.ConnectionType.DirectConnection,
+            )
+
+    monkeypatch.setattr("gui.main_window.CalculationWorker", _TrackedWorker)
+    if outcome == "failed":
+        def _fail(*_args):
+            raise ValueError("forced failure")
+
+        monkeypatch.setattr("gui.calculated_signal_dialog.calculate_series", _fail)
+    source_key = window.store.all_keys()[0]
+    definition = CalculatedSignalDefinition("Worker", f"`{source_key}` * 2", "V")
+
+    window._queue_calculation(definition, "create", plot_after=False)
+    _wait_for_calculation(window, qapp)
+
+    assert deleted_on == [threading.get_ident()]
+    assert window.calculated_signals.contains_key(definition.key) is (outcome == "finished")
 
 
 @pytest.mark.parametrize("mode", ["normal", "multi", "stacked"])
