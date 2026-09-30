@@ -8,7 +8,10 @@ CLAUDE.md
 docs/Internals/
 TODO.md
 
-# ── Diagnostics feature — developed in the private repo only ──────────────
+# ── Pro features — developed here, never published ───────────────────────
+# These are paid features gated by core/licensing. They live in the working
+# tree but must never enter a commit: this repo's remote is public, and git
+# history is permanent. See docs/Internals/repo_workflow.md §1 and §5.
 core/diagnostics/
 gui/diagnostics/
 config/diagnostics/
@@ -93,3 +96,6 @@ secrets.json
 *.csv
 AGENTS.md
 resources/internal/
+C:\Users\
+%USERPROFILE%\
+

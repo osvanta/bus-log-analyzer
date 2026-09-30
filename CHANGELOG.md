@@ -4,6 +4,25 @@
 > repository moved to `github.com/osvanta/bus-log-analyzer`. Releases up to and
 > including v00.00.60 were published as **CAN Scope / CANScope**; the entries below
 > use the names in force at the time of each release.
+## [v00.01.03] — 2026-09-30: crash, freeze and J1939 decoding fixes
+
+### Fixed — crashes and freezes.
+
+Loading a measurement repeatedly, reopening an MF4/MF4.5 file and closing the
+window while work is running no longer crash the application, and it no longer
+freezes when a generated signal finishes calculating.
+
+### Fixed — J1939 decoding and CAN Trace order.
+
+J1939 messages are decoded against the address that sent them rather than the
+PGN alone, standard and extended IDs no longer match each other, and the CAN
+Trace from a bus-logging MF4 is in time order.
+
+### Added — a crash log.
+
+Crashes, freezes and Qt errors are recorded in `osvanta_crash.log` next to the
+application, which previously left nothing behind in a packaged build.
+
 ## [v00.01.02] — 2026-09-10: LIN bus support
 
 ### line type option added in right click menu
