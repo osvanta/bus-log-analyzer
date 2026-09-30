@@ -21,6 +21,11 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
 
+    # Before any worker thread exists: an automatic collection on a worker
+    # thread destroys discarded plot items there and crashes Qt.
+    from gui.gc_guard import GuiThreadGarbageCollector
+    gc_guard = GuiThreadGarbageCollector(app)  # noqa: F841 — alive until exit
+
     # Resolve resource path for both dev and frozen EXE
     _res_root = (
         Path(sys._MEIPASS) if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")

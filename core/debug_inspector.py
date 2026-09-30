@@ -31,8 +31,33 @@ import gc
 import platform
 import struct
 import sys
+import threading
 import traceback
 import zlib
+
+
+def _is_stranded_mdf4_finaliser(unraisable) -> bool:
+    """Whether *unraisable* is the AttributeError of asammdf's ``MDF4.__del__``."""
+    finaliser = unraisable.object
+    return (
+        isinstance(unraisable.exc_value, AttributeError)
+        and getattr(finaliser, "__qualname__", None) == "MDF4.__del__"
+        and str(getattr(finaliser, "__module__", "")).startswith("asammdf.")
+    )
+
+
+def _drop_stranded_mdf4_errors() -> None:
+    """Filter that one finaliser error out of ``sys.unraisablehook``, once."""
+    previous = sys.unraisablehook
+    if getattr(previous, "drops_stranded_mdf4_errors", False):
+        return
+
+    def _drop(unraisable) -> None:
+        if not _is_stranded_mdf4_finaliser(unraisable):
+            previous(unraisable)
+
+    _drop.drops_stranded_mdf4_errors = True
+    sys.unraisablehook = _drop
 
 
 def _collect_failed_mdf_open() -> None:
@@ -40,26 +65,22 @@ def _collect_failed_mdf_open() -> None:
 
     A constructor that fails part-way leaves behind an MDF4 we never get a
     handle on, and its ``__del__`` calls ``close()``, which reads attributes
-    ``__init__`` never assigned. Left alone it is finalised at some arbitrary
-    later collection — potentially inside a Qt paint or at interpreter
-    shutdown, where this codebase has a history of native crashes. Collecting
-    it here pins that to a known-safe point. The hook drops only the
-    AttributeError that the upstream ``__del__`` raises; anything else is
-    passed on. Inspecting corrupt files is this module's normal workload, so
-    this path is common rather than exceptional.
+    ``__init__`` never assigned. Inspecting corrupt files is this module's
+    normal workload, so this path is common rather than exceptional.
+
+    The AttributeError that ``__del__`` raises is filtered out for good,
+    because whichever collection finalises the object may come later.
+    Anything else is passed on.
+
+    Only the main thread collects here, pinning finalisation to a known-safe
+    point. A collection frees every unreachable cycle, not just this one, and
+    discarded plot items among them must be destroyed on the GUI thread. The
+    application runs this module on its debug inspection thread, so there the
+    wreckage waits for the GUI-thread collector in ``gui/gc_guard.py``.
     """
-    previous = sys.unraisablehook
-
-    def _ignore_broken_del(unraisable) -> None:
-        if isinstance(unraisable.exc_value, AttributeError):
-            return
-        previous(unraisable)
-
-    sys.unraisablehook = _ignore_broken_del
-    try:
+    _drop_stranded_mdf4_errors()
+    if threading.current_thread() is threading.main_thread():
         gc.collect()
-    finally:
-        sys.unraisablehook = previous
 
 
 _MDF4_ID = struct.Struct("<8s8s8s4sH30s2H")
