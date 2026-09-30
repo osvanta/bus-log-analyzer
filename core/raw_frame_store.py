@@ -323,6 +323,68 @@ class RawFrameStore:
                 block[:, :width] = payload[start:end, :width]
             self._data_file.write(memoryview(block))
 
+    def sort_by_time(self) -> bool:
+        """
+        Put the rows in timestamp order.  Call before :meth:`seal`.
+
+        The MDF bus-logging path appends one channel group at a time, so a
+        file with a group per CAN channel would list every CAN 1 frame before
+        the first CAN 2 frame -- and the trace dialog's jump-to-time is a
+        binary search that assumes time order.  BLF and ASC are appended in
+        file order and do not call this.
+
+        The sort is stable, so rows with equal timestamps keep their order.
+        An already-ordered store returns ``False`` without touching anything.
+        Otherwise the payload records are copied to a new temp file in bounded
+        chunks, and only once that has succeeded are the columns swapped in:
+        a failure part-way leaves the store exactly as it was.
+        """
+        if self._sealed:
+            raise RuntimeError("sort_by_time() must be called before seal()")
+        count = len(self.timestamps)
+        timestamps = np.frombuffer(self.timestamps, dtype=np.float64)
+        if count < 2 or not (timestamps[1:] < timestamps[:-1]).any():
+            return False
+        order = np.argsort(timestamps, kind='stable')
+        del timestamps          # a live buffer export would pin the column
+
+        self._data_file.flush()
+        fd, path = tempfile.mkstemp(prefix='osvanta_', suffix='.rawdata')
+        data_file = os.fdopen(fd, 'w+b', buffering=1 << 20)
+        try:
+            source = mmap.mmap(self._data_file.fileno(),
+                               length=count * _DATA_BYTES,
+                               access=mmap.ACCESS_READ)
+            rows = None
+            try:
+                rows = np.frombuffer(source, dtype=np.uint8).reshape(count, _DATA_BYTES)
+                chunk_size = 65_536
+                for start in range(0, count, chunk_size):
+                    data_file.write(memoryview(rows[order[start:start + chunk_size]]))
+            finally:
+                del rows        # the view must go before the map can close
+                source.close()
+            columns = {}
+            for name in ('timestamps', 'channels', 'arb_ids', 'dlcs',
+                         'directions', 'flags', 'name_ids'):
+                column = getattr(self, name)
+                reordered = _array.array(column.typecode)
+                reordered.frombytes(
+                    np.frombuffer(column, dtype=column.typecode)[order].tobytes()
+                )
+                columns[name] = reordered
+        except BaseException:
+            data_file.close()
+            os.unlink(path)
+            raise
+
+        for name, column in columns.items():
+            setattr(self, name, column)
+        self._data_file.close()
+        os.unlink(self._data_path)
+        self._data_file, self._data_path = data_file, path
+        return True
+
     def seal(self) -> None:
         """
         Called once after all frames have been appended.
