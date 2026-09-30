@@ -19,7 +19,8 @@ executable (next to app.py when run from source):
 - Qt fatal and critical messages, a fatal one followed by every thread's
   Python stack. Qt ends the process as soon as the handler returns, so this
   is the only chance to record it.
-- The first occurrence of each distinct Qt warning.
+- The first occurrence of each distinct Qt warning, with the Python calls
+  that led to it: Qt's own message rarely says which code caused it.
 - Uncaught Python exceptions, on the GUI thread and on any other thread.
 - Native crashes such as an access violation, through faulthandler.
 - Python's own fatal errors, which it writes to the C runtime's stderr: a
@@ -191,12 +192,15 @@ class CrashLog(QObject):
             self._write(f'{stamp} Qt fatal error, the application is terminated: {message}\n')
             self._dump_all_threads()
         elif mode == QtMsgType.QtCriticalMsg:
-            self._write(f'{stamp} Qt critical: {message}\n')
+            self._write(f'{stamp} Qt critical: {message}\n{self._raised_from()}')
         elif (mode == QtMsgType.QtWarningMsg
               and message not in self._seen_warnings
               and len(self._seen_warnings) < MAX_DISTINCT_WARNINGS):
             self._seen_warnings.add(message)
-            self._write(f'{stamp} Qt warning (first of its kind): {message}\n')
+            self._write(
+                f'{stamp} Qt warning (first of its kind): {message}\n'
+                f'{self._raised_from()}'
+            )
         # Keep what a source run prints to its console unchanged.
         if self._previous_qt_handler is not None:
             self._previous_qt_handler(mode, context, message)
@@ -205,6 +209,17 @@ class CrashLog(QObject):
                 print(message, file=sys.stderr)
             except (OSError, ValueError):
                 pass
+
+    @staticmethod
+    def _raised_from() -> str:
+        """The Python calls on this thread that led to a Qt message."""
+        # Without this method and the message handler that called it.
+        frames = traceback.format_stack()[:-2][-12:]
+        if not frames:
+            return '  Raised by Qt itself, outside any Python call.\n'
+        return '  Raised from (most recent call last):\n' + ''.join(
+            f'  {line}\n' for frame in frames for line in frame.rstrip('\n').split('\n')
+        )
 
     def _write_exception(self, where: str, exc_type, exc, tb) -> None:
         self._write(

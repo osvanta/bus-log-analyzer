@@ -76,6 +76,28 @@ destroy_running_thread()
     assert "Session ended normally." not in log
 
 
+def test_a_qt_warning_is_recorded_once_with_the_code_that_raised_it(tmp_path):
+    # Qt names the problem, not its cause: "QFont::setPointSize: Point size
+    # <= 0 (-1)" arrived with no hint of which code had set that size.
+    completed, log = _run(r"""
+from PySide6.QtCore import qWarning
+
+def set_up_the_plot():
+    qWarning("a warning raised by Qt")
+    qWarning("a warning raised by Qt")
+
+set_up_the_plot()
+""", tmp_path / "crash.log")
+
+    assert completed.returncode == 0, completed.stderr[-4000:]
+    assert log.count("Qt warning (first of its kind): a warning raised by Qt\n") == 1
+    raised_from = log.split("a warning raised by Qt\n", 1)[1].split("Session ended", 1)[0]
+    assert raised_from.startswith("  Raised from (most recent call last):\n")
+    # The handler's own frames are left out: the innermost is the caller's.
+    frames = [line for line in raised_from.split("\n") if line.startswith("    File ")]
+    assert frames[-1].endswith("in set_up_the_plot")
+
+
 def test_uncaught_exceptions_are_recorded_on_every_thread(tmp_path):
     completed, log = _run(r"""
 def failing_slot():
