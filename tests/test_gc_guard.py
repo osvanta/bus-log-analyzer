@@ -177,6 +177,8 @@ _APP_SCRIPT = r"""
 import gc, json, sys
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
+import gui.crash_log
+gui.crash_log.default_log_path = lambda: Path(sys.argv[1])
 import app as entry
 from gui.gc_guard import GuiThreadGarbageCollector
 
@@ -193,8 +195,8 @@ print(json.dumps(seen))
 """
 
 
-def test_application_installs_the_guard():
-    result = _run(_APP_SCRIPT)
+def test_application_installs_the_guard(tmp_path):
+    result = _run(_APP_SCRIPT, str(tmp_path / "crash.log"))
 
     assert result == {"gc_enabled": False, "guards": 1}
 

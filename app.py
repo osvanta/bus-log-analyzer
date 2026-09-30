@@ -21,6 +21,11 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
 
+    # First, so every later failure is recorded: the packaged application has
+    # no console, and a Qt fatal error otherwise ends it without a trace.
+    from gui.crash_log import CrashLog
+    crash_log = CrashLog(app)  # noqa: F841 — alive until exit
+
     # Before any worker thread exists: an automatic collection on a worker
     # thread destroys discarded plot items there and crashes Qt.
     from gui.gc_guard import GuiThreadGarbageCollector
