@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -149,6 +149,13 @@ class MainWindow(QMainWindow):
         self._finding_plot_keys: set[str] = set()
         self._raw_frame_dialog = None
         self._log_file_path = Path(__file__).resolve().parents[1] / 'osvanta_dev.log'
+        # Set when the window is closed while a worker thread still runs:
+        # the window is hidden, results still arriving are dropped, and the
+        # close is retried until the last thread has stopped.
+        self._closing = False
+        self._close_retry = QTimer(self)
+        self._close_retry.setInterval(100)
+        self._close_retry.timeout.connect(self.close)
         # Hidden, session-only CAN load forensics (Ctrl+Alt+D).
         self._debug_mode = False
         self._debug_window: LoadDebugWindow | None = None
@@ -583,7 +590,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self._debug_thread.start()
 
     def _start_next_debug_inspection(self) -> None:
-        if self._debug_busy or not self._debug_pending_inspections:
+        if self._closing or self._debug_busy or not self._debug_pending_inspections:
             return
         kind, generation, inspector = self._debug_pending_inspections.pop(0)
         self._ensure_debug_worker()
@@ -617,10 +624,14 @@ QToolButton:pressed { background-color: #1a2a3a; }
             except (RuntimeError, TypeError):
                 pass
         thread.quit()
-        thread.wait(2000)
         if worker is not None:
             worker.deleteLater()
-        thread.deleteLater()
+        if thread.wait(2000):
+            thread.deleteLater()
+        else:
+            # Still inside an inspection, and deleting a running QThread
+            # terminates the application: it goes once it has stopped.
+            thread.finished.connect(thread.deleteLater)
 
     def _on_debug_inspection_completed(self, kind: str, report: str) -> None:
         self._debug_busy = False
@@ -689,6 +700,10 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def choose_blf(self) -> None:
         """Open any supported measurement file (BLF, ASC, MF4, MDF, CSV)."""
+        # Resetting for a new file under a running load would let the old
+        # load's results arrive as the new file's, and start a second load.
+        if self._refuse_while_loading('opening another measurement'):
+            return
         all_ext = ' '.join(f'*{e}' for e in sorted(ALL_SUFFIXES))
         filt = (
             'Measurement Files (*.blf *.asc *.mf4 *.mdf *.csv);;'
@@ -1505,6 +1520,9 @@ QToolButton:pressed { background-color: #1a2a3a; }
             self._dispatch_next_calculation()
 
     def _dispatch_next_calculation(self) -> None:
+        if self._closing:
+            self._calc_queue.clear()
+            return
         while self._calc_queue:
             definition, operation, plot_after, source_series = self._calc_queue.pop(0)
             if source_series is None:
@@ -1564,7 +1582,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _on_calculation_finished(self, series) -> None:
         request = self._calc_active_request
-        if request is None:
+        if request is None or self._closing:
             return
         definition, operation, plot_after = request
         if self.store is not self._calc_source_store:
@@ -1607,6 +1625,8 @@ QToolButton:pressed { background-color: #1a2a3a; }
                 self._queue_calculation(definition, "lazy", plot_after=False)
 
     def _on_calculation_failed(self, error_message: str) -> None:
+        if self._closing:
+            return
         definition = self._calc_active_request[0] if self._calc_active_request else None
         name = definition.name if definition else "signal"
         self._log(f"Generated signal calculation failed ({name}): {error_message}")
@@ -1689,6 +1709,8 @@ QToolButton:pressed { background-color: #1a2a3a; }
             self._update_status('Save failed', 'Check path permissions and try again')
 
     def load_configuration(self) -> None:
+        if self._refuse_while_loading('loading a configuration'):
+            return
         if self._calc_thread is not None:
             QMessageBox.information(
                 self,
@@ -1911,6 +1933,11 @@ QToolButton:pressed { background-color: #1a2a3a; }
         # real list and remain unchanged.
         if isinstance(pending_plot_keys, bool):
             pending_plot_keys = None
+        # A second load would replace _thread while the first still runs. The
+        # first thread's _cleanup_worker then deletes the second's running
+        # QThread, and Qt terminates the application.
+        if self._refuse_while_loading('loading another measurement'):
+            return
         if self._calc_thread is not None:
             QMessageBox.information(
                 self,
@@ -1954,7 +1981,6 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self.signal_tree.set_payload({})
         self.diagnostics_box.clear()
         self.store = None
-        self._update_action_states()
         self._update_measurement_tab(frames='0', decoded='0', samples='0', channels='0')
         self._log(f'Loading: {mpath}')
         databases = ', '.join(
@@ -1981,6 +2007,24 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self._worker.partial_ready.connect(self._on_partial_ready)
         self._thread.finished.connect(self._cleanup_worker)
         self._thread.start()
+        # After _thread is set, so the load actions grey out with the rest.
+        self._update_action_states()
+
+    def _refuse_while_loading(self, action: str) -> bool:
+        """Tell the user a load is still running; return True when one is.
+
+        The toolbar greys these actions out during a load. This covers the
+        debug window's buttons and a configuration load, which reach the same
+        methods without going through the toolbar.
+        """
+        if self._thread is None:
+            return False
+        QMessageBox.information(
+            self,
+            'Load in progress',
+            f'Wait for Load + Decode to finish before {action}.',
+        )
+        return True
 
     def add_signals_to_plot(self, keys) -> None:
         if isinstance(keys, str):
@@ -2375,16 +2419,22 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _on_tree_update(self, payload: dict) -> None:
         """Show available signals in tree while decoding is still running."""
+        if self._closing:
+            return
         self.signal_tree.set_payload(payload)
 
     def _on_partial_ready(self) -> None:
         """Refresh any live-plotted curves with new samples decoded so far."""
+        if self._closing:
+            return
         if self.store is None and self._worker is not None:
             # Store is being built by the worker — get reference via worker
             pass   # curves hold direct series references — just redraw
         self.plot_panel.refresh_plotted_curves()
 
     def _on_worker_finished(self, store: SignalStore) -> None:
+        if self._closing:
+            return  # nothing left to show it in
         self.store = store
         self._update_action_states()
         # Expose store immediately so pending plots and post-decode plots work
@@ -2499,6 +2549,8 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _on_worker_failed(self, error_message: str) -> None:
         self._log(f'ERROR: {error_message}')
+        if self._closing:
+            return  # no dialog, and no debug report to keep the app alive
         # Before the modal, so collection is already running behind it.
         self._auto_launch_debug('Load + Decode failed', error_message)
         QMessageBox.critical(
@@ -2510,18 +2562,44 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self._update_status('Load failed', 'Review the log, verify BLF/DBC paths, and try again')
 
     def _cleanup_worker(self) -> None:
-        if self._worker is not None:
-            self._worker.deleteLater()
-            self._worker = None
+        # No deleteLater on the worker: it lives on the thread that has just
+        # stopped, so the deferred delete was never delivered and every
+        # finished worker survived with its _live_store — the whole decoded
+        # measurement, kept once per Load + Decode until memory ran out.
+        # The worker has no parent, so dropping this last reference deletes
+        # it here, on the GUI thread, after its thread has stopped.
+        self._worker = None
         if self._thread is not None:
             self._thread.deleteLater()
             self._thread = None
+        self._update_action_states()
 
     def closeEvent(self, event) -> None:
-        # The debug thread is parented to this window, so letting Qt destroy
-        # it while it still runs is exactly the crash this teardown avoids.
+        # Every worker thread is a child of this window, and Qt terminates the
+        # application when one is destroyed while it runs. None can be
+        # stopped part-way, so a close during Load + Decode, a calculation or
+        # an inspection hides the window at once, drops what the work still
+        # produces, and completes once the last thread has stopped.
+        if self._running_threads():
+            self._closing = True
+            self._calc_queue.clear()
+            for widget in (self, *self.findChildren(QWidget)):
+                if widget.isWindow() and widget.isVisible():
+                    widget.hide()
         self._shutdown_debug_worker()
+        if self._running_threads():
+            event.ignore()
+            self._close_retry.start()
+            return
+        self._close_retry.stop()
         super().closeEvent(event)
+        if self._closing and QApplication.quitOnLastWindowClosed():
+            # Qt quits when the last visible window closes, and this one was
+            # hidden first. Does nothing outside a running event loop.
+            QApplication.exit(0)
+
+    def _running_threads(self) -> list[QThread]:
+        return [thread for thread in self.findChildren(QThread) if thread.isRunning()]
 
     def _on_plot_selection_changed(self, key: str) -> None:
         self._update_status(f'Selected plot: {key}', 'Delete removes selected plot rows; drag rows to reorder them')
@@ -2584,7 +2662,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
     # Actions enabled/disabled per app state
     # needs_file  = requires measurement file to be selected
     # needs_store = requires decode to have completed
-    _ACTS_ALWAYS_ENABLED = {'Load Config'}
+    _ACTS_ALWAYS_ENABLED = {'Open File', 'Load Config'}
     _ACTS_NEEDS_FILE  = {'Load + Decode'}
     _ACTS_NEEDS_STORE = {'Save Config', 'New Signal', 'Export', 'Clear Plots'}
 
@@ -2606,6 +2684,11 @@ QToolButton:pressed { background-color: #1a2a3a; }
             ):
                 self._toolbar_actions[name].setEnabled(False)
             # Open File and Load Config remain available while calculating.
+        if self._thread is not None:
+            # Refused anyway while loading (see load_data); greyed out so a
+            # click made while the window looks stuck does nothing at all.
+            for name in ('Open File', 'Load + Decode', 'Load Config'):
+                self._toolbar_actions[name].setEnabled(False)
         # Keep CAN Trace discoverable after every load. For decoded-only MDF or
         # CSV data the action explains why an authentic raw trace is unavailable.
         _rfs = getattr(self.store, 'raw_frame_store', None) if self.store else None
