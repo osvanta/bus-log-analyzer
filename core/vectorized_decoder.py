@@ -311,23 +311,5 @@ class VectorizedDBC:
         return dec
 
     def get_candidates(self, arb_id: int, is_extended: bool) -> list[Any]:
-        """Mirror DBCDecoder._get_candidates without needing a RawFrame."""
-        seen: set[tuple[str, int]] = set()
-        candidates: list[Any] = []
-
-        def add(msg: Any) -> None:
-            key = (getattr(msg, 'name', ''), int(getattr(msg, 'frame_id', -1)))
-            if key not in seen:
-                seen.add(key)
-                candidates.append(msg)
-
-        for lookup_id in (arb_id, arb_id & 0x1FFFFFFF, arb_id & 0x7FF):
-            for msg in self.dbc._messages_exact.get(lookup_id, []):
-                add(msg)
-
-        if is_extended or arb_id > 0x7FF:
-            pgn = self.dbc._extract_j1939_pgn(arb_id)
-            if pgn is not None:
-                for msg in self.dbc._messages_pgn.get(pgn, []):
-                    add(msg)
-        return candidates
+        """Same candidates as DBCDecoder, without needing a RawFrame."""
+        return self.dbc.candidates_for(arb_id, is_extended)

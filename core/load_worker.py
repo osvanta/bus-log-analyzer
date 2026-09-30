@@ -22,6 +22,7 @@ from core.bus_types import (
     store_key_prefix,
 )
 from core.channel_config import ChannelConfig
+from core.dbc_decoder import multi_sender_messages, source_address_message_name
 from core.signal_store import as_channel_key
 
 # ── Streaming constants ───────────────────────────────────────────────────
@@ -434,11 +435,12 @@ class LoadWorker(QObject):
             f"Bulk decoding {n:,} frames across {total_groups:,} CAN ID groups..."
         )
 
+        # Resolve every group's message before decoding any: whether a
+        # message gets one series per J1939 source address depends on all of
+        # the frame IDs that matched it.
+        group_matches: list[tuple | None] = []
         for g in range(total_groups):
-            start, end = int(boundaries[g]), int(boundaries[g + 1])
-            group_idx  = sort_idx[start:end]
-
-            first    = group_idx[0]
+            first    = sort_idx[int(boundaries[g])]
             ch_byte  = int(channels_np[first])
             arb_id   = int(arb_ids_np[first])
             bus      = BusType.LIN if is_lin_np[first] else BusType.CAN
@@ -450,6 +452,7 @@ class LoadWorker(QObject):
                 or _decoder_map.get((bus, ALL_CHANNELS_NUMBER))
             )
             if decoder is None:
+                group_matches.append(None)
                 continue
 
             vec = vec_dbcs.get(id(decoder))
@@ -458,13 +461,31 @@ class LoadWorker(QObject):
                 vec_dbcs[id(decoder)] = vec
 
             candidates = vec.get_candidates(arb_id, is_extended=(arb_id > 0x7FF))
-            if not candidates:
-                continue
-
             # Match existing single-decoder behaviour: pick the first candidate.
-            message = candidates[0]
-            msg_name = message.name
-            msg_id   = int(getattr(message, 'frame_id', arb_id))
+            group_matches.append(
+                (ch_key, arb_id, decoder, vec, candidates[0]) if candidates else None
+            )
+
+        split_messages = multi_sender_messages(
+            ((match[0], id(match[4])), match[1])
+            for match in group_matches if match is not None
+        )
+
+        for g in range(total_groups):
+            start, end = int(boundaries[g]), int(boundaries[g + 1])
+            group_idx  = sort_idx[start:end]
+
+            match = group_matches[g]
+            if match is None:
+                continue
+            ch_key, arb_id, decoder, vec, message = match
+
+            if (ch_key, id(message)) in split_messages:
+                msg_name = source_address_message_name(message.name, arb_id & 0xFF)
+                msg_id   = arb_id
+            else:
+                msg_name = message.name
+                msg_id   = int(getattr(message, 'frame_id', arb_id))
             msg_dec  = vec.get_message_decoder(message)
 
             # Frames shorter than the message they matched decode from the
@@ -601,6 +622,9 @@ class LoadWorker(QObject):
         # unmatched because decoding has not happened yet).
         store.decoded_frames   = decoded_total
         store.unmatched_frames = n - decoded_total
+        # Groups are decoded one frame ID at a time, so a signal fed by
+        # several IDs holds one sweep per ID until it is reordered.
+        store.sort_merged_series()
         decode_elapsed = time.perf_counter() - decode_started
         n_sigs = len(store._series_by_key)
         hint = (
@@ -1169,6 +1193,8 @@ class LoadWorker(QObject):
             store.decoded_frames = trace_decoded_frames
             store.unmatched_frames = trace_frames - trace_decoded_frames
 
+        # asammdf yields one group per frame ID; see sort_merged_series().
+        store.sort_merged_series()
         import_elapsed = time.perf_counter() - import_start
         self.progress.emit(
             f"Bulk import complete: {total:,} signals | samples: "
@@ -1265,6 +1291,7 @@ class LoadWorker(QObject):
                     f"Loaded {ch_count:,} channels | samples: {store.total_samples:,}"
                 )
 
+        store.sort_merged_series()
         self.tree_update.emit(store.build_tree_payload())
         self.partial_ready.emit()
         if metadata_first:

@@ -38,7 +38,11 @@ import numpy as np
 
 from core.bus_types import BusType
 from core.models import RawFrame, DecodedSignalSample
-from core.dbc_decoder import DBCDecoder
+from core.dbc_decoder import (
+    DBCDecoder,
+    multi_sender_messages,
+    source_address_message_name,
+)
 from core.raw_frame_store import FLAG_LIN
 from core.readers.mdf_reader import MDFReader, _channel_failure_text
 from core.readers.mdf_recovery import (
@@ -315,9 +319,15 @@ class MDFCANReader:
                 message_name for _channel, message_name, _message_id,
                 _signal_name, _unit in native_metadata_rows
             }
+            j1939_groups = (
+                self._j1939_group_identities(extracted, channel_config)
+                if extracted is not None else {}
+            )
             for group_idx, group in enumerate(
                 extracted.groups if extracted is not None else ()
             ):
+                if group_idx in j1939_groups and j1939_groups[group_idx] is None:
+                    continue
                 for ch_idx, decoded_channel in enumerate(group.channels):
                     signal_name = (
                         getattr(decoded_channel, "name", None) or f"Ch{ch_idx}"
@@ -327,9 +337,12 @@ class MDFCANReader:
                     if signal_name.lower() in ("time", "t", "timestamps"):
                         continue
                     unit = str(getattr(decoded_channel, "unit", "") or "")
-                    channel, message_name, message_id = self._decoded_group_metadata(
-                        extracted, group_idx, signal_name, channel_config
-                    )
+                    if group_idx in j1939_groups:
+                        channel, message_name, message_id = j1939_groups[group_idx]
+                    else:
+                        channel, message_name, message_id = self._decoded_group_metadata(
+                            extracted, group_idx, signal_name, channel_config
+                        )
                     # Normally DBC signals have a concrete CAN channel and
                     # therefore cannot collide with recorder-decoded CH?
                     # signals.  Keep both visible even when malformed metadata
@@ -385,10 +398,14 @@ class MDFCANReader:
                             batch_all_groups=True,
                             channel_error=self._record_channel_error,
                         ):
+                    if group_idx in j1939_groups and j1939_groups[group_idx] is None:
+                        continue
                     signal_name = old_meta[1]
                     unit = old_meta[2]
                     meta = metadata_by_key.get((group_idx, signal_name))
-                    if meta is None:
+                    if meta is None and group_idx in j1939_groups:
+                        channel, message_name, message_id = j1939_groups[group_idx]
+                    elif meta is None:
                         channel, message_name, message_id = self._decoded_group_metadata(
                             extracted, group_idx, signal_name, channel_config
                         )
@@ -603,6 +620,78 @@ class MDFCANReader:
                     raise
                 channel_error(group_name, "LIN_Frame", exc)
         return total
+
+    @classmethod
+    def _j1939_group_identities(cls, extracted, channel_config):
+        """
+        Identify the J1939 groups asammdf extracted, one per sender.
+
+        asammdf extracts J1939 frames into one group per frame ID and records
+        the sender in the group comment (``CAN1 ID=0x18FEF100 CCVS PGN=0xFEF1
+        SA=0x0``). Its acquisition source only carries the database ID, and
+        its ``acq_name`` prints the SA in decimal behind a ``0x`` prefix, so
+        the comment is the reliable record of which frame ID fed the group.
+
+        Returns ``{group_idx: (channel, message_name, frame_id) | None}`` for
+        J1939 groups only. ``None`` marks a group the analyzer's own decoder
+        would not match: asammdf assigns an undefined sender of a PGN the
+        database defines at several source addresses to one of those
+        messages, which would put another node's data in its signals. When
+        several senders share one message, each gets its own message name.
+        """
+        identities = {}
+        for group_idx, group in enumerate(extracted.groups):
+            channel_group = getattr(group, "channel_group", None)
+            comment = str(getattr(channel_group, "comment", "") or "")
+            match = re.search(
+                r"\bID=0x([0-9A-F]+)\b.*\bSA=0x([0-9A-F]+)\b", comment,
+                re.IGNORECASE,
+            )
+            if not match:
+                continue
+            signal_name = next(
+                (
+                    decoded_channel.name
+                    for decoded_channel in group.channels
+                    if getattr(decoded_channel, "channel_type", -1) != 1
+                    and decoded_channel.name.lower() not in ("time", "t", "timestamps")
+                ),
+                None,
+            )
+            if signal_name is None:
+                continue
+            channel, message_name, _database_id = cls._decoded_group_metadata(
+                extracted, group_idx, signal_name, channel_config
+            )
+            frame_id = int(match.group(1), 16)
+            identity = (channel, message_name, frame_id)
+            if channel_config is not None and channel is not None:
+                try:
+                    decoder = channel_config.decoder_for(*channel)
+                except Exception:
+                    decoder = None
+                if decoder is not None and hasattr(decoder, "candidates_for"):
+                    names = {
+                        message.name
+                        for message in decoder.candidates_for(frame_id, True)
+                    }
+                    if message_name not in names:
+                        identity = None
+            identities[group_idx] = identity
+
+        split = multi_sender_messages(
+            ((identity[0], identity[1]), identity[2])
+            for identity in identities.values() if identity is not None
+        )
+        for group_idx, identity in identities.items():
+            if identity is not None and (identity[0], identity[1]) in split:
+                channel, message_name, frame_id = identity
+                identities[group_idx] = (
+                    channel,
+                    source_address_message_name(message_name, frame_id & 0xFF),
+                    frame_id,
+                )
+        return identities
 
     @staticmethod
     def _decoded_group_metadata(extracted, group_idx, signal_name, channel_config):

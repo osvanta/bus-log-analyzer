@@ -100,6 +100,9 @@ class SignalStore:
         # and raw_values is never appended to.
         self._choices_lookup: dict[tuple[BusChannel | None, str, str], dict] = {}
         self._tree_dirty: bool = True
+        # Series whose bulk inserts arrived out of time order; see
+        # sort_merged_series().
+        self._unsorted_keys: set[str] = set()
         self.total_frames    = 0
         self.decoded_frames  = 0
         self.total_samples   = 0
@@ -329,6 +332,8 @@ class SignalStore:
             self._tree_dirty = True
         else:
             series = self._series_by_key[key]
+            if series.timestamps and timestamps[0] < series.timestamps[-1]:
+                self._unsorted_keys.add(key)
 
         # C-level memcopy — no Python loop, no object allocation per sample
         ts_bytes  = np.asarray(timestamps, dtype=np.float64).tobytes()
@@ -350,6 +355,37 @@ class SignalStore:
         self.decoded_frames += 1        # one "frame" per bulk channel insert
         self.channels.add(channel)
         self.message_hits[(channel, message_name)] += n
+
+    def sort_merged_series(self) -> int:
+        """
+        Put series assembled from several bulk inserts back in time order.
+
+        A signal fed by more than one frame ID (J1939 senders sharing one
+        database message, or priority variants of one ID) is inserted one ID
+        at a time, so its samples arrive as back-to-back sweeps of the whole
+        recording. Plot clipping and cursor lookups binary-search the
+        timestamps, which only works when they increase. Returns the number
+        of series reordered.
+        """
+        reordered = 0
+        for key in self._unsorted_keys:
+            series = self._series_by_key.get(key)
+            if series is None:
+                continue
+            ts = series.numpy_timestamps()
+            order = np.argsort(ts, kind="stable")
+            timestamps = _array.array("d")
+            timestamps.frombytes(ts[order].tobytes())
+            values = _array.array("d")
+            values.frombytes(series.numpy_values()[order].tobytes())
+            series.timestamps = timestamps
+            series.values = values
+            if series.raw_values and len(series.raw_values) == len(order):
+                raw_values = series.raw_values
+                series.raw_values = [raw_values[i] for i in order.tolist()]
+            reordered += 1
+        self._unsorted_keys.clear()
+        return reordered
 
     def normalize_timestamps(self, already_normalized: bool = False) -> None:
         """
