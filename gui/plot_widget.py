@@ -450,7 +450,6 @@ class PlotPanel(QWidget):
         self.plot = pg.PlotWidget(axisItems={'left': _left_axis})
         _left_axis._panel = self  # enables multi-axis drag routing in mouseDragEvent
         self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self._legend = self.plot.addLegend()
         self.plot.setLabel('bottom', 'Time (seconds)')
         self.plot.setBackground(self._background_color)
         self._install_plot_background_menu()
@@ -1347,13 +1346,6 @@ class PlotPanel(QWidget):
                 pass
         self._extra_axes.clear()
 
-        try:
-            if self._legend is not None:
-                self.plot.plotItem.scene().removeItem(self._legend)
-        except Exception:
-            pass
-        self._legend = self.plot.addLegend()
-
         self.plot.showAxis('right', False)
         self.plot.getAxis('right').setLabel('')
         self.plot.setLabel('left', 'Value')
@@ -1669,10 +1661,6 @@ class PlotPanel(QWidget):
                 plotted.view_box   = None
                 plotted.unit_group = ''
                 self._apply_curve_style(plotted)
-                try:
-                    self._legend.addItem(plotted.curve, key)
-                except Exception:
-                    pass
             if isinstance(main_axis, _LeftAxis):
                 main_axis._title_x = None
             return
@@ -1757,10 +1745,6 @@ class PlotPanel(QWidget):
                 self._configure_curve(curve)
                 plotted.curve = curve
                 self._apply_curve_style(plotted)
-                try:
-                    self._legend.addItem(plotted.curve, key)
-                except Exception:
-                    pass
 
         if self._extra_axes:
             n_vis        = sum(1 for axis, _ in self._extra_axes if axis.isVisible())
