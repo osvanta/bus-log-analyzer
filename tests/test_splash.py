@@ -19,6 +19,8 @@ holds regardless of font availability.
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 from PySide6.QtGui import QColor, QPixmap
 
@@ -78,3 +80,19 @@ def test_render_does_not_mutate_the_cached_artwork(splash):
     splash.set_status('another one entirely')
 
     assert splash._base_pixmap.toImage() == before
+
+
+def test_the_splash_shows_without_waiting(qapp):
+    """Regression: the splash was a QSplashScreen, whose show() waited about
+    a second for its window to be reported exposed. Start-up waited with it,
+    so the splash appeared 1.5 s after launch and the main window 1 s late.
+    """
+    splash = SplashScreen(version='v00.00.99')
+    started = time.perf_counter()
+    splash.show()
+    qapp.processEvents()
+    elapsed = time.perf_counter() - started
+    splash.finish(None)
+
+    assert elapsed < 0.5
+    assert not splash.isVisible()

@@ -49,7 +49,6 @@ from core.bus_types import (
     sort_key,
 )
 from core.channel_config import ChannelConfig
-from core.readers.db_format import compatibility_warning, database_message_lengths
 
 
 def _j1939_pgn(frame_id: int) -> int | None:
@@ -69,6 +68,9 @@ def _load_database_match_data(
     """Parse match-only database metadata once per unchanged file."""
     # mtime_ns and file_size intentionally participate in the cache key.
     del mtime_ns, file_size
+    # Here, not at module level: importing core.readers loads cantools,
+    # python-can and asammdf, a second of start-up the main window does not need.
+    from core.readers.db_format import database_message_lengths
     dbc_lengths = database_message_lengths(resolved_path)
     dbc_ids = frozenset(dbc_lengths)
     dbc_pgn_by_id = {
@@ -371,6 +373,7 @@ class DBCManagerDialog(QDialog):
         Advisory only — an LDF on a CAN channel is flagged, a DBC on a LIN
         channel is not, because LIN layouts are routinely shipped as DBC.
         """
+        from core.readers.db_format import compatibility_warning
         warnings = []
         for row in self._rows:
             key = row.assigned_channel()

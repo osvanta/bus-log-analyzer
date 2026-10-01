@@ -10,7 +10,9 @@ from collections.abc import Callable
 import json
 import os
 import sys
+import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
@@ -56,14 +58,6 @@ from core.calculated_signals import (
     formula_references,
     parse_formula,
 )
-from core.load_worker import LoadWorker
-from core.readers import (
-    ALL_SUFFIXES,
-    database_mandatory_for,
-    dbc_required_for,
-    has_mixed_mdf_content,
-    prescan_measurement,
-)
 from core.bus_types import (
     BusChannel,
     BusType,
@@ -85,6 +79,55 @@ from core.debug_inspector import (
     inspect_databases,
     inspect_measurement,
 )
+
+if TYPE_CHECKING:
+    from core.load_worker import LoadWorker as _LoadWorker
+
+
+# Open File and Load + Decode need core.readers and core.load_worker, which
+# import cantools, python-can and asammdf: over a second of start-up that the
+# window does not need. These stand-ins import them on first use, and keep the
+# names here, where the tests patch them. Once the window is up,
+# _preload_measurement_support() imports them in the background, so the first
+# Open File does not wait either.
+def LoadWorker(*args, **kwargs) -> _LoadWorker:  # noqa: N802 — stands in for the class
+    from core.load_worker import LoadWorker
+    return LoadWorker(*args, **kwargs)
+
+
+def dbc_required_for(path: str) -> bool:
+    from core.readers import dbc_required_for
+    return dbc_required_for(path)
+
+
+def database_mandatory_for(path: str) -> bool:
+    from core.readers import database_mandatory_for
+    return database_mandatory_for(path)
+
+
+def has_mixed_mdf_content(path: str) -> bool:
+    from core.readers import has_mixed_mdf_content
+    return has_mixed_mdf_content(path)
+
+
+def prescan_measurement(*args, **kwargs):
+    from core.readers import prescan_measurement
+    return prescan_measurement(*args, **kwargs)
+
+
+# core.readers.ALL_SUFFIXES, for the Open File dialog. A copy, so the dialog
+# opens at once rather than after core.readers has finished loading; a test
+# keeps the two equal.
+_MEASUREMENT_SUFFIXES = ('.asc', '.blf', '.csv', '.mdf', '.mf4')
+
+
+def _preload_measurement_support() -> None:
+    def load() -> None:
+        try:
+            import core.load_worker  # noqa: F401 — imports core.readers too
+        except Exception:
+            pass  # raised again, in full, where Open File imports it
+    threading.Thread(target=load, name='Measurement support preload', daemon=True).start()
 
 
 class MainWindow(QMainWindow):
@@ -136,7 +179,7 @@ class MainWindow(QMainWindow):
         ] | None = None
         self._mixed_mdf_notices_shown: set[str] = set()
         self._thread: QThread | None = None
-        self._worker: LoadWorker | None = None
+        self._worker: _LoadWorker | None = None
         self._pending_plot_keys: list[str] = []
         self._pending_plot_colors: dict[str, str] = {}
         self._pending_plot_visible: dict[str, bool] = {}
@@ -161,6 +204,7 @@ class MainWindow(QMainWindow):
         self._close_retry = QTimer(self)
         self._close_retry.setInterval(100)
         self._close_retry.timeout.connect(self.close)
+        self._measurement_support_preloaded = False
         # Hidden, session-only CAN load forensics (Ctrl+Alt+D).
         self._debug_mode = False
         self._debug_window: LoadDebugWindow | None = None
@@ -709,7 +753,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
         # load's results arrive as the new file's, and start a second load.
         if self._refuse_while_loading('opening another measurement'):
             return
-        all_ext = ' '.join(f'*{e}' for e in sorted(ALL_SUFFIXES))
+        all_ext = ' '.join(f'*{e}' for e in _MEASUREMENT_SUFFIXES)
         filt = (
             'Measurement Files (*.blf *.asc *.mf4 *.mdf *.csv);;'
             'Vector BLF (*.blf);;'
@@ -2595,6 +2639,14 @@ QToolButton:pressed { background-color: #1a2a3a; }
             self._thread.deleteLater()
             self._thread = None
         self._update_action_states()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._measurement_support_preloaded:
+            self._measurement_support_preloaded = True
+            # Queued, so the window has painted before the import competes
+            # with it for the interpreter.
+            QTimer.singleShot(0, _preload_measurement_support)
 
     def closeEvent(self, event) -> None:
         # Every worker thread is a child of this window, and Qt terminates the

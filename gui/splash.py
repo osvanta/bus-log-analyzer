@@ -14,6 +14,12 @@ Overlays:
 
 The splash is shown before MainWindow is constructed so the user sees
 something immediately even on slow machines where heavy imports take time.
+
+It is a plain window showing a pixmap, not a QSplashScreen: QSplashScreen's
+show() waits about a second for the window to be reported exposed, on Windows
+and offscreen alike, and the whole start-up waited with it. The artwork is
+shown first; the text, whose first draw loads the font database, follows with
+the first status update.
 """
 from __future__ import annotations
 
@@ -24,7 +30,7 @@ from PySide6.QtCore  import Qt, QTimer
 from PySide6.QtGui   import (
     QColor, QFont, QFontMetrics, QPainter, QPixmap
 )
-from PySide6.QtWidgets import QSplashScreen, QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 
 def _resource_root() -> Path:
@@ -55,7 +61,7 @@ _STATUS_COLOR     = QColor('#a0c8ff')  # light blue — matches splash palette
 _VERSION_COLOR    = QColor('#6090b0')  # muted blue-grey
 
 
-class SplashScreen(QSplashScreen):
+class SplashScreen(QLabel):
     """
     Splash screen shown during application startup.
 
@@ -106,7 +112,7 @@ class SplashScreen(QSplashScreen):
 
         # Normal titled window: shows in taskbar, minimises with Win+D / Show Desktop.
         # Only the Minimize button is shown — no Close (would crash mid-load) or Maximize.
-        super().__init__(scaled)
+        super().__init__()
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowTitleHint |
@@ -114,12 +120,16 @@ class SplashScreen(QSplashScreen):
             Qt.WindowType.CustomizeWindowHint
         )
         self.setWindowTitle('Osvanta Bus Log Analyzer — Starting…')
+        self.setPixmap(scaled)
+        self.setFixedSize(scaled.size())
+        if screen:
+            # Centred like QSplashScreen: the artwork, not the title bar.
+            area = self.rect()
+            area.moveCenter(screen.availableGeometry().center())
+            self.move(area.topLeft())
 
         self._version     = version
         self._status_text = 'Starting...'
-
-        # Re-render immediately so version appears before first processEvents
-        self._render()
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -129,6 +139,10 @@ class SplashScreen(QSplashScreen):
         self.setWindowTitle(f'Osvanta Bus Log Analyzer — {message}')
         self._render()
         QApplication.processEvents()
+
+    def finish(self, window) -> None:
+        """Close once *window* is up, as QSplashScreen.finish() did."""
+        self.close()
 
     # ── Rendering ─────────────────────────────────────────────────────────
 
