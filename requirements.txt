@@ -6,7 +6,10 @@ numpy>=1.26
 asammdf>=7.0
 # Required for asammdf native one-pass CAN bus extraction from MF4/MDF files.
 # Its format handlers are bundled explicitly by BusLogAnalyzer.spec.
-canmatrix>=1.0
+canmatrix>=1.0,<1.3
+# 1.3 split canmatrix.canmatrix into one module per class: asammdf (8.8.27)
+# still imports canmatrix.canmatrix and gets a module where it expects the
+# CanMatrix class, so importing asammdf fails.
 # canmatrix's .ldf handler imports ldfparser at module load; without it
 # canmatrix silently does not register the 'ldf' format and every LDF
 # fails deep inside asammdf with a bare KeyError. Required for LIN.
