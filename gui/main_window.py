@@ -117,6 +117,11 @@ class MainWindow(QMainWindow):
             tuple[CalculatedSignalDefinition, str, bool, dict | None]
         ] = []
         self._calc_source_store: SignalStore | None = None
+        # Generated signals calculated since the queue was last empty, to plot
+        # or redraw together once it empties. A plot rebuild recreates every
+        # row, so one per finished signal made restoring them after Load +
+        # Decode slower with each signal added.
+        self._calc_plot_keys: list[str] = []
         # Pre-scan cache: (path, channels, ids_per_channel)
         self._prescan_cache: tuple[
             str, list[BusChannel], dict[BusChannel, set[int]],
@@ -1249,30 +1254,45 @@ QToolButton:pressed { background-color: #1a2a3a; }
         return report
 
     def _apply_pending_generated_plot_state(self, key: str) -> None:
+        """Restore a generated signal's saved look; the caller rebuilds the plot."""
         plotted = self.plot_panel._items.get(key)
         if plotted is None:
             return
-        changed = False
         if key in self._pending_plot_colors:
             plotted.color = self._pending_plot_colors.pop(key)
-            changed = True
         if key in self._pending_plot_visible:
             plotted.visible = self._pending_plot_visible.pop(key)
-            changed = True
         if key in self._pending_plot_groups:
             plotted.group = self._pending_plot_groups.pop(key)
-            changed = True
         if key in self._pending_plot_axis_visible:
             plotted.axis_visible = self._pending_plot_axis_visible.pop(key)
-            changed = True
         if key in self._pending_plot_own_axis:
             plotted.own_axis = self._pending_plot_own_axis.pop(key)
-            changed = True
         if key in self._pending_plot_multistack:
             plotted.multistack_id = self._pending_plot_multistack.pop(key)
-            changed = True
-        if changed:
-            self.plot_panel._rebuild_curves(preserve_selection=False)
+
+    def _plot_calculated_signals(self) -> None:
+        """Show what the queued calculations produced, with one plot rebuild."""
+        keys = [
+            key for key in dict.fromkeys(self._calc_plot_keys)
+            # Deleted, or dropped by a new Load + Decode, while others ran.
+            if self.calculated_signals.cached_series(key) is not None
+        ]
+        self._calc_plot_keys = []
+        if not keys or self._closing:
+            return
+        panel = self.plot_panel
+        new_keys = [key for key in keys if key not in panel._items]
+        if new_keys:
+            panel.begin_batch_add()
+            for key in new_keys:
+                self.add_signal_to_plot(key, fit=False)
+        for key in keys:
+            self._apply_pending_generated_plot_state(key)
+        if new_keys:
+            panel.end_batch_add()  # its one rebuild also draws replaced series
+        else:
+            panel.redraw()
 
     def new_generated_signal(self) -> None:
         if self.store is None or self._calc_thread is not None:
@@ -1590,11 +1610,11 @@ QToolButton:pressed { background-color: #1a2a3a; }
             return
         self.calculated_signals.commit(definition, series)
         self._refresh_generated_signal_tree()
+        # Drawn by _plot_calculated_signals once the queue is empty.
         if key_is_plotted := definition.key in self.plot_panel._items:
-            self.plot_panel.replace_series(definition.key, series)
-        if plot_after and not key_is_plotted:
-            self.add_signal_to_plot(definition.key)
-        self._apply_pending_generated_plot_state(definition.key)
+            self.plot_panel.replace_series(definition.key, series, redraw=False)
+        if key_is_plotted or plot_after:
+            self._calc_plot_keys.append(definition.key)
         if operation == "edit":
             self._refresh_dependents_after_edit(definition.key)
         action = "Updated" if operation == "edit" else "Created"
@@ -1655,6 +1675,8 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self._calc_source_store = None
         self._update_action_states()
         self._dispatch_next_calculation()
+        if self._calc_thread is None:
+            self._plot_calculated_signals()
 
     def save_configuration(self) -> None:
         config = {

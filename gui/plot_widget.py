@@ -1220,8 +1220,12 @@ class PlotPanel(QWidget):
             if was_empty:
                 self.fit_to_window()
 
-    def replace_series(self, key: str, series: SignalSeries) -> bool:
-        """Replace plotted data without changing its visual or viewport state."""
+    def replace_series(self, key: str, series: SignalSeries, redraw: bool = True) -> bool:
+        """Replace plotted data without changing its visual or viewport state.
+
+        With ``redraw`` False the curve shows the old data until the next
+        rebuild, so replacing several series costs one rebuild, not one each.
+        """
         plotted = self._items.get(key)
         if plotted is None:
             return False
@@ -1230,10 +1234,13 @@ class PlotPanel(QWidget):
         for snapshot, _current_key in self._undo_stack:
             if key in snapshot:
                 snapshot[key].series = series
-        self._rebuild_curves(preserve_selection=True, preserve_y_range=True)
-        self._set_axis_label(self._current_key)
-        self._refresh_table_and_cursors()
+        if redraw:
+            self.redraw()
         return True
+
+    def redraw(self) -> None:
+        """Rebuild every curve from its series, keeping the view and selection."""
+        self._rebuild_curves(preserve_selection=True, preserve_y_range=True)
 
     def rename_series_key(self, old_key: str, new_key: str) -> bool:
         """Rename a plotted key without losing order, styling, view, or history."""

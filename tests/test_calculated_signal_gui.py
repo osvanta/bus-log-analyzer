@@ -542,6 +542,67 @@ def test_uncached_dependency_is_calculated_before_its_dependant(window, qapp):
     assert second.key in window.plot_panel.plotted_keys()
 
 
+def _count_rebuilds(window: MainWindow, monkeypatch) -> list[None]:
+    calls: list[None] = []
+    rebuild = window.plot_panel._rebuild_curves
+
+    def counted(*args, **kwargs):
+        calls.append(None)
+        return rebuild(*args, **kwargs)
+
+    monkeypatch.setattr(window.plot_panel, "_rebuild_curves", counted)
+    return calls
+
+
+def test_restoring_generated_signals_rebuilds_the_plot_once(window, qapp, monkeypatch):
+    # Load + Decode restores each plotted generated signal and recalculates
+    # them one after another. A plot rebuild recreates every row, and each
+    # signal used to cost two of them as it finished: with every signal
+    # added, restoring the plot took longer than the time before.
+    source_key = window.store.all_keys()[0]
+    definitions = [CalculatedSignalDefinition("G0", f"`{source_key}` * 2", "V")]
+    for number in range(1, 5):
+        definitions.append(CalculatedSignalDefinition(
+            f"G{number}", f"`{definitions[-1].key}` + {number}", "V"))
+    colors = [f"#1234{number}0" for number in range(5)]
+    for definition, color in zip(definitions, colors):
+        window.calculated_signals.commit(definition)
+        window._pending_plot_colors[definition.key] = color
+    window._refresh_generated_signal_tree()
+    rebuilds = _count_rebuilds(window, monkeypatch)
+
+    window.add_signals_to_plot([definition.key for definition in definitions])
+    _wait_for_calculation(window, qapp)
+
+    assert window.plot_panel.plotted_keys() == [definition.key for definition in definitions]
+    assert [window.plot_panel._items[d.key].color for d in definitions] == colors
+    assert list(window.plot_panel._items[definitions[-1].key].series.values) == [12.0, 14.0, 16.0]
+    assert len(rebuilds) == 1
+
+
+def test_editing_a_signal_redraws_its_plotted_dependents_once(window, qapp, monkeypatch):
+    source_key = window.store.all_keys()[0]
+    first = CalculatedSignalDefinition("First", f"`{source_key}` * 10", "V")
+    dependents = [
+        CalculatedSignalDefinition(f"Plus{number}", f"`{first.key}` + {number}", "V")
+        for number in range(3)
+    ]
+    for definition in (first, *dependents):
+        window._queue_calculation(definition, "create", plot_after=False)
+        _wait_for_calculation(window, qapp)
+    window.add_signals_to_plot([first.key, *(definition.key for definition in dependents)])
+    rebuilds = _count_rebuilds(window, monkeypatch)
+
+    edited = CalculatedSignalDefinition("First", f"`{source_key}` * 100", "V")
+    window._queue_calculation(edited, "edit", plot_after=False)
+    _wait_for_calculation(window, qapp)
+
+    for number, definition in enumerate(dependents):
+        curve = window.plot_panel._items[definition.key].curve
+        assert list(curve.yData) == [100.0 + number, 200.0 + number, 300.0 + number]
+    assert len(rebuilds) == 1
+
+
 def test_editing_a_signal_invalidates_and_recalculates_plotted_dependents(window, qapp):
     source_key = window.store.all_keys()[0]
     first = CalculatedSignalDefinition("First", f"`{source_key}` * 10", "V")
