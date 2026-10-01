@@ -76,6 +76,15 @@ def default_log_path() -> Path:
     return Path(__file__).resolve().parents[1] / LOG_NAME
 
 
+def _os_name() -> str:
+    """platform.platform(), without the WMI query that costs Windows 130 ms."""
+    if sys.platform != 'win32':
+        return platform.platform()
+    version = sys.getwindowsversion()
+    release = '11' if (version.major, version.build) >= (10, 22000) else str(version.major)
+    return f'Windows-{release}-{version.major}.{version.minor}.{version.build}'
+
+
 def _capture_native_stderr(path: Path) -> None:
     """Append the C runtime's stderr to the log when there is no console.
 
@@ -123,7 +132,7 @@ class CrashLog(QObject):
             f'\n==== {time.strftime("%Y-%m-%d %H:%M:%S")}  '
             f'{app.applicationName()} {app.applicationVersion()}  '
             f'pid {os.getpid()}  Python {platform.python_version()}  '
-            f'Qt {qVersion()}  {platform.platform()} ====\n'
+            f'Qt {qVersion()}  {_os_name()} ====\n'
         )
 
         _capture_native_stderr(self.path)
