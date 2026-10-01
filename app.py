@@ -17,6 +17,12 @@ APP_VERSION = "v00.01.03"
 
 
 def main() -> int:
+    # Hidden: "--release-test <folder>" tests this build instead of starting
+    # it, and restarts it once per scenario. See gui/release_test.
+    from gui import release_test
+    if release_test.requested(sys.argv):
+        return release_test.run(sys.argv, APP_NAME, APP_VERSION)
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
@@ -60,6 +66,7 @@ def main() -> int:
 
     window.show()
     splash.finish(window)
+    driver = release_test.drive_if_requested(window, sys.argv)  # noqa: F841 — alive until exit
     return app.exec()
 
 

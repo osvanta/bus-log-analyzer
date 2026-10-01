@@ -28,7 +28,8 @@ executable (next to app.py when run from source):
 - Every thread's stack once the GUI thread has not responded for
   ``freeze_seconds``, under the heading ``Timeout (0:00:20)!``.
 
-Each session starts with a header line and, when it exits normally, ends with
+Each session starts with a header line, which ends ``memory checks on`` in
+the memory-checked build, and, when it exits normally, ends with
 ``Session ended normally.`` A header without that line is a session that
 crashed, froze or was killed, even when nothing else was recorded. A session
 that exits while a window still runs a thread ends with a warning instead:
@@ -70,7 +71,13 @@ _PREAMBLE = (
 
 
 def default_log_path() -> Path:
-    """Next to the executable when packaged, next to app.py from source."""
+    """Next to the executable when packaged, next to app.py from source.
+
+    OSVANTA_CRASH_LOG names another file: tests that start the application
+    keep the developer's own log clean with it.
+    """
+    if os.environ.get('OSVANTA_CRASH_LOG'):
+        return Path(os.environ['OSVANTA_CRASH_LOG'])
     if getattr(sys, 'frozen', False):
         return Path(sys.executable).resolve().parent / LOG_NAME
     return Path(__file__).resolve().parents[1] / LOG_NAME
@@ -132,7 +139,8 @@ class CrashLog(QObject):
             f'\n==== {time.strftime("%Y-%m-%d %H:%M:%S")}  '
             f'{app.applicationName()} {app.applicationVersion()}  '
             f'pid {os.getpid()}  Python {platform.python_version()}  '
-            f'Qt {qVersion()}  {_os_name()} ====\n'
+            f'Qt {qVersion()}  {_os_name()}'
+            f'{"  memory checks on" if sys.flags.dev_mode else ""} ====\n'
         )
 
         _capture_native_stderr(self.path)

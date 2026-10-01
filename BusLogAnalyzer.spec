@@ -115,8 +115,29 @@ exe = EXE(
     icon=str(project_root / 'resources' / 'app_icon.ico'),
 )
 
+# The same application with Python's memory checks on (-X dev): a buffer
+# overrun is reported where it happens instead of crashing a later load. A
+# packaged exe ignores PYTHONDEVMODE and PYTHONMALLOC, so a second exe is the
+# only way to get them. It shares _internal with BusLogAnalyzer.exe and adds
+# about 25 MB. The release test runs with it (gui/release_test), and a user
+# can reproduce a crash with it for a bug report.
+memcheck_exe = EXE(
+    pyz,
+    a.scripts,
+    [('X dev', None, 'OPTION')],
+    exclude_binaries=True,
+    name="BusLogAnalyzer_memcheck",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    icon=str(project_root / 'resources' / 'app_icon.ico'),
+)
+
 coll = COLLECT(
     exe,
+    memcheck_exe,
     a.binaries,
     a.zipfiles,
     a.datas,
