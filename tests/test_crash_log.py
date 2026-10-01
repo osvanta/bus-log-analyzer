@@ -224,6 +224,7 @@ overrun_a_buffer()
 
     session = _session(log.read_text(encoding="utf-8"))
     assert completed.returncode != 0
+    assert session.split("\n", 1)[0].endswith("  memory checks on ====")
     assert "Fatal Python error: _PyMem_DebugRawFree: bad trailing pad byte" in session
     assert "Memory block allocated at" in session
     assert "overrun_a_buffer" in session
@@ -251,6 +252,7 @@ entry.main()
     assert completed.returncode == 0, completed.stderr[-4000:]
     session = _session(log.read_text(encoding="utf-8"))
     assert re.match(r"\S+ \S+  Osvanta Bus Log Analyzer v\d", session)
+    assert "memory checks on" not in session
     assert session.rstrip().endswith("Session ended normally.")
 
 

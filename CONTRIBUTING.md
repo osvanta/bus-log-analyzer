@@ -113,6 +113,19 @@ python -m pytest tests/
 The same suite runs on every pull request, along with a full PyInstaller build,
 so a PR that breaks either will not merge.
 
+Before a release, the maintainer also runs the **release test** on the built
+application with real measurements:
+
+```bash
+dist\BusLogAnalyzer\BusLogAnalyzer.exe --release-test <folder> --heavy
+```
+
+It restarts the application once per scenario (every file once, A → B → A,
+closing the window during Load + Decode, broken files, one file five times, a
+run with memory checks) and writes a report into the folder. See
+`gui/release_test/__init__.py` for the options and `gui/release_test/plan.py`
+for how to lay out the folder.
+
 ---
 
 ## Project Layout

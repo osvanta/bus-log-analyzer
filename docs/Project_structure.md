@@ -49,6 +49,12 @@ bus-log-analyzer/
 │   ├── raw_frame_dialog.py       # Sliding-window CAN/LIN Trace (RawFrameStore, no cap)
 │   ├── dbc_manager.py            # Database Manager dialog: per-bus-channel DBC/ARXML/LDF, match quality bars
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
+│   ├── crash_log.py              # osvanta_crash.log: Qt fatal errors, native crashes, freezes, uncaught exceptions
+│   ├── release_test/             # Hidden --release-test: drives the built app through real measurements
+│   │   ├── plan.py               # Folder layout → measurements, databases, scenarios
+│   │   ├── driver.py             # Works one scenario's toolbar steps inside the running app
+│   │   ├── runner.py             # Restarts the app once per scenario, progress window
+│   │   └── report.py             # Verdicts from exit codes and crash-log sessions; anonymised report
 │   └── diagnostics/              # Diagnostics UI (non-modal window)
 │       ├── activation.py         # Wires Ctrl+Shift+A shortcut in MainWindow
 │       ├── window.py             # DiagnosticsWindow — domain selector, run controls, auto-plot on fault
@@ -60,7 +66,8 @@ bus-log-analyzer/
 │   ├── app_icon.png              # 1024 × 1024 app icon source
 │   └── app_icon.ico              # Multi-resolution ICO (256/128/64/48/32/16 px)
 ├── requirements.txt
-├── BusLogAnalyzer.spec           # PyInstaller spec, bundles resources/, config/ and ldfparser grammars
+├── BusLogAnalyzer.spec           # PyInstaller spec, bundles resources/, config/ and ldfparser grammars;
+│                                 #   builds BusLogAnalyzer.exe and BusLogAnalyzer_memcheck.exe (-X dev)
 └── .github/workflows/build.yml  # Auto-build on v*.*.* tag push
 
 
