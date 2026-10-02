@@ -69,6 +69,7 @@ from core.bus_types import (
 from core.channel_config import ChannelConfig
 from gui.dbc_manager import DBCManagerDialog
 from core.signal_store import SignalStore
+from gui.overflow_row import OverflowButtonRow
 from gui.plot_widget import PlotPanel
 from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
@@ -275,10 +276,9 @@ class MainWindow(QMainWindow):
         self.plot_panel.backgroundColorChanged.connect(self._on_background_color_changed)
         self.plot_panel.signalColorChanged.connect(self._on_signal_color_changed)
         self.plot_panel.signalLineStyleChanged.connect(self._on_signal_line_style_changed)
+        self.plot_panel.plotAreaClicked.connect(self._place_cursor1)
 
-        button_row = QWidget()
-        button_layout = QHBoxLayout(button_row)
-        button_layout.setContentsMargins(0, 0, 0, 0)
+        self.plot_button_row = OverflowButtonRow()
         self.btn_fit = QPushButton('Fit to Window')
         self.btn_fit_v = QPushButton('Fit Vertical')
         self.btn_multi_axis = QPushButton('Multi-Axis')
@@ -301,8 +301,7 @@ class MainWindow(QMainWindow):
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_multi_axis,
                     self.btn_stacked, self.btn_multistack, self.btn_cursor1,
                     self.btn_cursor2, self.btn_points, self.btn_hide_line):
-            button_layout.addWidget(btn)
-        button_layout.addStretch(1)
+            self.plot_button_row.add_button(btn)
 
         self.btn_fit.clicked.connect(self.plot_panel.fit_to_window)
         self.btn_fit_v.clicked.connect(self.plot_panel.fit_vertical)
@@ -314,16 +313,28 @@ class MainWindow(QMainWindow):
         self.btn_points.toggled.connect(self._toggle_points)
         self.btn_hide_line.toggled.connect(self._toggle_line)
         self.plot_panel.set_stacked(self.btn_stacked.isChecked())
+        # The buttons were set before their toggled signals were connected.
+        self.plot_panel.set_cursor1_enabled(self.btn_cursor1.isChecked())
+
+        # The plot buttons sit above the plot only, level with the signal
+        # table's header, so the table runs the full height of the panel.
+        # Buttons that do not fit the plot's width move into a "»" menu.
+        plot_column = QWidget()
+        plot_column_layout = QVBoxLayout(plot_column)
+        plot_column_layout.setContentsMargins(0, 0, 0, 0)
+        plot_column_layout.setSpacing(0)
+        plot_column_layout.addWidget(self.plot_button_row)
+        plot_column_layout.addWidget(self.plot_panel, stretch=1)
+        self._level_plot_buttons_with_table_header()
 
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(6, 6, 6, 6)
-        center_layout.addWidget(button_row)
 
         self.center_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.center_splitter.setChildrenCollapsible(False)
         self.center_splitter.addWidget(self.plot_panel.table_panel)
-        self.center_splitter.addWidget(self.plot_panel)
+        self.center_splitter.addWidget(plot_column)
         self.center_splitter.setStretchFactor(0, 0)
         self.center_splitter.setStretchFactor(1, 1)
         self.center_splitter.setSizes([240, 1280])
@@ -416,6 +427,20 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self.statusBar().addPermanentWidget(self.debug_mode_label)
         self.statusBar().addPermanentWidget(self.status_next_step_label, 1)
         self._sync_panel_toggle_buttons()
+
+    def _level_plot_buttons_with_table_header(self) -> None:
+        """Give the plot buttons and the signal table's header one height,
+        so the plot starts level with the table's first row."""
+        table = self.plot_panel.table
+        header = table.horizontalHeader()
+        # Polish first so the sizes include the table's style sheet.
+        table.ensurePolished()
+        self.plot_button_row.ensurePolished()
+        frame = table.frameWidth()
+        height = max(self.plot_button_row.sizeHint().height(),
+                     header.sizeHint().height() + frame)
+        self.plot_button_row.setFixedHeight(height)
+        header.setMinimumHeight(height - frame)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar('Main')
@@ -1221,7 +1246,15 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self.plot_panel.set_cursor1_enabled(checked)
         self.btn_cursor1.setText('Cursor 1: ON' if checked else 'Cursor 1')
         self._update_status('Cursor 1 updated',
-                            'Drag C1 line on the plot to measure')
+                            'Click the plot or drag the C1 line to measure')
+
+    def _place_cursor1(self, x: float) -> None:
+        """A click on the plot puts Cursor 1 there, switching it on first."""
+        if not self.btn_cursor1.isChecked():
+            self.btn_cursor1.setChecked(True)
+        self.plot_panel.move_cursor1(x)
+        self._update_status(f'Cursor 1 at t={x:.4f} s',
+                            'Click the plot or drag the C1 line to measure')
 
     def _toggle_cursor2(self, checked: bool) -> None:
         self.plot_panel.set_cursor2_enabled(checked)
@@ -2441,6 +2474,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
         ('Space',           'Plot selected signal(s) from the signal tree'),
         ('C',               'Change color of the selected signal'),
         ('R',               'Toggle Cursor 1 and Cursor 2 on/off together'),
+        ('Click on plot',   'Place Cursor 1 there, switching it on if it is off'),
         ('Delete',          'Remove selected signal from plot'),
         ('Ctrl + Z',        'Undo last plot action (up to 3 levels)'),
         ('Ctrl + S',        'Save current configuration to JSON'),
