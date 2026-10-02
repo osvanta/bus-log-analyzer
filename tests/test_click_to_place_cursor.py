@@ -213,7 +213,7 @@ def test_shift_click_moves_cursor2_and_leaves_cursor1(qapp, window):
 
     _assert_cursor2_at(panel, 8.0)
     assert panel.v_line.value() == cursor1
-    assert panel.cursor2_label.text().startswith('Time delta = ')
+    assert 'ΔT' in panel.cursor_label.text()
 
 
 def test_shift_click_places_cursor2_in_the_single_plot_layout(qapp, window):

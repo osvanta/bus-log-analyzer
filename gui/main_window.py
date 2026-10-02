@@ -1044,6 +1044,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
         """Remove decoded and plotted state belonging to the previous file."""
         self.plot_panel.clear_all()
         self.plot_panel.discard_undo_history()
+        self.plot_panel.set_measurement_file(None)
         self.signal_tree.set_payload({})
         self.signal_tree.set_generated_signals([])
         self.calculated_signals.invalidate_cache()
@@ -2093,6 +2094,8 @@ QToolButton:pressed { background-color: #1a2a3a; }
             self._pending_plot_keys = list(pending_plot_keys or [])
         self.plot_panel.clear_all()
         self.plot_panel.discard_undo_history()
+        # Signals plotted from here on, while decoding and after, are this file's.
+        self.plot_panel.set_measurement_file(mpath)
         self.calculated_signals.invalidate_cache()
         self._calc_queue.clear()
         self._finding_plot_keys = set()

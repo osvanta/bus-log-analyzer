@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import cycle
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -27,10 +28,12 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QMenu,
     QMessageBox,
+    QSizePolicy,
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
@@ -432,6 +435,48 @@ class _ReorderTable(QTableWidget):
         super().mousePressEvent(event)
 
 
+class _FileNameLabel(QLabel):
+    """The measurement's file name after the cursor readout, behind the
+    separator the readout puts between its own parts.
+
+    A name too long for the room left is shortened in the middle with "…",
+    keeping its start and its extension. The label never holds the plot
+    wider than the space it is given.
+    """
+
+    SEPARATOR = '   |   '
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._name = ''
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        # Ignored: the label takes the width left beside the readout, and its
+        # text sets no minimum width for the plot panel.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def name(self) -> str:
+        return self._name
+
+    def set_name(self, name: str) -> None:
+        self._name = name
+        self._fit_text()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_text()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            self._fit_text()
+
+    def _fit_text(self) -> None:
+        metrics = self.fontMetrics()
+        room = max(0, self.width() - metrics.horizontalAdvance(self.SEPARATOR))
+        name = metrics.elidedText(self._name, Qt.TextElideMode.ElideMiddle, room)
+        self.setText(self.SEPARATOR + name if name else '')
+
+
 class PlotPanel(QWidget):
     selectionChanged = Signal(str)
     signalDropped = Signal(list)
@@ -569,15 +614,15 @@ class PlotPanel(QWidget):
         self.view_stack.addWidget(self.plot_host)   # index 0 – normal
         self.view_stack.addWidget(self.glw)          # index 1 – stacked
 
-        # ── Status / hint labels ──────────────────────────────────────────
-        self.drop_hint = QLabel(
-            'Drag signal(s) here, double-click them, or right-click and choose Plot selected signal(s)'
-        )
+        # ── Cursor readout ────────────────────────────────────────────────
+        # How to plot signals is told on the empty plot, so no hint line
+        # under the plot repeats it.
         self.cursor_label = QLabel(self._cursor_label_base)
-        self.cursor2_label = QLabel('')
-        self.drop_hint.hide()
         self.cursor_label.hide()
-        self.cursor2_label.hide()
+        # On the cursor line, after the readout: which file the plotted
+        # signals come from.
+        self.file_name_label = _FileNameLabel()
+        self.file_name_label.hide()
 
         # ── Cursor 1: draggable vertical line (ON by default) ─────────────
         self.v_line = _CursorLine('C1', {'position': 0.95},
@@ -635,8 +680,8 @@ class PlotPanel(QWidget):
         _tbl_layout.setContentsMargins(0, 0, 0, 0)
         _tbl_layout.setSpacing(0)
         _tbl_layout.addWidget(self.table, stretch=1)
-        # As tall as what lies under the plot, its margin and the hint and
-        # cursor lines, so the table ends level with the plot.
+        # As tall as what lies under the plot, its margin and the cursor
+        # line, so the table ends level with the plot.
         self._table_bottom_gap = QWidget()
         self._table_bottom_gap.setObjectName('tableBottomGap')
         self._table_bottom_gap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
@@ -675,9 +720,12 @@ class PlotPanel(QWidget):
         _root = QVBoxLayout(self)
         _root.setContentsMargins(4, 4, 4, 4)
         _root.addWidget(self.view_stack, stretch=1)
-        _root.addWidget(self.drop_hint)
-        _root.addWidget(self.cursor_label)
-        _root.addWidget(self.cursor2_label)
+        _cursor_line = QHBoxLayout()
+        _cursor_line.setContentsMargins(0, 0, 0, 0)
+        _cursor_line.setSpacing(0)
+        _cursor_line.addWidget(self.cursor_label)
+        _cursor_line.addWidget(self.file_name_label, stretch=1)
+        _root.addLayout(_cursor_line)
         self.view_stack.installEventFilter(self)
 
         self._setup_mouse_proxy()
@@ -1249,7 +1297,6 @@ class PlotPanel(QWidget):
                 try: self.plot.removeItem(self.v_line2)
                 except Exception: pass
             self.table.setColumnHidden(3, True)
-            self.cursor2_label.hide()
         self._update_cursor_labels()
 
     def set_stacked(self, enabled: bool) -> None:
@@ -2350,19 +2397,15 @@ class PlotPanel(QWidget):
         x1 = self.v_line.value()
         x2 = self.v_line2.value()
         if self._cursor1_enabled and self._cursor2_enabled:
+            # A time delta needs both cursors on the plot.
             dt   = abs(x2 - x1)
             txt = f'C1: t={x1:.4f} s   |   C2: t={x2:.4f} s   |   ΔT={dt:.4f} s'
-            self.cursor2_label.setText(f'Time delta = {dt:.4f} s  (C1={x1:.4f} s  C2={x2:.4f} s)')
-            self.cursor2_label.show()
+        elif self._cursor1_enabled:
+            txt = f'C1: t={x1:.4f} s'
+        elif self._cursor2_enabled:
+            txt = f'C2: t={x2:.4f} s'
         else:
-            # A time delta needs both cursors on the plot.
-            self.cursor2_label.hide()
-            if self._cursor1_enabled:
-                txt = f'C1: t={x1:.4f} s'
-            elif self._cursor2_enabled:
-                txt = f'C2: t={x2:.4f} s'
-            else:
-                txt = self._cursor_label_base
+            txt = self._cursor_label_base
         self.cursor_label.setText(txt)
 
     # ── Mouse cursor (hover tracking for h-line only) ─────────────────────
@@ -2706,13 +2749,18 @@ class PlotPanel(QWidget):
         self.overlay_label.setText(text)
         self.overlay_label.setVisible(bool(text))
 
+    def set_measurement_file(self, path: str | None) -> None:
+        """Name, after the cursor readout, the file the plotted signals come
+        from; None or '' names none. The full path is the label's tooltip."""
+        self.file_name_label.set_name(Path(path).name if path else '')
+        self.file_name_label.setToolTip(path or '')
+        self.file_name_label.setVisible(bool(self._items) and bool(path))
+
     def _update_empty_state_ui(self) -> None:
         has_items = bool(self._items)
         self.overlay_label.setVisible((not has_items) and bool(self.overlay_label.text()))
-        self.drop_hint.setVisible(has_items)
         self.cursor_label.setVisible(has_items)
-        if not has_items:
-            self.cursor2_label.hide()
+        self.file_name_label.setVisible(has_items and bool(self.file_name_label.name()))
         if has_items and self._stacked_mode:
             self.view_stack.setCurrentIndex(1)
         else:
@@ -3016,7 +3064,6 @@ class PlotPanel(QWidget):
         self._current_key = None
         self.plot.setLabel('left', 'Value')
         self.cursor_label.setText(self._cursor_label_base)
-        self.cursor2_label.hide()
         self._update_empty_state_ui()
         self.plot.enableAutoRange()
         self.plot.autoRange()

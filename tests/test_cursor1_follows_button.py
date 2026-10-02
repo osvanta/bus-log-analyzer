@@ -153,12 +153,28 @@ def test_readout_without_cursor1_shows_no_time_delta(qapp, window):
     qapp.processEvents()
     assert panel.cursor_label.text().startswith('C2: t=')
     assert 'ΔT' not in panel.cursor_label.text()
-    assert not panel.cursor2_label.isVisible()
 
     window.btn_cursor1.setChecked(True)
     qapp.processEvents()
     assert 'ΔT' in panel.cursor_label.text()
-    assert panel.cursor2_label.isVisible()
+
+
+def test_both_cursors_give_one_readout_line(qapp, window):
+    # The time delta is in the cursor line; no second line repeats it.
+    from PySide6.QtWidgets import QLabel
+
+    _plot(qapp, window, 'Speed')
+    panel = window.plot_panel
+    window.btn_cursor1.setChecked(True)
+    window.btn_cursor2.setChecked(True)
+    qapp.processEvents()
+
+    readouts = [label for label in panel.findChildren(QLabel)
+                if label.isVisible() and 'C2' in label.text()]
+    assert readouts == [panel.cursor_label]
+    assert panel.cursor_label.text().startswith('C1: t=')
+    assert 'C2: t=' in panel.cursor_label.text()
+    assert 'ΔT=' in panel.cursor_label.text()
 
 
 def test_click_on_the_plot_brings_the_cursor1_column_back(qapp, window):

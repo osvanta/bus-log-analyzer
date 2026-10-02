@@ -278,7 +278,7 @@ def test_plot_buttons_are_level_with_the_table_header(window):
 
 def test_the_table_ends_level_with_the_plot(qapp, window):
     # Under the plot are the panel's margin and, once signals are plotted,
-    # the hint and cursor lines; the table leaves the same space under it.
+    # the cursor line; the table leaves the same space under it.
     import array
     from PySide6.QtCore import QPoint
     from core.signal_store import SignalSeries
@@ -300,10 +300,29 @@ def test_the_table_ends_level_with_the_plot(qapp, window):
     assert_level()
     window.btn_cursor1.setChecked(True)
     window.btn_cursor2.setChecked(True)
-    assert window.plot_panel.cursor2_label.isVisible()
+    assert 'ΔT' in window.plot_panel.cursor_label.text()
     assert_level()
     window.resize(1400, 600)
     assert_level()
+
+
+def test_only_the_cursor_line_lies_under_the_plot(qapp, window):
+    # How to plot signals is told on the empty plot; no hint line under the
+    # plot repeats it once signals are plotted.
+    import array
+    from PySide6.QtWidgets import QLabel
+    from core.signal_store import SignalSeries
+
+    panel = window.plot_panel
+    ts = array.array('d', (i * 0.1 for i in range(100)))
+    panel.add_series('Speed', SignalSeries(None, 'Msg', 1, 'Speed', 'km/h', ts, ts))
+    qapp.processEvents()
+
+    plot_bottom = panel.view_stack.geometry().bottom()
+    under_plot = [label for label in panel.findChildren(QLabel)
+                  if label.isVisible() and label.parentWidget() is panel
+                  and label.geometry().top() > plot_bottom]
+    assert under_plot == [panel.cursor_label]
 
 
 def test_narrow_plot_moves_buttons_into_the_menu_not_the_table_aside(qapp, window):
