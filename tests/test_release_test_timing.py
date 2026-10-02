@@ -287,7 +287,7 @@ def test_the_timing_scenarios_time_a_real_run(tmp_path, blf_path, sample_dbc_pat
         capture_output=True, text=True, timeout=300,
     )
 
-    reports = list(folder.glob('release_test_*_report.txt'))
+    reports = list((folder / 'release_test_reports').glob('release_test_*_report.txt'))
     assert len(reports) == 1, completed.stdout[-4000:] + completed.stderr[-4000:]
     report = reports[0].read_text(encoding='utf-8')
     if 'the PC ran on battery' in report:

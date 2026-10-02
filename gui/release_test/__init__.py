@@ -21,7 +21,8 @@ the scenarios, and ``--quit-when-done`` closes the runner at the end with exit
 code 0 when every run passed. See ``plan`` for how the folder is laid out, and
 ``report`` for what passes.
 
-The report, ``release_test_<time>_report.txt``, is written into the folder.
+The report, ``release_test_<time>_report.txt``, is written into the folder's
+``release_test_reports`` subfolder.
 It holds no signal names or data, and names each measurement only by an alias
 that the separate ``_files.txt`` list resolves.
 

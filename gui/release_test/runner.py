@@ -39,6 +39,7 @@ from gui.release_test.plan import build_scenarios, find_measurements, select
 from gui.release_test.report import Run, anonymise, crash_log_session, files_list, judge, render
 
 MEMCHECK_SUFFIX = '_memcheck'
+REPORTS_FOLDER = 'release_test_reports'   # in the test folder, beside the measurements
 START_SECONDS = 120.0       # per run, on top of LOAD_TIMEOUT per load
 MEMCHECK_SLOWDOWN = 3
 
@@ -217,9 +218,11 @@ class RunnerWindow(QWidget):
 
 
 def _write(folder: Path, name: str, text: str) -> Path:
-    """Into the test folder, or the temp folder when that is read-only."""
-    for directory in (folder, Path(tempfile.gettempdir())):
+    """Into the test folder's reports folder, or the temp folder when that
+    cannot be written."""
+    for directory in (folder / REPORTS_FOLDER, Path(tempfile.gettempdir())):
         try:
+            directory.mkdir(exist_ok=True)
             path = directory / name
             path.write_text(text, encoding='utf-8')
             return path
