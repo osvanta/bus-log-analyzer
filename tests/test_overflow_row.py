@@ -138,6 +138,69 @@ def test_reopening_the_menu_does_not_duplicate_entries(qapp, row):
     assert len(row.more_menu.actions()) == len(row.overflowed_buttons())
 
 
+GAP = 30
+
+
+@pytest.fixture()
+def row_with_gap(qapp):
+    from PySide6.QtWidgets import QPushButton, QWidget
+    from gui.overflow_row import OverflowButtonRow
+    from gui.plot_icons import icon_button
+
+    host = QWidget()
+    host.resize(2000, 200)
+    r = OverflowButtonRow(host)
+    for label in ('Multi-Axis', 'Stacked'):
+        r.add_button(QPushButton(label))
+    r.add_gap(GAP)
+    for name, label in (('cursor1', 'Cursor 1'), ('points', 'Show Data Points')):
+        button = icon_button(name, label, label)
+        button.setCheckable(True)
+        r.add_button(button)
+    host.show()
+    qapp.processEvents()
+    yield r
+    host.close()
+    qapp.processEvents()
+
+
+def test_a_gap_separates_the_buttons_after_it(qapp, row_with_gap):
+    row = row_with_gap
+    _resize(qapp, row, _full_width(row) + GAP + 50)
+    stacked, cursor1 = _buttons(row)[1], _buttons(row)[2]
+
+    assert cursor1.x() - (stacked.x() + stacked.width()) == row.SPACING + GAP
+
+
+def test_the_gap_counts_when_the_row_fills_up(qapp, row_with_gap):
+    row = row_with_gap
+
+    _resize(qapp, row, _full_width(row) + GAP)
+    assert row.overflowed_buttons() == []
+
+    # Wide enough for the buttons alone, but not for the gap as well.
+    _resize(qapp, row, _full_width(row) + GAP - 1)
+    assert _buttons(row)[-1] in row.overflowed_buttons()
+    shown = [b for b in _buttons(row) if b.isVisible()]
+    assert all(b.width() >= b.sizeHint().width() for b in shown)
+
+
+def test_icon_buttons_are_named_in_the_menu_and_keep_their_icon(qapp, row_with_gap):
+    row = row_with_gap
+    _resize(qapp, row, _full_width(row) // 2)
+    overflowed = row.overflowed_buttons()
+    assert overflowed[-2:] == _buttons(row)[-2:]   # the icon buttons
+    _buttons(row)[-2].setChecked(True)
+
+    row.more_menu.aboutToShow.emit()
+    actions = row.more_menu.actions()
+
+    assert [a.text() for a in actions[-2:]] == ['Cursor 1', 'Show Data Points']
+    assert all(not a.icon().isNull() for a in actions[-2:])
+    assert all(a.icon().isNull() for a in actions[:-2])   # text buttons stay text
+    assert actions[-2].isChecked()
+
+
 # ── Main window placement ────────────────────────────────────────────────
 
 
@@ -170,6 +233,25 @@ def test_plot_buttons_sit_above_the_plot_not_the_table(window):
     assert window.plot_button_row.geometry().bottom() < window.plot_panel.geometry().top()
     for button in (window.btn_fit, window.btn_stacked, window.btn_points):
         assert button.parentWidget() is window.plot_button_row
+
+
+def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons(window):
+    row = window.plot_button_row
+    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack]
+    icons = [window.btn_fit, window.btn_fit_v, window.btn_cursor1, window.btn_cursor2,
+             window.btn_points, window.btn_hide_line]
+
+    assert row._buttons == modes + icons
+    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack']
+    assert [b.accessibleName() for b in icons] == [
+        'Fit to Window', 'Fit Vertical', 'Cursor 1', 'Cursor 2', 'Show Data Points', 'Hide Line']
+    for button in icons:
+        assert button.text() == ''
+        assert not button.icon().isNull()
+        assert button.toolTip().startswith(button.accessibleName())
+        assert button.height() == window.btn_stacked.height()
+    multistack, fit = window.btn_multistack, window.btn_fit
+    assert fit.x() - (multistack.x() + multistack.width()) > 2 * row.SPACING
 
 
 def test_plot_buttons_are_level_with_the_table_header(window):

@@ -98,11 +98,9 @@ def test_data_point_toggle_thins_then_restores_curve(window):
 
     window.btn_points.setChecked(True)
     assert plotted.curve.opts["pen"].widthF() == pytest.approx(1.2)
-    assert window.btn_points.text() == "Hide Data Points"
 
     window.btn_points.setChecked(False)
     assert plotted.curve.opts["pen"].widthF() == pytest.approx(2.8)
-    assert window.btn_points.text() == "Show Data Points"
 
 
 def test_hide_line_requires_data_points_and_restores_line(window):
@@ -125,7 +123,6 @@ def test_hide_line_requires_data_points_and_restores_line(window):
     assert plotted.scatter is not None
     point_x, _point_y = plotted.scatter.getData()
     assert len(point_x) == 2
-    assert window.btn_hide_line.text() == "Hide Line"
 
     window.btn_points.setChecked(False)
     assert not window.btn_hide_line.isEnabled()
@@ -133,7 +130,6 @@ def test_hide_line_requires_data_points_and_restores_line(window):
     assert not window.plot_panel._hide_lines
     assert plotted.curve.opts["pen"].style() != Qt.PenStyle.NoPen
     assert plotted.curve.opts["pen"].widthF() == pytest.approx(2.8)
-    assert window.btn_hide_line.text() == "Hide Line"
 
 
 def test_background_create_is_cached_but_not_auto_plotted(window, qapp):

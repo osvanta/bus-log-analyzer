@@ -15,6 +15,7 @@ plot column's minimum width and hold the table narrow.
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QSize
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractButton,
     QHBoxLayout,
@@ -37,6 +38,7 @@ class OverflowButtonRow(QWidget):
         super().__init__(parent)
         self._buttons: list[QAbstractButton] = []
         self._overflowed: set[QAbstractButton] = set()
+        self._gaps = 0   # width of the space added by add_gap
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(self.SPACING)
@@ -53,11 +55,17 @@ class OverflowButtonRow(QWidget):
         self._layout.addWidget(self.more_button)
 
     def add_button(self, button: QAbstractButton) -> None:
-        self._layout.insertWidget(len(self._buttons), button)
+        # Before the closing stretch and the menu button.
+        self._layout.insertWidget(self._layout.count() - 2, button)
         self._buttons.append(button)
         # Square, and as tall as the buttons it stands in for.
         side = max(self.more_button.minimumHeight(), button.sizeHint().height())
         self.more_button.setMinimumSize(side, side)
+
+    def add_gap(self, width: int) -> None:
+        """Leave width pixels more than the usual spacing before the next button."""
+        self._layout.insertSpacing(self._layout.count() - 2, width)
+        self._gaps += width
 
     def overflowed_buttons(self) -> list[QAbstractButton]:
         """The buttons currently in the menu, in row order."""
@@ -78,7 +86,8 @@ class OverflowButtonRow(QWidget):
 
     def _fit(self) -> None:
         widths = [b.sizeHint().width() for b in self._buttons]
-        available = self.contentsRect().width()
+        # A gap keeps its place on the row, whichever buttons are shown.
+        available = self.contentsRect().width() - self._gaps
         if sum(widths) + self.SPACING * (len(widths) - 1) > available:
             available -= self._more_width() + self.SPACING
         fits = 0
@@ -105,7 +114,15 @@ class OverflowButtonRow(QWidget):
         # Rebuilt on every open so checked and enabled states are current.
         self.more_menu.clear()
         for button in self.overflowed_buttons():
-            action = self.more_menu.addAction(button.text())
+            # An icon-only button is named by its accessible name.
+            action = self.more_menu.addAction(button.text() or button.accessibleName())
+            if not button.icon().isNull():
+                # Its unchecked look even when checked: a checked button's icon
+                # may be drawn for the accent fill behind it, which a menu
+                # entry does not have.
+                action.setIcon(QIcon(button.icon().pixmap(
+                    button.iconSize(), self.devicePixelRatioF(),
+                    QIcon.Mode.Normal, QIcon.State.Off)))
             action.setCheckable(button.isCheckable())
             action.setChecked(button.isChecked())
             action.setEnabled(button.isEnabled())

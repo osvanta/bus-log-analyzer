@@ -100,7 +100,6 @@ def test_click_switches_cursor1_on_and_places_it(qapp, window):
     _click(qapp, panel, 6.0)
 
     assert window.btn_cursor1.isChecked()
-    assert window.btn_cursor1.text() == 'Cursor 1: ON'
     _assert_cursor1_at(panel, 6.0)
 
 
@@ -197,7 +196,6 @@ def test_shift_click_switches_cursor2_on_and_places_it(qapp, window):
     _click(qapp, panel, 3.0, shift=True)
 
     assert window.btn_cursor2.isChecked()
-    assert window.btn_cursor2.text() == 'Cursor 2: ON'
     assert panel._stacked_c2_lines
     _assert_cursor2_at(panel, 3.0)
     assert not window.btn_cursor1.isChecked()   # Cursor 1 is left alone

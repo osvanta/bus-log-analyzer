@@ -70,6 +70,7 @@ from core.channel_config import ChannelConfig
 from gui.dbc_manager import DBCManagerDialog
 from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
+from gui.plot_icons import icon_button
 from gui.plot_widget import PlotPanel
 from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
@@ -280,8 +281,9 @@ class MainWindow(QMainWindow):
         self.plot_panel.plotAreaShiftClicked.connect(self._place_cursor2)
 
         self.plot_button_row = OverflowButtonRow()
-        self.btn_fit = QPushButton('Fit to Window')
-        self.btn_fit_v = QPushButton('Fit Vertical')
+        self.btn_fit = icon_button('fit_window', 'Fit to Window', 'Fit to Window (F)')
+        self.btn_fit_v = icon_button('fit_vertical', 'Fit Vertical',
+                                     'Fit Vertical (V): fit the height, keep the time range')
         self.btn_multi_axis = QPushButton('Multi-Axis')
         self.btn_multi_axis.setCheckable(True)
         self.btn_stacked = QPushButton('Stacked')
@@ -289,19 +291,27 @@ class MainWindow(QMainWindow):
         self.btn_stacked.setChecked(True)  # default plot mode on app startup
         self.btn_multistack = QPushButton('MultiStack')
         self.btn_multistack.setCheckable(True)
-        self.btn_cursor1 = QPushButton('Cursor 1')
+        self.btn_cursor1 = icon_button('cursor1', 'Cursor 1',
+                                       'Cursor 1, or click the plot to place it')
         self.btn_cursor1.setCheckable(True)
         self.btn_cursor1.setChecked(False)  # OFF by default
-        self.btn_cursor2 = QPushButton('Cursor 2')
+        self.btn_cursor2 = icon_button('cursor2', 'Cursor 2',
+                                       'Cursor 2, or Shift+click the plot to place it')
         self.btn_cursor2.setCheckable(True)
-        self.btn_points = QPushButton('Show Data Points')
+        self.btn_points = icon_button('points', 'Show Data Points', 'Show Data Points')
         self.btn_points.setCheckable(True)
-        self.btn_hide_line = QPushButton('Hide Line')
+        self.btn_hide_line = icon_button('hide_line', 'Hide Line',
+                                         'Hide Line: the data points only, once they are shown')
         self.btn_hide_line.setCheckable(True)
         self.btn_hide_line.setEnabled(False)
-        for btn in (self.btn_fit, self.btn_fit_v, self.btn_multi_axis,
-                    self.btn_stacked, self.btn_multistack, self.btn_cursor1,
+        # The plot modes, which keep their text, then the icon buttons.
+        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack):
+            self.plot_button_row.add_button(btn)
+        self.plot_button_row.add_gap(18)
+        for btn in (self.btn_fit, self.btn_fit_v, self.btn_cursor1,
                     self.btn_cursor2, self.btn_points, self.btn_hide_line):
+            # As tall as the text buttons; the icon alone would make it taller.
+            btn.setFixedHeight(self.btn_stacked.sizeHint().height())
             self.plot_button_row.add_button(btn)
 
         self.btn_fit.clicked.connect(self.plot_panel.fit_to_window)
@@ -1245,7 +1255,6 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _toggle_cursor1(self, checked: bool) -> None:
         self.plot_panel.set_cursor1_enabled(checked)
-        self.btn_cursor1.setText('Cursor 1: ON' if checked else 'Cursor 1')
         self._update_status('Cursor 1 updated',
                             'Click the plot or drag the C1 line to measure')
 
@@ -1259,7 +1268,6 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _toggle_cursor2(self, checked: bool) -> None:
         self.plot_panel.set_cursor2_enabled(checked)
-        self.btn_cursor2.setText('Cursor 2: ON' if checked else 'Cursor 2')
         self._update_status('Cursor 2 updated',
                             'Shift+click the plot or drag the C2 line to measure')
 
@@ -1302,7 +1310,6 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _toggle_points(self, checked: bool) -> None:
         self.plot_panel.set_show_points(checked)
-        self.btn_points.setText('Hide Data Points' if checked else 'Show Data Points')
         if not checked:
             self.btn_hide_line.setChecked(False)
         self.btn_hide_line.setEnabled(checked)
