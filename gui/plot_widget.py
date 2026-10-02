@@ -2414,11 +2414,16 @@ class PlotPanel(QWidget):
         self._bring_cursors_into(x_min, x_max)
 
         if self._stacked_mode:
+            if self._stacked_plots:
+                # Row 0 only; the link carries it to the other rows. A row
+                # just added is not laid out yet, and setting the range on it
+                # would reach row 0 shifted by its stale geometry, hiding the
+                # start of the recording.
+                self._stacked_plots[0].setXRange(x_min, x_max, padding=0.02)
             for i, row_keys in enumerate(self._stacked_row_keys):
                 if i >= len(self._stacked_plots):
                     break
                 p = self._stacked_plots[i]
-                p.setXRange(x_min, x_max, padding=0.02)
                 vals = [
                     value
                     for key in row_keys
