@@ -27,6 +27,7 @@ import gc
 import json
 import os
 import sys
+import threading
 import time
 import tracemalloc
 import weakref
@@ -45,6 +46,11 @@ DIALOG_SECONDS = 0.4        # how long a dialog stays up before it is answered
 LOAD_TIMEOUT = 900.0
 CLOSE_AFTER_SECONDS = 0.1   # after the load thread starts: small files load in 0.5 s
 PLOTTED_SIGNALS = 8
+TIMED_PLOT_SIGNALS = 5      # plotted in Stacked by a timing scenario
+# A timing scenario loads once the main window's background import of the
+# readers has finished, as it would after a user has picked a file.
+PRELOAD_THREAD = 'Measurement support preload'
+SETTLE_SECONDS = 1.0
 # A message box is answered with the first of these its buttons have.
 _ANSWER_ROLES = (
     QMessageBox.ButtonRole.RejectRole, QMessageBox.ButtonRole.NoRole,
@@ -60,15 +66,27 @@ class ScenarioDriver(QObject):
         self._files: list[dict] = spec['files']
         self._steps: list[dict] = spec['steps']
         self._result_path = Path(spec['result'])
+        # The driver starts right after the main window is shown. Start-up
+        # times are these stamps less the runner's launch time: both read
+        # time.perf_counter(), the system's performance counter.
+        splash = getattr(window, '_splash', None)
         self._result = {
             'pid': os.getpid(), 'memory_checks': bool(sys.flags.dev_mode),
             'steps': [], 'finished': False,
+            'splash_at': getattr(splash, 'shown_at', None),
+            'window_at': time.perf_counter(),
         }
+        self._timing = bool(spec.get('timing'))
+        self._listed_at = 0.0
         self._current_file: dict | None = None
         self._pending_paths: list[str] = []
         self._dialogs: list[str] = []
         self._modal_address = 0
         self._modal_since = 0.0
+        # How long dialogs waited on screen for their answer: a person's time,
+        # left out of what a timing scenario reports.
+        self._modal_shown_at = 0.0
+        self._dialog_ms = 0.0
         self._stores: list[weakref.ref] = []
         self._stepping = False
         if sys.flags.dev_mode:
@@ -85,6 +103,8 @@ class ScenarioDriver(QObject):
         self._dialog_timer = QTimer(self)
         self._dialog_timer.timeout.connect(self._answer_dialog)
         self._dialog_timer.start(TICK_MS)
+        # Runs once the event loop does: the window answers from then on.
+        QTimer.singleShot(0, self._note_answering)
 
     # ── Event loop ───────────────────────────────────────────────────────
 
@@ -100,6 +120,9 @@ class ScenarioDriver(QObject):
             self._stop()
         finally:
             self._stepping = False
+
+    def _note_answering(self) -> None:
+        self._result['answering_at'] = time.perf_counter()
 
     def _stop(self) -> None:
         self._timer.stop()
@@ -120,10 +143,12 @@ class ScenarioDriver(QObject):
         address = Shiboken.getCppPointer(dialog)[0]
         if address != self._modal_address:
             self._modal_address, self._modal_since = address, time.monotonic()
+            self._modal_shown_at = time.perf_counter()
             return
         if time.monotonic() - self._modal_since < DIALOG_SECONDS:
             return
         self._modal_address = 0
+        self._dialog_ms += (time.perf_counter() - self._modal_shown_at) * 1000
         self._dialogs.append(dialog.windowTitle() or type(dialog).__name__)
         if isinstance(dialog, DBCManagerDialog):
             dialog.accept()
@@ -145,17 +170,22 @@ class ScenarioDriver(QObject):
     # ── Scenario ─────────────────────────────────────────────────────────
 
     def _run(self):
-        yield from self._wait(1.0)  # the splash hands over to the window
+        if not self._timing:  # a timing scenario opens its file at once
+            yield from self._wait(1.0)  # the splash hands over to the window
         for step in self._steps:
             record = {'op': step['op']}
             self._dialogs = []
             started = time.monotonic()
             if step['op'] == 'open':
                 self._open(self._files[step['file']], record)
+            elif step['op'] == 'settle':
+                yield from self._settle()
             elif step['op'] == 'load':
                 yield from self._load(record)
             elif step['op'] == 'plot':
                 yield from self._plot(record)
+            elif step['op'] == 'plot_stacked':
+                self._plot_stacked(record)
             elif step['op'] == 'close_during_load':
                 yield from self._close_during_load(record)
                 return
@@ -179,7 +209,10 @@ class ScenarioDriver(QObject):
         record['file'] = file['alias']
         self._current_file = file
         self._pending_paths.append(file['path'])
+        self._dialog_ms = 0.0
         self._actions['Open File'].trigger()
+        record['opened_at'] = time.perf_counter()
+        record['open_dialog_ms'] = round(self._dialog_ms, 1)
         record['opened'] = window.measurement_path == file['path']
         planned = ChannelConfig(
             name='Release test',
@@ -203,7 +236,13 @@ class ScenarioDriver(QObject):
         if not action.isEnabled():
             record['outcome'] = 'Load + Decode was greyed out'
             return
+        self._listed_at = 0.0
+        clicked = time.perf_counter()
         action.trigger()
+        if window._worker is not None:
+            # Connected after the window's own slot, so it runs once the
+            # signal tree has been given the signals.
+            window._worker.finished.connect(self._on_load_finished)
         deadline = time.monotonic() + LOAD_TIMEOUT
         while window._thread is not None:
             if time.monotonic() > deadline:
@@ -211,6 +250,8 @@ class ScenarioDriver(QObject):
                 return
             yield
         yield from self._wait(0.3)  # results shown, any dialog answered
+        if self._listed_at:
+            record['load_ms'] = round((self._listed_at - clicked) * 1000, 1)
         store = window.store
         if store is None:
             record['outcome'] = 'failed' if 'Load failed' in self._dialogs else 'not loaded'
@@ -224,6 +265,35 @@ class ScenarioDriver(QObject):
         gc.collect()
         self._stores.append(weakref.ref(store))
         record['stores_alive'] = sum(ref() is not None for ref in self._stores)
+
+    def _on_load_finished(self, _store) -> None:
+        self._window.signal_tree.repaint()
+        self._listed_at = time.perf_counter()
+
+    def _settle(self):
+        deadline = time.monotonic() + LOAD_TIMEOUT
+        while (any(thread.name == PRELOAD_THREAD for thread in threading.enumerate())
+               and time.monotonic() < deadline):
+            yield
+        yield from self._wait(SETTLE_SECONDS)
+
+    def _plot_stacked(self, record: dict) -> None:
+        """Plot five signals in Stacked and time it until they are drawn."""
+        window = self._window
+        record['file'] = self._current_file['alias'] if self._current_file else None
+        store = window.store
+        if store is None:
+            record['outcome'] = 'nothing to plot'
+            return
+        window.btn_stacked.setChecked(True)
+        keys = sorted(store.all_keys())[:TIMED_PLOT_SIGNALS]
+        started = time.perf_counter()
+        window.add_signals_to_plot(keys)
+        QApplication.processEvents()
+        window.plot_panel.repaint()
+        record['plot_ms'] = round((time.perf_counter() - started) * 1000, 1)
+        record['plotted'] = len(window.plot_panel.plotted_keys())
+        record['outcome'] = 'plotted'
 
     def _plot(self, record: dict):
         window = self._window

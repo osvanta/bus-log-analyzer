@@ -47,6 +47,7 @@ class Run:
     timed_out: bool = False
     pid: int = 0
     started: float = 0.0               # monotonic
+    launched_at: float = 0.0           # perf_counter, which the application shares
     seconds: float = 0.0
     exited_at: float = 0.0             # wall clock, to time an exit after a close
     result: dict = field(default_factory=dict)
@@ -54,6 +55,17 @@ class Run:
     failures: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     skipped: str = ''
+
+    @property
+    def startup(self) -> dict[str, float]:
+        """Milliseconds from launch until the splash, the main window and its
+        event loop: the application's own stamps less the launch time."""
+        found = {}
+        for name, key in (('splash', 'splash_at'), ('window', 'window_at'),
+                          ('answering', 'answering_at')):
+            if self.launched_at and self.result.get(key):
+                found[name] = round((self.result[key] - self.launched_at) * 1000, 1)
+        return found
 
     @property
     def verdict(self) -> str:
@@ -136,27 +148,39 @@ def _judge_step(number: int, step: dict, broken: bool, failures: list, warnings:
             warnings.append(f'{where}: dialog "{title}"')
 
 
-def render(header: list[str], measurements: list[Measurement], runs: list[Run]) -> str:
-    """The report, before names are replaced by aliases."""
+def render(header: list[str], measurements: list[Measurement], runs: list[Run],
+           sections: list[tuple[list[str], bool]] = ()) -> str:
+    """The report, before names are replaced by aliases.
+
+    Each section (its lines, and whether it passed) follows the file list;
+    a failed one fails the report.
+    """
     failed = sum(run.verdict == 'FAIL' for run in runs)
-    verdict = 'FAIL' if failed else 'PASS'
+    verdict = 'FAIL' if failed or not all(passed for _, passed in sections) else 'PASS'
     counted = [run for run in runs if run.verdict != 'SKIP']
     lines = [
         *header,
         '',
         f'RESULT: {verdict}   {len(counted) - failed} of {len(counted)} runs passed'
-        + (f', {failed} failed' if failed else ''),
+        + (f', {failed} failed' if failed else '')
+        + ('' if all(passed for _, passed in sections) else '; the known-good timing did not pass'),
         '',
         'Files (names are in the separate files list, which stays on this PC):',
         *(f'  {m.describe()}' for m in measurements),
         '',
     ]
+    for section_lines, _passed in sections:
+        lines += section_lines
     for run in runs:
         lines.append(
             f'[{run.verdict}] round {run.round}  {run.scenario.title}'
             + (f'   {run.skipped}' if run.skipped else
                f'   exit {_exit_text(run.exit_code)}, {run.seconds:.0f} s')
         )
+        if run.startup:
+            lines.append('    start-up            ' + ', '.join(
+                f'{name} {run.startup[name]:,.0f} ms'
+                for name in ('splash', 'window', 'answering') if name in run.startup))
         for step in run.result.get('steps', []):
             lines.append('    ' + _step_text(step))
         for failure in run.failures:
@@ -191,6 +215,10 @@ def _step_text(step: dict) -> str:
         parts.append(step['outcome'])
     if 'signals' in step:
         parts.append(f"{step['signals']:,} signals, {step['samples']:,} samples")
+    if 'load_ms' in step:
+        parts.append(f"tree listed {step['load_ms']:,.0f} ms after the click")
+    if 'plot_ms' in step:
+        parts.append(f"drawn in {step['plot_ms']:,.0f} ms")
     if step.get('warnings'):
         parts.append(f"{step['warnings']} skipped item(s)")
     if 'plotted' in step:

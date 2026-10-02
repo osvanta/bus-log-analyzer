@@ -24,6 +24,7 @@ the first status update.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore  import Qt, QTimer
@@ -130,6 +131,8 @@ class SplashScreen(QLabel):
 
         self._version     = version
         self._status_text = 'Starting...'
+        # time.perf_counter() when first shown: the release test times start-up from it.
+        self.shown_at: float | None = None
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -143,6 +146,11 @@ class SplashScreen(QLabel):
     def finish(self, window) -> None:
         """Close once *window* is up, as QSplashScreen.finish() did."""
         self.close()
+
+    def showEvent(self, event) -> None:
+        if self.shown_at is None:
+            self.shown_at = time.perf_counter()
+        super().showEvent(event)
 
     # ── Rendering ─────────────────────────────────────────────────────────
 

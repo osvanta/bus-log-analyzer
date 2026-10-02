@@ -33,9 +33,9 @@ from PySide6.QtWidgets import (
 )
 
 from gui import crash_log
-from gui.release_test import SCENARIO_FLAG
+from gui.release_test import SCENARIO_FLAG, timing
 from gui.release_test.driver import LOAD_TIMEOUT
-from gui.release_test.plan import build_scenarios, find_measurements
+from gui.release_test.plan import build_scenarios, find_measurements, select
 from gui.release_test.report import Run, anonymise, crash_log_session, files_list, judge, render
 
 MEMCHECK_SUFFIX = '_memcheck'
@@ -99,6 +99,7 @@ class ReleaseTest(QObject):
             'files': [m.to_json() for m in self.measurements],
             'steps': [step.to_json() for step in run.scenario.steps],
             'result': str(result_path),
+            'timing': run.scenario.family == timing.FAMILY,
         }), encoding='utf-8')
 
         process = QProcess(self)
@@ -120,6 +121,7 @@ class ReleaseTest(QObject):
         self._process = process
         self.progress.emit(f'round {run.round}  {run.scenario.title} …')
         run.started = time.monotonic()
+        run.launched_at = time.perf_counter()
         process.start()
         watchdog.start(int(timeout * 1000))
 
@@ -233,6 +235,7 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
     parser.add_argument('--heavy', action='store_true')
     parser.add_argument('--repeat', type=int, default=1)
     parser.add_argument('--only', default='')
+    parser.add_argument('--known-good', dest='known_good', type=Path)
     parser.add_argument('--quit-when-done', action='store_true')
     args, _unknown = parser.parse_known_args(argv[1:])
     if sys.stdout is not None:
@@ -248,9 +251,14 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
     folder = args.folder.resolve()
     measurements = find_measurements(folder) if folder.is_dir() else []
     scenarios = build_scenarios(measurements, args.heavy)
-    if args.only:
-        wanted = set(args.only.split(','))
-        scenarios = [scenario for scenario in scenarios if scenario.name in wanted]
+    known = None
+    problems: list[str] = []
+    states: list[timing.PcState] = []   # before the runs, and after them
+    if args.known_good is not None:
+        known = timing.read_known_good(args.known_good)
+        timed, problems = timing.timing_scenarios(measurements, known.references, folder)
+        scenarios += timed
+    scenarios = select(scenarios, args.only)
     packaged = getattr(sys, 'frozen', False)
     started = time.time()
     header = [
@@ -262,6 +270,9 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
         f'Started: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))}',
         f'Tier: {"heavy" if args.heavy else "standard"}   Rounds: {args.repeat}',
     ]
+    if known is not None:
+        header.append(f'Known-good file: {known.path.name}')
+        header += [f'  Known-good file: {problem}' for problem in problems]
     for line in header[1:]:
         window.say(line)
     for m in measurements:
@@ -285,12 +296,18 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
         took = time.time() - started
         header.append(f'Took: {int(took // 60)} min {int(took % 60)} s')
         stamp = time.strftime('%Y%m%d_%H%M%S', time.localtime(started))
-        text = anonymise(render(header, measurements, runs), measurements, folder)
+        sections = []
+        if known is not None:
+            states.append(timing.pc_state())
+            sections.append(timing.summary(runs, known, packaged, states))
+            for line in sections[-1][0]:
+                window.say(line)
+        text = anonymise(render(header, measurements, runs, sections), measurements, folder)
         report = _write(folder, f'release_test_{stamp}_report.txt', text)
         _write(folder, f'release_test_{stamp}_files.txt', files_list(measurements))
         shutil.rmtree(work_dir, ignore_errors=True)
         passed = not any(run.verdict == 'FAIL' for run in runs) and any(
-            run.verdict in ('PASS', 'WARN') for run in runs)
+            run.verdict in ('PASS', 'WARN') for run in runs) and all(ok for _, ok in sections)
         outcome['code'] = 0 if passed else 1
         verdict = 'PASS' if passed else 'FAIL'
         window.say(f'\nRESULT: {verdict}\nReport: {report}')
@@ -304,6 +321,8 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
 
     test.finished.connect(finish)
     app.aboutToQuit.connect(test.stop)
+    if known is not None:
+        states.append(timing.pc_state())
     test.start()
     code = app.exec()
     return outcome['code'] if args.quit_when_done else code
