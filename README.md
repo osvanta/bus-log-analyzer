@@ -50,7 +50,7 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 - **Stacked** is the default mode and gives each signal its own lane and Y scale.
 - **Normal** overlays signals on one Y axis.
 - **Multi-Axis** groups axes by unit, with an optional individual axis per signal.
-- Dual draggable cursors provide values and delta time; a click on the plot places Cursor 1 there. A cursor switched on always appears inside the visible window, and cursors are black on a light plot background and white on a dark one.
+- Dual draggable cursors provide values and delta time; a click on the plot places Cursor 1 there and a Shift+click places Cursor 2. A cursor switched on always appears inside the visible window, and cursors are black on a light plot background and white on a dark one.
 - Fit-to-window and vertical-fit work across all plot modes while preserving the relevant view range.
 - Signals can be grouped, reordered by dragging, recolored, hidden, or removed.
 - **Show Data Points** uses adaptive markers and thinner lines.

@@ -438,6 +438,8 @@ class PlotPanel(QWidget):
     signalLineStyleChanged = Signal(str, str)
     # Time under a left click inside a plot area, except on a cursor line.
     plotAreaClicked = Signal(float)
+    # The same for a left click with Shift held.
+    plotAreaShiftClicked = Signal(float)
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -3845,10 +3847,10 @@ class PlotPanel(QWidget):
         self._emit_plot_area_click(event, [self.plot.plotItem.vb])
 
     def _emit_plot_area_click(self, event, view_boxes) -> None:
-        """Emit plotAreaClicked with the time under a left click in one of
-        view_boxes. A click on a cursor line is left alone, since it is the
-        start of a drag that never moved; Cursor 1 would otherwise jump onto
-        Cursor 2."""
+        """Emit plotAreaClicked, or plotAreaShiftClicked with Shift held, with
+        the time under a left click in one of view_boxes. A click on a cursor
+        line is left alone, since it is the start of a drag that never moved;
+        one cursor would otherwise jump onto the other."""
         if not self._items:
             return
         pos = event.scenePos()
@@ -3860,7 +3862,11 @@ class PlotPanel(QWidget):
                     if isinstance(item, pg.InfiniteLine) and item.movable:
                         return
                     item = item.parentItem()
-            self.plotAreaClicked.emit(vb.mapSceneToView(pos).x())
+            x = vb.mapSceneToView(pos).x()
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.plotAreaShiftClicked.emit(x)
+            else:
+                self.plotAreaClicked.emit(x)
             return
 
     def _install_plot_background_menu(self) -> None:

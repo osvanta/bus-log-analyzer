@@ -277,6 +277,7 @@ class MainWindow(QMainWindow):
         self.plot_panel.signalColorChanged.connect(self._on_signal_color_changed)
         self.plot_panel.signalLineStyleChanged.connect(self._on_signal_line_style_changed)
         self.plot_panel.plotAreaClicked.connect(self._place_cursor1)
+        self.plot_panel.plotAreaShiftClicked.connect(self._place_cursor2)
 
         self.plot_button_row = OverflowButtonRow()
         self.btn_fit = QPushButton('Fit to Window')
@@ -1260,7 +1261,15 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self.plot_panel.set_cursor2_enabled(checked)
         self.btn_cursor2.setText('Cursor 2: ON' if checked else 'Cursor 2')
         self._update_status('Cursor 2 updated',
-                            'Drag C2 line to measure time delta between cursors')
+                            'Shift+click the plot or drag the C2 line to measure')
+
+    def _place_cursor2(self, x: float) -> None:
+        """A Shift+click on the plot puts Cursor 2 there, switching it on first."""
+        if not self.btn_cursor2.isChecked():
+            self.btn_cursor2.setChecked(True)
+        self.plot_panel.move_cursor2(x)
+        self._update_status(f'Cursor 2 at t={x:.4f} s',
+                            'Shift+click the plot or drag the C2 line to measure')
 
     def _shortcut_change_signal_color(self) -> None:
         key = self.plot_panel._current_key
@@ -2475,6 +2484,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
         ('C',               'Change color of the selected signal'),
         ('R',               'Toggle Cursor 1 and Cursor 2 on/off together'),
         ('Click on plot',   'Place Cursor 1 there, switching it on if it is off'),
+        ('Shift + click on plot', 'Place Cursor 2 there, switching it on if it is off'),
         ('Delete',          'Remove selected signal from plot'),
         ('Ctrl + Z',        'Undo last plot action (up to 3 levels)'),
         ('Ctrl + S',        'Save current configuration to JSON'),
@@ -2484,7 +2494,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
     def show_shortcuts(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle('Keyboard Shortcuts')
-        dlg.resize(560, 340)
+        dlg.resize(560, 420)
         tbl = QTableWidget(len(self._SHORTCUTS), 2, dlg)
         tbl.setHorizontalHeaderLabels(['Shortcut', 'Action'])
         tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)

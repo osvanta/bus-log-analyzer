@@ -7,6 +7,7 @@
 """
 A left click on the plot places Cursor 1 at the clicked time, switching it on
 first if it is off, so reading values needs no trip to the Cursor 1 button.
+A Shift+click does the same for Cursor 2.
 
 The clicks are real mouse events sent through Qt to pyqtgraph's scene, in the
 stacked layout (the default) and the single-plot layout.
@@ -56,7 +57,7 @@ def _view_and_box(panel):
     return panel.plot, panel.plot.plotItem.vb
 
 
-def _click(qapp, panel, t, button=None, x_offset_px=0):
+def _click(qapp, panel, t, button=None, x_offset_px=0, shift=False):
     """Click the plot at time t, half way up the view."""
     from PySide6.QtCore import QPointF, Qt
     from PySide6.QtTest import QTest
@@ -65,8 +66,8 @@ def _click(qapp, panel, t, button=None, x_offset_px=0):
     y = sum(vb.viewRange()[1]) / 2
     point = view.mapFromScene(vb.mapViewToScene(QPointF(t, y)))
     point.setX(point.x() + x_offset_px)
-    QTest.mouseClick(view.viewport(), button or Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, point)
+    modifier = Qt.KeyboardModifier.ShiftModifier if shift else Qt.KeyboardModifier.NoModifier
+    QTest.mouseClick(view.viewport(), button or Qt.MouseButton.LeftButton, modifier, point)
     qapp.processEvents()
 
 
@@ -174,3 +175,83 @@ def test_click_with_nothing_plotted_leaves_cursor1_off(qapp, window):
     _click(qapp, window.plot_panel, 0.5)
 
     assert not window.btn_cursor1.isChecked()
+
+
+def _assert_cursor2_at(panel, t):
+    tolerance = 2 * _one_pixel_in_seconds(panel)
+    assert panel.v_line2.value() == pytest.approx(t, abs=tolerance)
+    for line in panel._stacked_c2_lines:
+        assert line.value() == panel.v_line2.value()
+        assert line.isVisible()
+    nearest = round(panel.v_line2.value() / 0.01) * 0.01
+    assert panel.table.item(panel._row_lookup['Speed'], 3).text() == f'{nearest * 10:.3f}'
+    assert not panel.table.isColumnHidden(3)
+
+
+def test_shift_click_switches_cursor2_on_and_places_it(qapp, window):
+    _plot_ramp(qapp, window)
+    panel = window.plot_panel
+    assert panel._stacked_mode
+    assert not window.btn_cursor2.isChecked()
+
+    _click(qapp, panel, 3.0, shift=True)
+
+    assert window.btn_cursor2.isChecked()
+    assert window.btn_cursor2.text() == 'Cursor 2: ON'
+    assert panel._stacked_c2_lines
+    _assert_cursor2_at(panel, 3.0)
+    assert not window.btn_cursor1.isChecked()   # Cursor 1 is left alone
+
+
+def test_shift_click_moves_cursor2_and_leaves_cursor1(qapp, window):
+    _plot_ramp(qapp, window)
+    panel = window.plot_panel
+    _click(qapp, panel, 2.0)
+    window.btn_cursor2.setChecked(True)
+    qapp.processEvents()
+    cursor1 = panel.v_line.value()
+
+    _click(qapp, panel, 8.0, shift=True)
+
+    _assert_cursor2_at(panel, 8.0)
+    assert panel.v_line.value() == cursor1
+    assert panel.cursor2_label.text().startswith('Time delta = ')
+
+
+def test_shift_click_places_cursor2_in_the_single_plot_layout(qapp, window):
+    _plot_ramp(qapp, window)
+    window.btn_stacked.setChecked(False)
+    qapp.processEvents()
+    panel = window.plot_panel
+    assert not panel._stacked_mode
+
+    _click(qapp, panel, 7.5, shift=True)
+
+    assert window.btn_cursor2.isChecked()
+    assert panel.v_line2.scene() is panel.plot.scene()
+    _assert_cursor2_at(panel, 7.5)
+
+
+def test_clicks_keep_working_after_shift_click_adds_cursor2_rows(qapp, window):
+    # Switching Cursor 2 on in Stacked rebuilds the rows inside the click.
+    _plot_ramp(qapp, window)
+    panel = window.plot_panel
+    _click(qapp, panel, 3.0, shift=True)
+
+    _click(qapp, panel, 6.0)
+    _click(qapp, panel, 9.0, shift=True)
+
+    _assert_cursor1_at(panel, 6.0)
+    _assert_cursor2_at(panel, 9.0)
+
+
+def test_shift_click_on_cursor1_line_does_not_pull_cursor2_onto_it(qapp, window):
+    _plot_ramp(qapp, window)
+    panel = window.plot_panel
+    _click(qapp, panel, 2.0, shift=True)
+    _click(qapp, panel, 7.0)
+    cursor2 = panel.v_line2.value()
+
+    _click(qapp, panel, panel.v_line.value(), shift=True)
+
+    assert panel.v_line2.value() == cursor2
