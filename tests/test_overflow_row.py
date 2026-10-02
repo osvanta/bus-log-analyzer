@@ -8,7 +8,7 @@
 Tests for gui/overflow_row.py and the plot buttons' place in the main window.
 
 The plot buttons sit above the plot only, level with the signal table's
-header. Buttons that do not fit the plot's width move into a "»" menu rather
+header, and the table ends level with the plot. Buttons that do not fit the plot's width move into a "»" menu rather
 than holding the plot column wide enough to squeeze the table.
 """
 from __future__ import annotations
@@ -266,12 +266,44 @@ def test_plot_buttons_are_level_with_the_table_header(window):
         top = widget.mapTo(splitter, QPoint(0, 0)).y()
         return top, top + widget.height()
 
-    row_top, row_bottom = top_and_bottom(row)
+    row_top, _ = top_and_bottom(row)
     table_top, _ = top_and_bottom(table)
-    _, header_bottom = top_and_bottom(header)
+    first_row_top, _ = top_and_bottom(table.viewport())
+    plot_top, _ = top_and_bottom(window.plot_panel.view_stack)
 
     assert row_top == table_top
-    assert row_bottom == header_bottom
+    # The plot and the table's first row start on one line.
+    assert plot_top == first_row_top
+
+
+def test_the_table_ends_level_with_the_plot(qapp, window):
+    # Under the plot are the panel's margin and, once signals are plotted,
+    # the hint and cursor lines; the table leaves the same space under it.
+    import array
+    from PySide6.QtCore import QPoint
+    from core.signal_store import SignalSeries
+
+    splitter = window.center_splitter
+
+    def bottom(widget):
+        return widget.mapTo(splitter, QPoint(0, widget.height())).y()
+
+    def assert_level():
+        qapp.processEvents()
+        assert bottom(window.plot_panel.table) == bottom(window.plot_panel.view_stack)
+
+    assert_level()
+    ts = array.array('d', (i * 0.1 for i in range(100)))
+    window.plot_panel.add_series(
+        'Speed', SignalSeries(None, 'Msg', 1, 'Speed', 'km/h', ts, ts))
+    assert window.plot_panel.cursor_label.isVisible()
+    assert_level()
+    window.btn_cursor1.setChecked(True)
+    window.btn_cursor2.setChecked(True)
+    assert window.plot_panel.cursor2_label.isVisible()
+    assert_level()
+    window.resize(1400, 600)
+    assert_level()
 
 
 def test_narrow_plot_moves_buttons_into_the_menu_not_the_table_aside(qapp, window):

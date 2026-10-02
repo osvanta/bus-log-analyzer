@@ -448,10 +448,13 @@ QToolButton:pressed { background-color: #1a2a3a; }
         table.ensurePolished()
         self.plot_button_row.ensurePolished()
         frame = table.frameWidth()
+        # The plot panel's margin lies between the buttons and the plot, so
+        # the header is that much taller than the buttons' row.
+        gap = self.plot_panel.layout().contentsMargins().top()
         height = max(self.plot_button_row.sizeHint().height(),
-                     header.sizeHint().height() + frame)
+                     header.sizeHint().height() + frame - gap)
         self.plot_button_row.setFixedHeight(height)
-        header.setMinimumHeight(height - frame)
+        header.setMinimumHeight(height + gap - frame)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar('Main')

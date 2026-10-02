@@ -14,11 +14,14 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import (
     Qt, QTimer, Signal, QRectF, QPointF, QSize, QByteArray, QMimeData,
-    QItemSelectionModel,
+    QItemSelectionModel, QEvent,
 )
-from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QDragEnterEvent, QDropEvent, QPen, QPainter
+from PySide6.QtGui import (
+    QAction, QBrush, QColor, QDrag, QDragEnterEvent, QDropEvent, QPen, QPainter, QPalette,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QInputDialog,
     QGraphicsTextItem,
     QColorDialog,
@@ -630,7 +633,15 @@ class PlotPanel(QWidget):
         self.table_panel = QWidget()
         _tbl_layout = QVBoxLayout(self.table_panel)
         _tbl_layout.setContentsMargins(0, 0, 0, 0)
+        _tbl_layout.setSpacing(0)
         _tbl_layout.addWidget(self.table, stretch=1)
+        # As tall as what lies under the plot, its margin and the hint and
+        # cursor lines, so the table ends level with the plot.
+        self._table_bottom_gap = QWidget()
+        self._table_bottom_gap.setObjectName('tableBottomGap')
+        self._table_bottom_gap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self._table_bottom_gap.setFixedHeight(0)
+        _tbl_layout.addWidget(self._table_bottom_gap)
         # Drag-and-drop onto the signal table:
         #   • Internal drags (row reorder) use _ReorderTable.startDrag → custom MIME
         #   • External drags (from SignalTreeWidget) use SignalTreeWidget.MIME_TYPE
@@ -667,6 +678,7 @@ class PlotPanel(QWidget):
         _root.addWidget(self.drop_hint)
         _root.addWidget(self.cursor_label)
         _root.addWidget(self.cursor2_label)
+        self.view_stack.installEventFilter(self)
 
         self._setup_mouse_proxy()
         self._update_empty_state_ui()
@@ -3906,23 +3918,75 @@ class PlotPanel(QWidget):
             return {'check_border': '#808080', 'check_bg': '#2a2a2a', 'check_mark': '#ffffff'}
         return {'check_border': '#606060', 'check_bg': '#ffffff', 'check_mark': '#101010'}
 
+    @staticmethod
+    def _header_colors() -> tuple[str, str, str]:
+        """Background, text and border of the signal table's header.
+
+        The header follows the application's light or dark theme, not the
+        plot background: the window colour, like the plot buttons level with
+        it, and the window's text colour, so black in light mode and white in
+        dark mode.
+        """
+        palette = QApplication.palette()
+        window = palette.color(QPalette.ColorRole.Window)
+        text = palette.color(QPalette.ColorRole.WindowText)
+        # A fifth of the way from the window colour to the text colour.
+        border = QColor(*(round(w + (t - w) * 0.2) for w, t in (
+            (window.red(), text.red()), (window.green(), text.green()),
+            (window.blue(), text.blue()))))
+        return window.name(), text.name(), border.name()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.view_stack and event.type() in (QEvent.Type.Resize,
+                                                           QEvent.Type.Move):
+            self._match_table_bottom_to_plot()
+        return super().eventFilter(watched, event)
+
+    def _match_table_bottom_to_plot(self) -> None:
+        # The table and this panel both reach the bottom of the main
+        # window's splitter, so the space under the plot here is the space
+        # to leave under the table.
+        plot = self.view_stack.geometry()
+        self._table_bottom_gap.setFixedHeight(max(0, self.height() - plot.y() - plot.height()))
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        # A switch between light and dark mode while the application runs.
+        # None until the panel is built and styled for the first time.
+        applied = getattr(self, '_applied_header_colors', None)
+        if (event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange)
+                and applied is not None and self._header_colors() != applied):
+            self._apply_panel_background()
+
     def _apply_panel_background(self) -> None:
         bg = self._background_color
-        # Fix 3: header always grey/black — immune to plot background colour changes
+        header_bg, header_text, header_border = self._applied_header_colors = self._header_colors()
+        # No frame, and no line above or left of the header: the table sits
+        # flush in the panel's top-left corner, and the header row, the window
+        # colour across the panel's width, joins the window around it as the
+        # plot buttons' row beside it does. A frame would be painted in the
+        # plot background, a dark ring around the header on a dark plot.
         self.table_panel.setStyleSheet(f'''
             QWidget {{ background-color: {bg}; }}
             QLabel  {{ background-color: {bg}; color: white; }}
             QTableWidget {{
                 background-color: {bg};
                 alternate-background-color: {bg};
-                gridline-color: #444444;
+                gridline-color: {header_border};
                 color: white;
                 selection-background-color: #2d4f7c;
+                border: none;
+            }}
+            QHeaderView, QWidget#tableBottomGap {{
+                background-color: {header_bg};
+                border: none;
             }}
             QHeaderView::section {{
-                background-color: #4a4a4a;
-                color: #000000;
-                border: 1px solid #333333;
+                background-color: {header_bg};
+                color: {header_text};
+                border: none;
+                border-right: 1px solid {header_border};
+                border-bottom: 1px solid {header_border};
                 font-weight: bold;
                 padding: 3px;
             }}
