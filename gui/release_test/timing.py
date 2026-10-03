@@ -16,6 +16,14 @@ Each starts the application afresh and times:
 - Load + Decode, from the click until the signal tree lists the signals;
 - five signals plotted in Stacked, until they are drawn.
 
+Each plot is split into its phases: adding the signals, the queued events
+after it, which draw the plot for the first time, and a last repaint. With
+them come how long the GUI thread worked, which Windows counts in steps of
+about 16 ms, and any garbage collection. A plot over 1.5 times its median is
+listed under the items with that breakdown. A GUI thread busy for about the
+whole plot worked throughout: more work, or a slower processor core. One busy
+for much less of it waited, for another thread or for the PC.
+
 The decode result (signals, frames, decoded frames, samples) must match
 exactly. Every time comes from ``time.perf_counter``, the system's
 performance counter, which all processes on the PC share.
@@ -54,6 +62,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from gui.release_test.plan import Measurement, Scenario, Step
+from gui.release_test.report import plot_breakdown
 
 FAMILY = 'timing'
 BUILDS = ('source', 'packaged')
@@ -62,6 +71,7 @@ LIMIT_FACTOR = 1.10
 LIMIT_MARGIN_MS = 200
 SPEED_ID = 'KG-00'
 SPEED_GATE_FACTOR = 1.10    # KG-00's limit: at most 10 % slower than at the baseline
+SLOW_PLOT_FACTOR = 1.5      # a plot this many times its median is listed, with its breakdown
 _STARTUP = (('KG-01', 'splash', 'Splash appears'),
             ('KG-02', 'window', 'Main window appears'),
             ('KG-03', 'answering', 'Main window answers'))
@@ -265,6 +275,29 @@ def collect(runs, items: list[Item]) -> dict[str, list]:
     return values
 
 
+def slow_plots(runs, items: list[Item]) -> list[str]:
+    """A line for each plot over SLOW_PLOT_FACTOR times its item's median,
+    with where its time went."""
+    drawn = {item.reference: item.id for item in items if item.measure == 'drawn'}
+    plots: dict[str, list[tuple[int, dict]]] = {reference: [] for reference in drawn}
+    for run in runs:
+        if run.scenario.family != FAMILY or run.skipped or run.scenario.reference not in drawn:
+            continue
+        for step in run.result.get('steps', []):
+            if step['op'] == 'plot_stacked' and 'plot_ms' in step:
+                plots[run.scenario.reference].append((run.round, step))
+    lines = []
+    for reference, rounds in plots.items():
+        if not rounds:
+            continue
+        median = statistics.median(step['plot_ms'] for _, step in rounds)
+        lines += [f"{drawn[reference]}  round {number}  {step['plot_ms']:,.0f} ms: "
+                  f"{plot_breakdown(step)}"
+                  for number, step in rounds
+                  if step['plot_ms'] > SLOW_PLOT_FACTOR * median and 'plot_phases_ms' in step]
+    return lines
+
+
 def first_limit(baseline_ms: float) -> int:
     """The limit a baseline gives: + 10 % + 200 ms, rounded up to 10 ms."""
     # Rounded first, or 1500 * 1.1 = 1650.0000000000002 rounds up to 1860.
@@ -342,6 +375,7 @@ def summary(runs, known: KnownGood, packaged: bool,
     verdicts = judge_items(collect(runs, items), items, known, build, judge_times=not reason)
     failed = [verdict for verdict in verdicts if verdict.failed]
     rounds = max((run.round for run in runs if run.scenario.family == FAMILY), default=0)
+    slow = slow_plots(runs, items)
     outcome = 'FAIL' if failed else 'NOT JUDGED' if reason else 'PASS'
     lines = [
         f'Known-good timing: {outcome}   '
@@ -354,4 +388,7 @@ def summary(runs, known: KnownGood, packaged: bool,
         *(verdict.text for verdict in verdicts),
         '',
     ]
+    if slow:
+        lines += [f'Plots over {SLOW_PLOT_FACTOR:g} times their median, and where their time went:',
+                  *slow, '']
     return lines, not failed and not reason

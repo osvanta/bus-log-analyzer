@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import shutil
 import subprocess
@@ -255,6 +256,63 @@ def test_the_pc_check_times_a_fixed_computation_and_reads_the_power_source():
     assert isinstance(state.on_battery, bool)
 
 
+def _broken_down(step, add, events, repaint, busy, collections=()):
+    step.update(plot_ms=add + events + repaint,
+                plot_phases_ms={'add': add, 'events': events, 'repaint': repaint},
+                plot_busy_ms=busy, plot_collections=[list(c) for c in collections])
+
+
+def test_a_slow_plot_is_listed_with_where_its_time_went(tmp_path):
+    runs = _rounds([310] * 5)
+    for run in runs:
+        _broken_down(run.result['steps'][3], 80, 120, 2, busy=187.5)
+    _broken_down(runs[2].result['steps'][3], 240, 465, 6, busy=703.1, collections=[(0, 0.4)])
+
+    lines, ok = timing.summary(runs, _known(tmp_path), packaged=False)
+
+    assert ok   # one slow round does not move the median
+    at = lines.index('Plots over 1.5 times their median, and where their time went:')
+    assert lines[at + 1:at + 3] == [
+        'KG-06  round 3  711 ms: adding 240 ms, events and first drawing 465 ms, repaint 6 ms; '
+        'GUI thread busy 703 ms; garbage collection: generation 0 0.4 ms',
+        '',
+    ]
+
+
+def test_no_plot_is_listed_while_none_is_slow(tmp_path):
+    runs = _rounds([310] * 3)
+    for run, events in zip(runs, (120, 150, 170)):
+        _broken_down(run.result['steps'][3], 80, events, 2, busy=187.5)
+
+    lines, _ok = timing.summary(runs, _known(tmp_path), packaged=False)
+
+    assert not any(line.startswith('Plots over') for line in lines)
+
+
+def test_each_round_shows_where_its_plot_time_went():
+    runs = _rounds([310])
+    _broken_down(runs[0].result['steps'][3], 80, 120, 2, busy=187.5)
+
+    lines = render(['header'], [], runs).splitlines()
+
+    at = next(i for i, line in enumerate(lines) if line.lstrip().startswith('plot_stacked'))
+    assert lines[at + 1] == ' ' * 24 + (
+        'adding 80 ms, events and first drawing 120 ms, repaint 2 ms; '
+        'GUI thread busy 188 ms; no garbage collection')
+
+
+def test_garbage_collections_are_noted_only_while_a_plot_is_timed():
+    from gui.release_test.driver import _Collections
+
+    with _Collections() as collections:
+        assert collections._note in gc.callbacks
+        collections._note('start', {'generation': 2})
+        collections._note('stop', {'generation': 2})
+
+    assert collections._note not in gc.callbacks
+    assert [generation for generation, _ms in collections.found] == [2]
+
+
 def test_a_failed_timing_section_fails_the_report(tmp_path):
     runs = _rounds([310])
 
@@ -309,4 +367,8 @@ def test_the_timing_scenarios_time_a_real_run(tmp_path, blf_path, sample_dbc_pat
     for item_id in ('KG-07', 'KG-11'):
         line = next(line for line in lines if line.startswith(item_id))
         assert ' signals, ' in line and 'no known-good result yet' in line, line
+    # Each plot's breakdown, under its round's plot step.
+    breakdowns = [line for line in lines if line.startswith(' ' * 24 + 'adding ')]
+    assert len(breakdowns) == 2, report
+    assert all('GUI thread busy' in line and 'garbage collection' in line for line in breakdowns)
     assert 'Kestrel' not in report
