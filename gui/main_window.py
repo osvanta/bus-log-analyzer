@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -68,6 +68,7 @@ from core.bus_types import (
 )
 from core.channel_config import ChannelConfig
 from gui.dbc_manager import DBCManagerDialog
+from gui.edge_tab import EdgeTab
 from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button
@@ -348,6 +349,7 @@ class MainWindow(QMainWindow):
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(6, 6, 6, 6)
+        self._center_layout = center_layout
 
         self.center_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.center_splitter.setChildrenCollapsible(False)
@@ -400,37 +402,18 @@ class MainWindow(QMainWindow):
         self.left_dock.visibilityChanged.connect(self._sync_panel_toggle_buttons)
         self.bottom_dock.visibilityChanged.connect(self._sync_panel_toggle_buttons)
 
-        self.left_edge_btn = QToolButton(self)
-        self.left_edge_btn.setFixedWidth(22)
-        self.left_edge_btn.setMinimumHeight(36)
-        self.left_edge_btn.setStyleSheet("""
-QToolButton {
-    background-color: #2d3a4a; color: #e0e8f0;
-    border: 1px solid #4a6080; border-radius: 4px;
-    font-size: 11px; font-weight: bold; padding: 2px;
-}
-QToolButton:hover { background-color: #3a5070; border-color: #6090b0; }
-QToolButton:pressed { background-color: #1a2a3a; }
-""")
-        self.left_edge_btn.setToolTip('Show / hide signal panel')
+        # Handles on the panels' edges, in the gap between each panel and the
+        # plot area, so they cover nothing.
+        self.left_edge_btn = EdgeTab(Qt.Orientation.Vertical, self)
         self.left_edge_btn.clicked.connect(self._toggle_left_panel)
         self.left_edge_btn.show()
 
-        self.bottom_edge_btn = QToolButton(self)
-        self.bottom_edge_btn.setFixedHeight(22)
-        self.bottom_edge_btn.setMinimumWidth(36)
-        self.bottom_edge_btn.setStyleSheet("""
-QToolButton {
-    background-color: #2d3a4a; color: #e0e8f0;
-    border: 1px solid #4a6080; border-radius: 4px;
-    font-size: 11px; font-weight: bold; padding: 2px;
-}
-QToolButton:hover { background-color: #3a5070; border-color: #6090b0; }
-QToolButton:pressed { background-color: #1a2a3a; }
-""")
-        self.bottom_edge_btn.setToolTip('Show / hide log panel')
+        self.bottom_edge_btn = EdgeTab(Qt.Orientation.Horizontal, self)
         self.bottom_edge_btn.clicked.connect(self._toggle_bottom_panel)
         self.bottom_edge_btn.show()
+        # The handles follow the plot area whenever a panel is shown, hidden,
+        # moved or resized.
+        center_panel.installEventFilter(self)
 
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
@@ -2761,26 +2744,66 @@ QToolButton:pressed { background-color: #1a2a3a; }
         bottom_visible = self.bottom_dock.isVisible()
         self.left_toggle_btn.setText('◀' if left_visible else '▶')
         self.bottom_toggle_btn.setText('▼' if bottom_visible else '▲')
-        self.left_edge_btn.setText('◀' if left_visible else '▶')
-        self.bottom_edge_btn.setText('▼' if bottom_visible else '▲')
+        self.left_edge_btn.setToolTip(
+            'Hide the signal panel' if left_visible else 'Show the signal panel')
+        self.bottom_edge_btn.setToolTip(
+            'Hide the log panel' if bottom_visible else 'Show the log panel')
+        self.left_edge_btn.setAccessibleName(self.left_edge_btn.toolTip())
+        self.bottom_edge_btn.setAccessibleName(self.bottom_edge_btn.toolTip())
         self._position_panel_toggle_buttons()
 
     def _position_panel_toggle_buttons(self) -> None:
-        left_w = self.left_edge_btn.width() or 18
-        left_h = max(self.left_edge_btn.sizeHint().height(), 36)
-        x = 2
-        y = max(80, (self.height() - left_h) // 2)
-        self.left_edge_btn.setGeometry(x, y, left_w, left_h)
-        self.left_edge_btn.raise_()
+        # Each handle lies in the gap between its panel and the plot area,
+        # centred along the panel's edge. With the panel hidden or floating
+        # it lies on the plot area's edge where the panel docks, and the plot
+        # area keeps a gap that wide on that side. Its chevron points the way
+        # the panel moves on a click.
+        tab = EdgeTab.THICKNESS
+        margins = [6, 6, 6, 6]   # left, top, right, bottom
+        Arrow = Qt.ArrowType
 
-        btn_w = max(self.bottom_edge_btn.sizeHint().width(), 36)
-        btn_h = self.bottom_edge_btn.height() or 18
-        bottom_h = self.bottom_dock.height() if self.bottom_dock.isVisible() else 0
-        y = self.height() - self.statusBar().height() - bottom_h - btn_h + 10
-        y = max(80, y)
-        x = max(40, (self.width() - btn_w) // 2)
-        self.bottom_edge_btn.setGeometry(x, y, btn_w, btn_h)
-        self.bottom_edge_btn.raise_()
+        side = self.left_edge_btn
+        on_right = self.dockWidgetArea(self.left_dock) == Qt.DockWidgetArea.RightDockWidgetArea
+        docked = self.left_dock.isVisible() and not self.left_dock.isFloating()
+        if not docked:
+            margins[2 if on_right else 0] = max(6, tab)
+        bottom = self.bottom_edge_btn
+        on_top = self.dockWidgetArea(self.bottom_dock) == Qt.DockWidgetArea.TopDockWidgetArea
+        bottom_docked = self.bottom_dock.isVisible() and not self.bottom_dock.isFloating()
+        if not bottom_docked:
+            margins[1 if on_top else 3] = max(6, tab)
+        self._center_layout.setContentsMargins(*margins)
+
+        central = self.centralWidget().geometry()
+        if docked:
+            dock = self.left_dock.geometry()
+            x = dock.left() - tab if on_right else dock.right() + 1
+            middle = dock.center().y()
+        else:
+            x = central.right() + 1 - tab if on_right else central.left()
+            middle = central.center().y()
+        side.move(x, middle - side.height() // 2)
+        hide, show = (Arrow.RightArrow, Arrow.LeftArrow) if on_right else (Arrow.LeftArrow, Arrow.RightArrow)
+        side.set_arrow(hide if self.left_dock.isVisible() else show)
+        side.raise_()
+
+        if bottom_docked:
+            dock = self.bottom_dock.geometry()
+            y = dock.bottom() + 1 if on_top else dock.top() - tab
+            middle = dock.center().x()
+        else:
+            y = central.top() if on_top else central.bottom() + 1 - tab
+            middle = self.rect().center().x()
+        bottom.move(middle - bottom.width() // 2, y)
+        hide, show = (Arrow.UpArrow, Arrow.DownArrow) if on_top else (Arrow.DownArrow, Arrow.UpArrow)
+        bottom.set_arrow(hide if self.bottom_dock.isVisible() else show)
+        bottom.raise_()
+
+    def eventFilter(self, watched, event) -> bool:
+        if (watched is self.centralWidget()
+                and event.type() in (QEvent.Type.Resize, QEvent.Type.Move)):
+            self._position_panel_toggle_buttons()
+        return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
