@@ -4025,6 +4025,11 @@ class PlotPanel(QWidget):
         return window.name(), text.name(), border.name()
 
     def eventFilter(self, watched, event) -> bool:
+        # The garbage collector empties a panel caught in a reference cycle
+        # before Qt deletes it, and the children it watches still send their
+        # last events here while Qt does.
+        if not self.__dict__:
+            return False
         if watched is self.view_stack and event.type() in (QEvent.Type.Resize,
                                                            QEvent.Type.Move):
             self._match_table_bottom_to_plot()
