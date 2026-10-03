@@ -535,6 +535,10 @@ class PlotPanel(QWidget):
         self._stacked_c1_lines: list[pg.InfiniteLine] = []
         self._stacked_c2_lines: list[pg.InfiniteLine] = []
         self._proxy = None          # legacy name kept; now stores the connected scene
+        # Whether these hooks are connected now. They are connected only in
+        # some plot modes, and disconnecting one that is not makes PySide6 warn.
+        self._multi_axis_resize_hooked = False
+        self._stacked_click_hooked = False
         self._row_lookup: dict[str, int] = {}   # key → table row; rebuilt by _refresh_table
         self._color_cycle = cycle([
             '#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00',
@@ -1484,10 +1488,9 @@ class PlotPanel(QWidget):
 
     def _clear_rendered_items(self) -> None:
         # Disconnect resize hook before clearing
-        try:
+        if self._multi_axis_resize_hooked:
             self.plot.plotItem.vb.sigResized.disconnect(self._update_multi_axis_views)
-        except Exception:
-            pass
+            self._multi_axis_resize_hooked = False
 
         # Stop listening for X-range changes and cancel any pending point
         # recompute — the ViewBoxes and scatters are about to be destroyed.
@@ -1558,10 +1561,9 @@ class PlotPanel(QWidget):
 
         # Clear stacked items
         # Fix 2: disconnect stacked right-click before clearing scene
-        try:
+        if self._stacked_click_hooked:
             self.glw.scene().sigMouseClicked.disconnect(self._on_stacked_scene_click)
-        except Exception:
-            pass
+            self._stacked_click_hooked = False
         self._stacked_vlines.clear()
         self._stacked_c1_lines.clear()  # per-row C1 lines (each row owns its instance)
         self._stacked_c2_lines.clear()  # per-row C2 lines
@@ -1933,7 +1935,9 @@ class PlotPanel(QWidget):
                 # branch), so schedule the anchor now in case setWidth() doesn't fire
                 # a resizeEvent (e.g. same width after signal reorder).
                 QTimer.singleShot(0, main_axis._apply_title_pos)
-            self.plot.plotItem.vb.sigResized.connect(self._update_multi_axis_views)
+            if not self._multi_axis_resize_hooked:
+                self.plot.plotItem.vb.sigResized.connect(self._update_multi_axis_views)
+                self._multi_axis_resize_hooked = True
             QTimer.singleShot(10, self._update_multi_axis_views)
         else:
             if isinstance(main_axis, _LeftAxis):
@@ -2358,11 +2362,9 @@ class PlotPanel(QWidget):
         scene.sigMouseMoved.connect(self._mouse_moved)
         self._proxy = scene   # keep ref so we can disconnect on next rebuild
         # Fix 2: connect right-click handler for stacked mode
-        if self._stacked_mode and self._stacked_plots:
-            try:
-                self.glw.scene().sigMouseClicked.connect(self._on_stacked_scene_click)
-            except Exception:
-                pass
+        if self._stacked_mode and self._stacked_plots and not self._stacked_click_hooked:
+            self.glw.scene().sigMouseClicked.connect(self._on_stacked_scene_click)
+            self._stacked_click_hooked = True
 
     # ── Cursor handlers ──────────────────────────────────────────────────────
 
