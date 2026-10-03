@@ -145,3 +145,24 @@ def test_fit_to_window_still_fits_each_row_vertically(qapp, window, layout):
     y_ranges = [p.vb.viewRange()[1] for p in panel._stacked_plots]
     assert y_ranges[0] == pytest.approx([-0.5, 10.5])
     assert y_ranges[1] == pytest.approx([-50.0, 1050.0])
+
+
+@LAYOUTS
+@pytest.mark.parametrize('batch', [True, False], ids=['together', 'one-by-one'])
+def test_rows_are_laid_out_before_they_are_first_drawn(qapp, window, layout, batch):
+    # A row's axes get their size inside the row's own layout. Left for Qt
+    # to run after the first paint, every row was drawn twice.
+    _set_layout(qapp, window, layout)
+    panel = window.plot_panel
+
+    if batch:
+        panel.begin_batch_add()
+    for k in range(5):
+        panel.add_series(f'Sig{k}', _series(f'Sig{k}', 20.0))
+    if batch:
+        panel.end_batch_add()
+    sizes = [(p.vb.size(), p.getAxis('left').size()) for p in panel._stacked_plots]
+    qapp.processEvents()
+
+    assert [(p.vb.size(), p.getAxis('left').size()) for p in panel._stacked_plots] == sizes
+    assert all(axis.width() == 85 for _view, axis in sizes)

@@ -2048,6 +2048,18 @@ class PlotPanel(QWidget):
         for lines in (self._stacked_c1_lines, self._stacked_c2_lines):
             for line in lines:
                 line.group = list(lines)
+        self._lay_out_stacked_rows()
+
+    def _lay_out_stacked_rows(self) -> None:
+        """Lay the stacked rows out at their final size now.
+
+        A new row's axes get their size inside the row's own layout, which
+        Qt otherwise runs only after the rows have been drawn once. Drawn at
+        the old size, every row was drawn again.
+        """
+        for plot in self._stacked_plots:
+            plot.layout.activate()
+        self.glw.ci.layout.activate()
 
     # ── Curve configuration & style ──────────────────────────────────────
 
