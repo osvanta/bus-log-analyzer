@@ -355,6 +355,23 @@ def test_the_empty_cursor_line_does_not_hold_the_plot_wide(qapp, window):
     assert panel._cursor_line.minimumSizeHint().width() == 0
 
 
+def test_the_cursor_readout_reads_a_point_larger_than_the_table(qapp, window):
+    # It stands out from the signal values in the table. The file name after
+    # it and the tag beside it read in its font.
+    import array
+    from core.signal_store import SignalSeries
+
+    panel = window.plot_panel
+    ts = array.array('d', (i * 0.1 for i in range(100)))
+    panel.add_series('Speed', SignalSeries(None, 'Msg', 1, 'Speed', 'km/h', ts, ts))
+    qapp.processEvents()
+
+    readout = panel.cursor_label
+    assert readout.isVisible()
+    assert readout.font().pointSizeF() == panel.table.font().pointSizeF() + 1
+    assert readout.height() >= readout.sizeHint().height()
+
+
 def test_narrow_plot_moves_buttons_into_the_menu_not_the_table_aside(qapp, window):
     splitter = window.center_splitter
     total = sum(splitter.sizes())

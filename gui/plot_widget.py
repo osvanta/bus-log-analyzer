@@ -19,7 +19,8 @@ from PySide6.QtCore import (
     QItemSelectionModel, QEvent,
 )
 from PySide6.QtGui import (
-    QAction, QBrush, QColor, QDrag, QDragEnterEvent, QDropEvent, QPen, QPainter, QPalette,
+    QAction, QBrush, QColor, QDrag, QDragEnterEvent, QDropEvent, QFont, QPen, QPainter,
+    QPalette,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -65,6 +66,16 @@ def _is_dark(color: str) -> bool:
 
 def _cursor_color_on(background: str) -> str:
     return _CURSOR_ON_DARK if _is_dark(background) else _CURSOR_ON_LIGHT
+
+
+def _cursor_line_font(base: QFont) -> QFont:
+    """The font of the line under the plot and of the tag beside it: a point
+    larger than the table's, so the cursor readout stands out. A font sized
+    in pixels stays as it is."""
+    font = QFont(base)
+    if base.pointSizeF() > 0:
+        font.setPointSizeF(base.pointSizeF() + 1)
+    return font
 
 
 class _CursorLine(pg.InfiniteLine):
@@ -627,10 +638,12 @@ class PlotPanel(QWidget):
         # How to plot signals is told on the empty plot, so no hint line
         # under the plot repeats it.
         self.cursor_label = QLabel(self._cursor_label_base)
+        self.cursor_label.setFont(_cursor_line_font(self.font()))
         self.cursor_label.hide()
         # On the cursor line, after the readout: which file the plotted
         # signals come from. A long name keeps its start and its extension.
         self.file_name_label = _ElidedLabel(SEPARATOR, Qt.TextElideMode.ElideMiddle)
+        self.file_name_label.setFont(self.cursor_label.font())
         self.file_name_label.hide()
 
         # ── Cursor 1: draggable vertical line (ON by default) ─────────────
@@ -701,6 +714,7 @@ class PlotPanel(QWidget):
         self._tag = PlotTag()
         self.tag_label = _ElidedLabel()
         self.tag_label.setObjectName('plotTag')
+        self.tag_label.setFont(self.cursor_label.font())
         self.tag_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.tag_label.hide()
         self._tag_layout = QHBoxLayout(self._table_bottom_gap)

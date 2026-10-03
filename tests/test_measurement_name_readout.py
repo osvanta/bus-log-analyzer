@@ -189,7 +189,8 @@ def test_long_file_name_is_shortened_and_does_not_hold_the_plot_wide(qapp, windo
     assert panel.minimumSizeHint().width() == without_name
     assert label.geometry().right() <= panel.width()
     assert label.fontMetrics().horizontalAdvance(label.text()) <= label.width()
-    assert '…' in label.text()
-    assert label.text().startswith('   |   measurement_')
-    assert label.text().endswith('_end.blf')
+    # The start of the name and its end, with "…" for what is left out.
+    start, end = label.text().removeprefix('   |   ').split('…')
+    assert start.startswith('measure') and long_name.startswith(start)
+    assert end.endswith('_end.blf') and long_name.endswith(end)
     assert label.toolTip() == 'C:/logs/' + long_name
