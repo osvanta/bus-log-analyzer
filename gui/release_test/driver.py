@@ -278,7 +278,12 @@ class ScenarioDriver(QObject):
         yield from self._wait(SETTLE_SECONDS)
 
     def _plot_stacked(self, record: dict) -> None:
-        """Plot five signals in Stacked and time it until they are drawn."""
+        """Plot five signals in Stacked and time it until they are drawn.
+
+        The time is split into its phases, with how long the GUI thread
+        worked in it and any garbage collection, so a slow round shows where
+        its time went.
+        """
         window = self._window
         record['file'] = self._current_file['alias'] if self._current_file else None
         store = window.store
@@ -287,11 +292,24 @@ class ScenarioDriver(QObject):
             return
         window.btn_stacked.setChecked(True)
         keys = sorted(store.all_keys())[:TIMED_PLOT_SIGNALS]
-        started = time.perf_counter()
-        window.add_signals_to_plot(keys)
-        QApplication.processEvents()
-        window.plot_panel.repaint()
-        record['plot_ms'] = round((time.perf_counter() - started) * 1000, 1)
+        with _Collections() as collections:
+            started = time.perf_counter()
+            worked = time.thread_time()
+            window.add_signals_to_plot(keys)
+            added = time.perf_counter()
+            QApplication.processEvents()
+            handled = time.perf_counter()
+            window.plot_panel.repaint()
+            drawn = time.perf_counter()
+            worked = time.thread_time() - worked
+        record['plot_ms'] = round((drawn - started) * 1000, 1)
+        record['plot_phases_ms'] = {
+            'add': round((added - started) * 1000, 1),
+            'events': round((handled - added) * 1000, 1),
+            'repaint': round((drawn - handled) * 1000, 1),
+        }
+        record['plot_busy_ms'] = round(worked * 1000, 1)
+        record['plot_collections'] = collections.found
         record['plotted'] = len(window.plot_panel.plotted_keys())
         record['outcome'] = 'plotted'
 
@@ -365,6 +383,27 @@ def _memory() -> dict:
         'memory_mb': round(counters.PrivateUsage / 1e6),
         'peak_mb': round(counters.PeakPagefileUsage / 1e6),
     }
+
+
+class _Collections:
+    """The garbage collections run while it is entered, on any thread: each
+    as [generation, milliseconds]."""
+
+    def __enter__(self) -> _Collections:
+        self.found: list[list] = []
+        self._started = 0.0
+        gc.callbacks.append(self._note)
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        gc.callbacks.remove(self._note)
+
+    def _note(self, phase: str, info: dict) -> None:
+        if phase == 'start':
+            self._started = time.perf_counter()
+        else:
+            self.found.append(
+                [info['generation'], round((time.perf_counter() - self._started) * 1000, 1)])
 
 
 def drive(window, spec_path: Path) -> ScenarioDriver:

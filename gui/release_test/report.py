@@ -183,6 +183,8 @@ def render(header: list[str], measurements: list[Measurement], runs: list[Run],
                 for name in ('splash', 'window', 'answering') if name in run.startup))
         for step in run.result.get('steps', []):
             lines.append('    ' + _step_text(step))
+            if 'plot_phases_ms' in step:
+                lines.append(' ' * 24 + plot_breakdown(step))
         for failure in run.failures:
             lines.append(f'    FAIL  {failure}')
         for warning in run.warnings:
@@ -232,6 +234,19 @@ def _step_text(step: dict) -> str:
     if step.get('dialogs'):
         parts.append('dialogs: ' + ', '.join(f'"{title}"' for title in step['dialogs']))
     return '  '.join(parts)
+
+
+def plot_breakdown(step: dict) -> str:
+    """Where a timed plot's time went: its phases, how long the GUI thread
+    worked in it, and any garbage collection."""
+    phases = step['plot_phases_ms']
+    collections = step.get('plot_collections') or []
+    collected = ('garbage collection: ' + ', '.join(
+        f'generation {generation} {ms:,.1f} ms' for generation, ms in collections)
+        if collections else 'no garbage collection')
+    return (f"adding {phases['add']:,.0f} ms, events and first drawing {phases['events']:,.0f} ms, "
+            f"repaint {phases['repaint']:,.0f} ms; "
+            f"GUI thread busy {step.get('plot_busy_ms', 0):,.0f} ms; {collected}")
 
 
 def _first_warnings(runs: list[Run]) -> list[str]:
