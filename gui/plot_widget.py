@@ -741,12 +741,17 @@ class PlotPanel(QWidget):
         _root = QVBoxLayout(self)
         _root.setContentsMargins(4, 4, 4, 4)
         _root.addWidget(self.view_stack, stretch=1)
-        _cursor_line = QHBoxLayout()
+        # The cursor line keeps a line's height under the empty plot, but no
+        # width. Plotting the first signals then resizes neither the plot nor
+        # the table beside it, which would draw every stacked row once more.
+        self._cursor_line = QWidget()
+        self._cursor_line.setMinimumHeight(self.cursor_label.sizeHint().height())
+        _cursor_line = QHBoxLayout(self._cursor_line)
         _cursor_line.setContentsMargins(0, 0, 0, 0)
         _cursor_line.setSpacing(0)
         _cursor_line.addWidget(self.cursor_label)
         _cursor_line.addWidget(self.file_name_label, stretch=1)
-        _root.addLayout(_cursor_line)
+        _root.addWidget(self._cursor_line)
         self.view_stack.installEventFilter(self)
 
         self._setup_mouse_proxy()

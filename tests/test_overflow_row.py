@@ -310,6 +310,7 @@ def test_only_the_cursor_line_lies_under_the_plot(qapp, window):
     # How to plot signals is told on the empty plot; no hint line under the
     # plot repeats it once signals are plotted.
     import array
+    from PySide6.QtCore import QPoint
     from PySide6.QtWidgets import QLabel
     from core.signal_store import SignalSeries
 
@@ -318,11 +319,40 @@ def test_only_the_cursor_line_lies_under_the_plot(qapp, window):
     panel.add_series('Speed', SignalSeries(None, 'Msg', 1, 'Speed', 'km/h', ts, ts))
     qapp.processEvents()
 
-    plot_bottom = panel.view_stack.geometry().bottom()
-    under_plot = [label for label in panel.findChildren(QLabel)
-                  if label.isVisible() and label.parentWidget() is panel
-                  and label.geometry().top() > plot_bottom]
-    assert under_plot == [panel.cursor_label]
+    plot = panel.view_stack.geometry()
+
+    def under_plot(label):
+        top_left = label.mapTo(panel, QPoint(0, 0))
+        return top_left.y() > plot.bottom() and plot.left() <= top_left.x() <= plot.right()
+
+    assert [label for label in panel.findChildren(QLabel)
+            if label.isVisible() and under_plot(label)] == [panel.cursor_label]
+
+
+def test_plotting_the_first_signal_resizes_neither_plot_nor_table(qapp, window):
+    # The cursor line keeps its room under the empty plot. Making room for it
+    # when the first signals were plotted drew every stacked row once more.
+    import array
+    from core.signal_store import SignalSeries
+
+    panel = window.plot_panel
+    window.btn_stacked.setChecked(True)
+    qapp.processEvents()
+    plot, table = panel.view_stack.size(), panel.table.size()
+    assert not panel.cursor_label.isVisible()
+
+    ts = array.array('d', (i * 0.1 for i in range(100)))
+    panel.add_series('Speed', SignalSeries(None, 'Msg', 1, 'Speed', 'km/h', ts, ts))
+    qapp.processEvents()
+
+    assert panel.cursor_label.isVisible()
+    assert (panel.view_stack.size(), panel.table.size()) == (plot, table)
+
+
+def test_the_empty_cursor_line_does_not_hold_the_plot_wide(qapp, window):
+    panel = window.plot_panel
+    assert not panel.cursor_label.isVisible()
+    assert panel._cursor_line.minimumSizeHint().width() == 0
 
 
 def test_narrow_plot_moves_buttons_into_the_menu_not_the_table_aside(qapp, window):
