@@ -189,7 +189,7 @@ def test_the_release_test_drives_the_application(tmp_path, blf_path, sample_dbc_
         capture_output=True, text=True, timeout=300,
     )
 
-    reports = list(folder.glob('release_test_*_report.txt'))
+    reports = list((folder / 'release_test_reports').glob('release_test_*_report.txt'))
     assert len(reports) == 1, completed.stdout[-4000:] + completed.stderr[-4000:]
     report = reports[0].read_text(encoding='utf-8')
     assert completed.returncode == 0, report
@@ -199,4 +199,6 @@ def test_the_release_test_drives_the_application(tmp_path, blf_path, sample_dbc_
     assert report.count(' loaded ') == 2
     for name in ('Kestrel', str(tmp_path)):
         assert name not in report
-    assert 'Kestrel_drive.blf' in next(folder.glob('release_test_*_files.txt')).read_text(encoding='utf-8')
+    assert not list(folder.glob('release_test_*.txt'))   # only in the reports folder
+    files = next((folder / 'release_test_reports').glob('release_test_*_files.txt'))
+    assert 'Kestrel_drive.blf' in files.read_text(encoding='utf-8')
