@@ -2,23 +2,19 @@
 setlocal ENABLEEXTENSIONS ENABLEDELAYEDEXPANSION
 cd /d "%~dp0"
 
+rem pythonw: no console window beside the application. What a console would
+rem show goes to osvanta_app.log; run "python app.py" to watch it live.
 set "PYEXE="
-if exist .venv\Scripts\python.exe (
-    set "PYEXE=.venv\Scripts\python.exe"
+if exist .venv\Scripts\pythonw.exe (
+    set "PYEXE=.venv\Scripts\pythonw.exe"
 ) else (
-    where python >nul 2>nul
+    where pythonw >nul 2>nul
     if errorlevel 1 (
         echo Python was not found. Create .venv first or install Python and add it to PATH.
         pause
         exit /b 1
     )
-    set "PYEXE=python"
+    set "PYEXE=pythonw"
 )
 
-echo Starting Osvanta Bus Log Analyzer v00.01.xx in dev mode...
-"%PYEXE%" app.py
-if errorlevel 1 (
-    echo.
-    echo App exited with an error.
-)
-pause
+start "" "%PYEXE%" app.py

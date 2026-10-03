@@ -179,6 +179,8 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 import gui.crash_log
 gui.crash_log.default_log_path = lambda: Path(sys.argv[1])
+import gui.app_log
+gui.app_log.default_log_path = lambda: Path(sys.argv[1]).with_name("app.log")
 import app as entry
 from gui.gc_guard import GuiThreadGarbageCollector
 

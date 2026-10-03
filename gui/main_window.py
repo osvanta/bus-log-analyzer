@@ -67,6 +67,7 @@ from core.bus_types import (
     sort_key,
 )
 from core.channel_config import ChannelConfig
+from gui import app_log
 from gui.dbc_manager import DBCManagerDialog
 from gui.edge_tab import EdgeTab
 from core.signal_store import SignalStore
@@ -204,7 +205,6 @@ class MainWindow(QMainWindow):
         # and replaced (not accumulated) on each subsequent finding click.
         self._finding_plot_keys: set[str] = set()
         self._raw_frame_dialog = None
-        self._log_file_path = Path(__file__).resolve().parents[1] / 'osvanta_dev.log'
         # Set when the window is closed while a worker thread still runs:
         # the window is hidden, results still arriving are dropped, and the
         # close is retried until the last thread has stopped.
@@ -253,7 +253,8 @@ class MainWindow(QMainWindow):
             install_shortcut(self)
 
         self._log(f'{self.app_name} {self.version} started.')
-        self._log(f'Dev log file: {self._log_file_path}')
+        if app_log.log_path() is not None:
+            self._log(f'App log file: {app_log.log_path()}')
         self._update_measurement_tab()
 
     def _splash_status(self, message: str) -> None:
@@ -2898,8 +2899,4 @@ class MainWindow(QMainWindow):
 
     def _log(self, message: str) -> None:
         self.log_box.append(message)
-        try:
-            with self._log_file_path.open('a', encoding='utf-8') as fh:
-                fh.write(message + '\n')
-        except Exception:
-            pass
+        app_log.record(message)
