@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
 from itertools import cycle
 from pathlib import Path
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.signal_store import SignalSeries
+from gui.plot_tag import SEPARATOR, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
 
 
@@ -435,30 +437,31 @@ class _ReorderTable(QTableWidget):
         super().mousePressEvent(event)
 
 
-class _FileNameLabel(QLabel):
-    """The measurement's file name after the cursor readout, behind the
-    separator the readout puts between its own parts.
+class _ElidedLabel(QLabel):
+    """One line of text after a fixed prefix, shortened with "…" when it is
+    too long for the label's width.
 
-    A name too long for the room left is shortened in the middle with "…",
-    keeping its start and its extension. The label never holds the plot
-    wider than the space it is given.
+    The label never holds its layout wider than the space it is given, and
+    shows nothing, not even the prefix, while its text is empty.
     """
 
-    SEPARATOR = '   |   '
-
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, prefix: str = '',
+                 elide: Qt.TextElideMode = Qt.TextElideMode.ElideRight,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._name = ''
+        self._prefix = prefix
+        self._elide = elide
+        self._full_text = ''
         self.setTextFormat(Qt.TextFormat.PlainText)
-        # Ignored: the label takes the width left beside the readout, and its
-        # text sets no minimum width for the plot panel.
+        # Ignored: the label takes the width it is given, and its text sets
+        # no minimum width for the layout.
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
-    def name(self) -> str:
-        return self._name
+    def full_text(self) -> str:
+        return self._full_text
 
-    def set_name(self, name: str) -> None:
-        self._name = name
+    def set_full_text(self, text: str) -> None:
+        self._full_text = text
         self._fit_text()
 
     def resizeEvent(self, event) -> None:
@@ -472,9 +475,9 @@ class _FileNameLabel(QLabel):
 
     def _fit_text(self) -> None:
         metrics = self.fontMetrics()
-        room = max(0, self.width() - metrics.horizontalAdvance(self.SEPARATOR))
-        name = metrics.elidedText(self._name, Qt.TextElideMode.ElideMiddle, room)
-        self.setText(self.SEPARATOR + name if name else '')
+        room = max(0, self.width() - metrics.horizontalAdvance(self._prefix))
+        text = metrics.elidedText(self._full_text, self._elide, room)
+        self.setText(self._prefix + text if text else '')
 
 
 class PlotPanel(QWidget):
@@ -488,6 +491,8 @@ class PlotPanel(QWidget):
     plotAreaClicked = Signal(float)
     # The same for a left click with Shift held.
     plotAreaShiftClicked = Signal(float)
+    # The user changed or removed the tag under the signal table (a PlotTag).
+    tagChanged = Signal(object)
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -620,8 +625,8 @@ class PlotPanel(QWidget):
         self.cursor_label = QLabel(self._cursor_label_base)
         self.cursor_label.hide()
         # On the cursor line, after the readout: which file the plotted
-        # signals come from.
-        self.file_name_label = _FileNameLabel()
+        # signals come from. A long name keeps its start and its extension.
+        self.file_name_label = _ElidedLabel(SEPARATOR, Qt.TextElideMode.ElideMiddle)
         self.file_name_label.hide()
 
         # ── Cursor 1: draggable vertical line (ON by default) ─────────────
@@ -687,6 +692,22 @@ class PlotPanel(QWidget):
         self._table_bottom_gap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self._table_bottom_gap.setFixedHeight(0)
         _tbl_layout.addWidget(self._table_bottom_gap)
+        # The user's tag, on the cursor line's level. A double-click on the
+        # strip, or its right-click menu, edits it.
+        self._tag = PlotTag()
+        self.tag_label = _ElidedLabel()
+        self.tag_label.setObjectName('plotTag')
+        self.tag_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.tag_label.hide()
+        self._tag_layout = QHBoxLayout(self._table_bottom_gap)
+        self._tag_layout.setSpacing(0)
+        self._tag_layout.addWidget(self.tag_label)
+        self._table_bottom_gap.installEventFilter(self)
+        # A tag with the date shows the new date from midnight on.
+        self._tag_date_timer = QTimer(self)
+        self._tag_date_timer.setSingleShot(True)
+        self._tag_date_timer.timeout.connect(self._show_tag)
+        self._show_tag()
         # Drag-and-drop onto the signal table:
         #   • Internal drags (row reorder) use _ReorderTable.startDrag → custom MIME
         #   • External drags (from SignalTreeWidget) use SignalTreeWidget.MIME_TYPE
@@ -2752,7 +2773,7 @@ class PlotPanel(QWidget):
     def set_measurement_file(self, path: str | None) -> None:
         """Name, after the cursor readout, the file the plotted signals come
         from; None or '' names none. The full path is the label's tooltip."""
-        self.file_name_label.set_name(Path(path).name if path else '')
+        self.file_name_label.set_full_text(Path(path).name if path else '')
         self.file_name_label.setToolTip(path or '')
         self.file_name_label.setVisible(bool(self._items) and bool(path))
 
@@ -2760,7 +2781,8 @@ class PlotPanel(QWidget):
         has_items = bool(self._items)
         self.overlay_label.setVisible((not has_items) and bool(self.overlay_label.text()))
         self.cursor_label.setVisible(has_items)
-        self.file_name_label.setVisible(has_items and bool(self.file_name_label.name()))
+        self.file_name_label.setVisible(has_items and bool(self.file_name_label.full_text()))
+        self._show_tag()
         if has_items and self._stacked_mode:
             self.view_stack.setCurrentIndex(1)
         else:
@@ -3987,6 +4009,14 @@ class PlotPanel(QWidget):
         if watched is self.view_stack and event.type() in (QEvent.Type.Resize,
                                                            QEvent.Type.Move):
             self._match_table_bottom_to_plot()
+        elif watched is self._table_bottom_gap:
+            if (event.type() == QEvent.Type.MouseButtonDblClick
+                    and event.button() == Qt.MouseButton.LeftButton):
+                self.edit_tag()
+                return True
+            if event.type() == QEvent.Type.ContextMenu:
+                self._show_tag_menu(event.globalPos())
+                return True
         return super().eventFilter(watched, event)
 
     def _match_table_bottom_to_plot(self) -> None:
@@ -3995,6 +4025,57 @@ class PlotPanel(QWidget):
         # to leave under the table.
         plot = self.view_stack.geometry()
         self._table_bottom_gap.setFixedHeight(max(0, self.height() - plot.y() - plot.height()))
+        # The tag lies as far under the table as the cursor line under the
+        # plot, and as tall, so the two read as one line.
+        root = self.layout()
+        margins = root.contentsMargins()
+        self._tag_layout.setContentsMargins(
+            margins.left(), root.spacing(), margins.right(), margins.bottom())
+
+    # ── Tag ───────────────────────────────────────────────────────────────
+
+    def tag(self) -> PlotTag:
+        return self._tag
+
+    def set_tag(self, tag: PlotTag) -> None:
+        self._tag = tag
+        self._show_tag()
+
+    def edit_tag(self) -> None:
+        dialog = PlotTagDialog(self._tag, self)
+        if dialog.exec() and dialog.tag() != self._tag:
+            self.set_tag(dialog.tag())
+            self.tagChanged.emit(self._tag)
+
+    def _remove_tag(self) -> None:
+        self.set_tag(PlotTag())
+        self.tagChanged.emit(self._tag)
+
+    def _tag_menu(self) -> QMenu:
+        has_tag = self._tag != PlotTag()
+        menu = QMenu(self)
+        menu.addAction('Edit Tag…' if has_tag else 'Add Tag…', self.edit_tag)
+        if has_tag:
+            menu.addAction('Remove Tag', self._remove_tag)
+        return menu
+
+    def _show_tag_menu(self, global_pos) -> None:
+        self._tag_menu().exec(global_pos)
+
+    def _show_tag(self) -> None:
+        text = self._tag.compose(current_user_name(), datetime.date.today())
+        self.tag_label.set_full_text(text)
+        self.tag_label.setVisible(bool(self._items) and bool(text))
+        self._table_bottom_gap.setToolTip(
+            'Double-click to edit the tag' if text
+            else 'Double-click to add a tag: your text, user name or the date')
+        self._tag_date_timer.stop()
+        if self._tag.date:
+            now = datetime.datetime.now()
+            midnight = datetime.datetime.combine(
+                now.date() + datetime.timedelta(days=1), datetime.time())
+            # A second past midnight, so the new day has begun.
+            self._tag_date_timer.start(int((midnight - now).total_seconds() * 1000) + 1000)
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
@@ -4028,6 +4109,7 @@ class PlotPanel(QWidget):
                 background-color: {header_bg};
                 border: none;
             }}
+            QLabel#plotTag {{ background-color: {header_bg}; color: {header_text}; }}
             QHeaderView::section {{
                 background-color: {header_bg};
                 color: {header_text};

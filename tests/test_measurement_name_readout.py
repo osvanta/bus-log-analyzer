@@ -164,7 +164,7 @@ def test_another_file_names_itself_once_loaded(qapp, window, monkeypatch, tmp_pa
     _open(window, monkeypatch, tmp_path / 'second.csv')
     # The first file's data is gone with its name; nothing names the second
     # before it is decoded.
-    assert window.plot_panel.file_name_label.name() == ''
+    assert window.plot_panel.file_name_label.full_text() == ''
 
     _load_and_plot(qapp, window)
     assert window.plot_panel.file_name_label.text() == '   |   second.csv'

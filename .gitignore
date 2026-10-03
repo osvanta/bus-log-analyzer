@@ -59,6 +59,7 @@ desktop.ini
 osvanta_dev.log
 osvanta_config.json
 osvanta_temp_plot_config.json
+osvanta_user_settings.json
 # Pre-rename names, still ignored so existing working copies stay clean.
 canscope_dev.log
 canscope_config.json

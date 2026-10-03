@@ -71,6 +71,7 @@ from gui.dbc_manager import DBCManagerDialog
 from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button
+from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
 from gui.plot_widget import PlotPanel
 from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
@@ -194,6 +195,10 @@ class MainWindow(QMainWindow):
         self._temporary_plot_config_path = (
             self._application_root() / 'osvanta_temp_plot_config.json'
         )
+        # The user's own settings, such as the tag under the signal table.
+        self._user_settings_path = (
+            self._application_root() / 'osvanta_user_settings.json'
+        )
         # Store keys plotted by the most recent plot_finding() call — cleared
         # and replaced (not accumulated) on each subsequent finding click.
         self._finding_plot_keys: set[str] = set()
@@ -279,6 +284,8 @@ class MainWindow(QMainWindow):
         self.plot_panel.signalLineStyleChanged.connect(self._on_signal_line_style_changed)
         self.plot_panel.plotAreaClicked.connect(self._place_cursor1)
         self.plot_panel.plotAreaShiftClicked.connect(self._place_cursor2)
+        self.plot_panel.set_tag(load_plot_tag(self._user_settings_path))
+        self.plot_panel.tagChanged.connect(self._save_plot_tag)
 
         self.plot_button_row = OverflowButtonRow()
         self.btn_fit = icon_button('fit_window', 'Fit to Window', 'Fit to Window (F)')
@@ -921,6 +928,12 @@ QToolButton:pressed { background-color: #1a2a3a; }
         if getattr(sys, 'frozen', False):
             return Path(sys.executable).resolve().parent
         return Path(__file__).resolve().parents[1]
+
+    def _save_plot_tag(self, tag: PlotTag) -> None:
+        try:
+            save_plot_tag(self._user_settings_path, tag)
+        except OSError as exc:
+            self._log(f'Tag save warning: {exc}')
 
     def _capture_temporary_plot_configuration(self) -> dict | None:
         """Persist the current plot-only setup for the next measurement."""
