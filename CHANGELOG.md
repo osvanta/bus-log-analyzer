@@ -4,6 +4,67 @@
 > repository moved to `github.com/osvanta/bus-log-analyzer`. Releases up to and
 > including v00.00.60 were published as **CAN Scope / CANScope**; the entries below
 > use the names in force at the time of each release.
+## [v00.01.04] — 2026-10-04: new plot toolbar, faster start-up and an application log
+
+### Changed — the plot buttons sit above the plot, as icons.
+
+The plot buttons moved above the plot, level with the signal table's header, so
+the table runs the full height of the window. Multi-Axis, Stacked and MultiStack
+keep their names. Fit to Window, Fit Vertical, the two cursors, Show Data Points
+and Hide Line are icons that follow light and dark mode and show their name when
+pointed at. Buttons that do not fit a narrow plot move into a "»" menu.
+
+### Added — a click places the cursors.
+
+A click on the plot places Cursor 1 there, and Shift+click places Cursor 2,
+switching the cursor on if it is off. Cursors are black on a light plot and white
+on a dark one, and turn red under the mouse. Cursor 2 now appears inside the
+visible window for any recording length.
+
+### Changed — one line under the plot, naming the measurement file.
+
+The cursor readout under the plot ends with the name of the measurement file, so
+a screenshot shows where the signals come from; the full path is in its tooltip.
+The separate time-delta and hint lines are gone. The line reads one point larger
+than the signal table.
+
+### Added — your own tag under the signal table.
+
+A double-click under the signal table adds a tag beside the cursor line: your
+text, your user name and the date, in any combination. It is kept for you beside
+the application, not in the plot configurations you share with others.
+
+### Changed — the signal table and the panel handles follow the theme.
+
+The signal table's header follows light and dark mode and lines up with the plot.
+Small flat handles on the panel edges show and hide the log and signal panels,
+replacing the fixed navy buttons.
+
+### Added — an application log.
+
+What a console window would show, and every line of the Log panel, is kept in
+`osvanta_app.log` next to the application, beside the crash log. Started from
+source, the application no longer opens a console window.
+
+### Faster — start-up, and calculated signals after a load.
+
+The splash appears at once and the main window about two seconds sooner: the
+file readers now load in the background once the window shows. Calculated
+signals restored after Load + Decode are plotted together, instead of each one
+rebuilding the whole plot twice.
+
+### Fixed — Fit to Window in Stacked.
+
+Fit to Window in Stacked no longer hides the start of the recording.
+
+### Added — a release test, and a memory-checked copy of the application.
+
+`BusLogAnalyzer.exe --release-test <folder>` restarts the application for each
+scenario and works its toolbar on real measurements; `--known-good <file>` also
+times start-up, Load + Decode and plotting against fixed limits. The zip now
+also holds `BusLogAnalyzer_memcheck.exe`, the same application with Python's
+memory checks on, for the release test and for tracking down a crash.
+
 ## [v00.01.03] — 2026-09-30: crash, freeze and J1939 decoding fixes
 
 ### Fixed — crashes and freezes.
