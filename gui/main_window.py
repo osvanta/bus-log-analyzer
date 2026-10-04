@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager
 import json
 import os
 import sys
@@ -73,7 +74,15 @@ from gui.edge_tab import EdgeTab
 from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button
-from gui.plot_tabs import PlotTabs
+from gui.plot_tabs import (
+    MAX_NAME_LENGTH,
+    PLOT_TYPES,
+    PlotTabs,
+    SavedTabs,
+    describe_tab,
+    plot_type,
+    signal_entries,
+)
 from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
 from gui.plot_widget import PlotPanel
 from gui.signal_tree import SignalTreeWidget
@@ -198,14 +207,18 @@ class MainWindow(QMainWindow):
         self._mixed_mdf_notices_shown: set[str] = set()
         self._thread: QThread | None = None
         self._worker: _LoadWorker | None = None
-        self._pending_plot_keys: list[str] = []
+        # The tabs to plot once the measurement has decoded: a configuration's,
+        # or the last measurement's.
+        self._pending_tabs: SavedTabs | None = None
+        # The look of generated signals plotted once calculated, and the tabs
+        # that wait for each.
         self._pending_plot_colors: dict[str, str] = {}
         self._pending_plot_visible: dict[str, bool] = {}
         self._pending_plot_groups:  dict[str, str]  = {}
         self._pending_plot_axis_visible: dict[str, bool] = {}
         self._pending_plot_own_axis: dict[str, bool] = {}
         self._pending_plot_multistack: dict[str, int] = {}
-        self._pending_plot_type: str | None = None
+        self._calc_plot_targets: dict[str, list[PlotPanel]] = {}
         self._temporary_plot_handoff: dict | None = None
         self._temporary_plot_config_path = (
             self._application_root() / 'osvanta_temp_plot_config.json'
@@ -1008,40 +1021,23 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self._log(f'Tag save warning: {exc}')
 
+    def _saved_tabs(self) -> list[dict]:
+        """Every tab, as a configuration keeps it."""
+        return [describe_tab(panel, name)
+                for panel, name in zip(self.plot_tabs.panels(), self.plot_tabs.names())]
+
     def _capture_temporary_plot_configuration(self) -> dict | None:
-        """Persist the current plot-only setup for the next measurement."""
-        keys = self.plot_panel.plotted_keys()
-        if not keys:
+        """Persist every tab's plot-only setup for the next measurement."""
+        tabs = self._saved_tabs()
+        if not any(tab['signals'] for tab in tabs):
             return None
-
-        if self.btn_multistack.isChecked():
-            plot_type = 'multistack'
-        elif self.btn_stacked.isChecked():
-            plot_type = 'stacked'
-        elif self.btn_multi_axis.isChecked():
-            plot_type = 'multi_axis'
-        else:
-            plot_type = 'normal'
-
         config = {
             'type': 'canscope_temporary_plot_config',
-            # v2 added 'line_style'. Readers treat it as optional, so a v1 file
-            # still restores — it just carries no styles.
-            'version': 2,
-            'plot_type': plot_type,
-            'signals': [
-                {
-                    'key': key,
-                    'color': self.plot_panel._items[key].color,
-                    'visible': self.plot_panel._items[key].visible,
-                    'group': self.plot_panel._items[key].group,
-                    'axis_visible': self.plot_panel._items[key].axis_visible,
-                    'own_axis': self.plot_panel._items[key].own_axis,
-                    'multistack_id': self.plot_panel._items[key].multistack_id,
-                    'line_style': self.plot_panel._items[key].line_style,
-                }
-                for key in keys
-            ],
+            # v2 added 'line_style', v3 the tabs, each a plot of v2's kind.
+            # Readers take a v2 plot for the tab on screen.
+            'version': 3,
+            'tabs': tabs,
+            'current_tab': self.plot_tabs.bar.currentIndex(),
         }
         try:
             self._temporary_plot_config_path.write_text(
@@ -1057,66 +1053,169 @@ class MainWindow(QMainWindow):
         return config
 
     def _arm_temporary_plot_handoff(self) -> None:
-        """Queue a captured plot-only configuration for post-decode restore."""
+        """Queue the tabs kept from the last measurement for post-decode restore."""
         data = self._temporary_plot_handoff
         if not data:
             return
+        self._pending_tabs = SavedTabs.from_handoff(data)
+        self._set_up_saved_tabs(self._pending_tabs)
 
-        signals = [
-            signal for signal in data.get('signals', [])
-            if isinstance(signal, dict) and signal.get('key')
-        ]
-        self._pending_plot_keys = [str(signal['key']) for signal in signals]
-        self._pending_plot_colors = {
-            str(signal['key']): str(signal['color'])
-            for signal in signals if signal.get('color')
-        }
-        self._pending_plot_visible = {
-            str(signal['key']): bool(signal['visible'])
-            for signal in signals if 'visible' in signal
-        }
-        self._pending_plot_groups = {
-            str(signal['key']): str(signal['group'])
-            for signal in signals if signal.get('group')
-        }
-        self._pending_plot_axis_visible = {
-            str(signal['key']): bool(signal['axis_visible'])
-            for signal in signals if 'axis_visible' in signal
-        }
-        self._pending_plot_own_axis = {
-            str(signal['key']): bool(signal['own_axis'])
-            for signal in signals if 'own_axis' in signal
-        }
-        self._pending_plot_multistack = {
-            str(signal['key']): int(signal['multistack_id'])
-            for signal in signals if 'multistack_id' in signal
-        }
-        # Line styles are held by the plot panel, which applies them as each
-        # series is added — no separate restore pass needed.
-        self.plot_panel.set_pending_line_styles({
-            str(signal['key']): str(signal['line_style'])
-            for signal in signals if signal.get('line_style')
-        })
-        plot_type = str(data.get('plot_type', 'normal'))
-        self._pending_plot_type = (
-            plot_type if plot_type in {'normal', 'multi_axis', 'stacked', 'multistack'}
-            else 'normal'
-        )
+    def _tab_positions(self, saved: SavedTabs) -> list[int]:
+        """Which window tab each saved tab goes to: the same place, or the tab
+        on screen for a plot saved before tabs."""
+        if saved.single_plot:
+            return [self.plot_tabs.bar.currentIndex()]
+        return list(range(len(saved.tabs)))
 
-    def _apply_pending_plot_type(self) -> None:
-        """Apply a temporary handoff's mutually-exclusive plot mode."""
-        plot_type = self._pending_plot_type
-        if plot_type is None:
-            return
-        if plot_type == 'multistack':
+    def _set_up_saved_tabs(self, saved: SavedTabs) -> None:
+        """Give the window the saved tabs, before their signals: as many tabs,
+        each with its name, plot mode, data points, cursors and line styles."""
+        shown = self.plot_tabs.bar.currentIndex()
+        with self._tabs_each_on_their_own():
+            while self.plot_tabs.count() < len(saved.tabs):
+                self.plot_tabs.add_tab()
+            positions = self._tab_positions(saved)
+            for index, tab in zip(positions, saved.tabs):
+                self.plot_tabs.bar.setCurrentIndex(index)
+                if not saved.single_plot and str(tab.get('name') or '').strip():
+                    self.plot_tabs.bar.setTabText(
+                        index, str(tab['name']).strip()[:MAX_NAME_LENGTH])
+                self._apply_tab_settings(tab)
+                # Held by the panel, which applies each as its series is added.
+                self.plot_panel.set_pending_line_styles({
+                    str(entry['key']): str(entry['line_style'])
+                    for entry in signal_entries(tab) if entry.get('line_style')
+                })
+            self.plot_tabs.bar.setCurrentIndex(
+                shown if saved.single_plot or saved.carried_over else saved.current)
+        if saved.synchronized is not None:
+            self.btn_sync_tabs.setChecked(saved.synchronized)
+
+    def _plot_saved_tabs(self, saved: SavedTabs) -> None:
+        """Plot each saved tab's signals in its tab, as they looked, and show
+        the tab that was on screen. A configuration's tabs replace the window's:
+        empty tabs past them are closed."""
+        positions = self._tab_positions(saved)
+        shown = (positions[0] if saved.single_plot
+                 else self.plot_tabs.bar.currentIndex())
+        with self._tabs_each_on_their_own():
+            for index, tab in zip(positions, saved.tabs):
+                self.plot_tabs.bar.setCurrentIndex(index)
+                self._plot_saved_signals(tab)
+            if not saved.single_plot and not saved.carried_over:
+                for index in reversed(range(len(saved.tabs), self.plot_tabs.count())):
+                    if not self.plot_tabs.panels()[index].plotted_keys():
+                        self.plot_tabs.close_tab(index)
+            self.plot_tabs.bar.setCurrentIndex(min(shown, self.plot_tabs.count() - 1))
+
+    @contextmanager
+    def _tabs_each_on_their_own(self):
+        """Tabs set up one after another keep their own time and cursors."""
+        synchronized = self.plot_tabs.synchronized
+        self.plot_tabs.set_synchronized(False)
+        try:
+            yield
+        finally:
+            self.plot_tabs.set_synchronized(synchronized)
+
+    def _apply_tab_settings(self, tab: dict) -> None:
+        """Set the tab on screen to a saved tab's plot mode, data points and
+        cursors; settings the tab does not name stay as they are."""
+        if tab.get('plot_type') is not None:
+            self._set_plot_type(str(tab['plot_type']))
+        if 'show_data_points' in tab:
+            self.btn_points.setChecked(bool(tab['show_data_points']))
+        if 'hide_plot_lines' in tab:
+            self.btn_hide_line.setChecked(
+                bool(tab['hide_plot_lines']) and self.btn_points.isChecked())
+        if 'cursor1' in tab:
+            self.btn_cursor1.setChecked(bool(tab['cursor1']))
+        if 'cursor2' in tab:
+            self.btn_cursor2.setChecked(bool(tab['cursor2']))
+
+    def _plot_saved_signals(self, tab: dict) -> None:
+        """Plot a saved tab's signals in the tab on screen, with their look.
+
+        A generated signal not calculated yet is plotted, in this tab and with
+        that look, once it is.
+        """
+        entries = signal_entries(tab)
+        panel = self.plot_panel
+        for entry in entries:
+            key = str(entry['key'])
+            if self.calculated_signals.contains_key(key) and key not in panel._items:
+                self._keep_generated_look(key, entry)
+        self.add_signals_to_plot([str(entry['key']) for entry in entries])
+        needs_rebuild = False
+        for entry in entries:
+            key = str(entry['key'])
+            plotted = panel._items.get(key)
+            if plotted is None:
+                continue
+            self._drop_generated_look(key)
+            if entry.get('color'):
+                panel.set_series_color(key, str(entry['color']))
+            # Already plotted, so the panel's queue never saw it.
+            if entry.get('line_style'):
+                panel.set_series_line_style(key, str(entry['line_style']))
+            if 'visible' in entry:
+                plotted.visible = bool(entry['visible'])
+                needs_rebuild = True
+            if entry.get('group'):
+                plotted.group = str(entry['group'])
+                needs_rebuild = True
+            if 'axis_visible' in entry:
+                plotted.axis_visible = bool(entry['axis_visible'])
+                needs_rebuild = True
+            if 'own_axis' in entry:
+                plotted.own_axis = bool(entry['own_axis'])
+                needs_rebuild = True
+            if 'multistack_id' in entry:
+                plotted.multistack_id = int(entry['multistack_id'])
+                needs_rebuild = True
+        if needs_rebuild:
+            panel._rebuild_curves(preserve_selection=False)
+
+    def _keep_generated_look(self, key: str, entry: dict) -> None:
+        if entry.get('color'):
+            self._pending_plot_colors[key] = str(entry['color'])
+        if 'visible' in entry:
+            self._pending_plot_visible[key] = bool(entry['visible'])
+        if entry.get('group'):
+            self._pending_plot_groups[key] = str(entry['group'])
+        if 'axis_visible' in entry:
+            self._pending_plot_axis_visible[key] = bool(entry['axis_visible'])
+        if 'own_axis' in entry:
+            self._pending_plot_own_axis[key] = bool(entry['own_axis'])
+        if 'multistack_id' in entry:
+            self._pending_plot_multistack[key] = int(entry['multistack_id'])
+
+    def _pending_generated_looks(self) -> tuple[dict, ...]:
+        return (self._pending_plot_colors, self._pending_plot_visible,
+                self._pending_plot_groups, self._pending_plot_axis_visible,
+                self._pending_plot_own_axis, self._pending_plot_multistack)
+
+    def _drop_generated_look(self, key: str) -> None:
+        for looks in self._pending_generated_looks():
+            looks.pop(key, None)
+
+    def _clear_pending_generated_looks(self) -> None:
+        for looks in self._pending_generated_looks():
+            looks.clear()
+
+    def _set_plot_type(self, mode: str) -> None:
+        """Switch the tab on screen to a plot mode a configuration names."""
+        if mode not in PLOT_TYPES:
+            mode = 'normal'
+        if mode == 'multistack':
             self.btn_multi_axis.setChecked(False)
             self.btn_stacked.setChecked(False)
             self.btn_multistack.setChecked(True)
-        elif plot_type == 'stacked':
+        elif mode == 'stacked':
             self.btn_multi_axis.setChecked(False)
             self.btn_multistack.setChecked(False)
             self.btn_stacked.setChecked(True)
-        elif plot_type == 'multi_axis':
+        elif mode == 'multi_axis':
             self.btn_stacked.setChecked(False)
             self.btn_multistack.setChecked(False)
             self.btn_multi_axis.setChecked(True)
@@ -1124,12 +1223,12 @@ class MainWindow(QMainWindow):
             self.btn_stacked.setChecked(False)
             self.btn_multistack.setChecked(False)
             self.btn_multi_axis.setChecked(False)
-        self._pending_plot_type = None
 
     def _clear_plot_tabs(self, measurement_path: str | None) -> None:
         """Empty every tab, for the measurement at measurement_path."""
         self._plotted_file = measurement_path
         self._calc_redraw_panels = []
+        self._calc_plot_targets = {}
         for panel in self.plot_tabs.panels():
             panel.clear_all()
             panel.discard_undo_history()
@@ -1145,14 +1244,8 @@ class MainWindow(QMainWindow):
         self.calculated_signals.invalidate_cache()
         self._calc_queue.clear()
         self._finding_plot_keys.clear()
-        self._pending_plot_keys = []
-        self._pending_plot_colors = {}
-        self._pending_plot_visible = {}
-        self._pending_plot_groups = {}
-        self._pending_plot_axis_visible = {}
-        self._pending_plot_own_axis = {}
-        self._pending_plot_multistack = {}
-        self._pending_plot_type = None
+        self._pending_tabs = None
+        self._clear_pending_generated_looks()
         self.store = None
         self.diagnostics_box.clear()
         self._update_measurement_tab(
@@ -1445,53 +1538,58 @@ class MainWindow(QMainWindow):
         self._refresh_generated_signal_tree()
         return report
 
-    def _apply_pending_generated_plot_state(self, key: str) -> None:
-        """Restore a generated signal's saved look; the caller rebuilds the plot."""
-        plotted = self.plot_panel._items.get(key)
+    def _apply_pending_generated_plot_state(self, key: str, panel: PlotPanel) -> None:
+        """Restore a generated signal's saved look in panel; the caller rebuilds the plot."""
+        plotted = panel._items.get(key)
         if plotted is None:
             return
         if key in self._pending_plot_colors:
-            plotted.color = self._pending_plot_colors.pop(key)
+            plotted.color = self._pending_plot_colors[key]
         if key in self._pending_plot_visible:
-            plotted.visible = self._pending_plot_visible.pop(key)
+            plotted.visible = self._pending_plot_visible[key]
         if key in self._pending_plot_groups:
-            plotted.group = self._pending_plot_groups.pop(key)
+            plotted.group = self._pending_plot_groups[key]
         if key in self._pending_plot_axis_visible:
-            plotted.axis_visible = self._pending_plot_axis_visible.pop(key)
+            plotted.axis_visible = self._pending_plot_axis_visible[key]
         if key in self._pending_plot_own_axis:
-            plotted.own_axis = self._pending_plot_own_axis.pop(key)
+            plotted.own_axis = self._pending_plot_own_axis[key]
         if key in self._pending_plot_multistack:
-            plotted.multistack_id = self._pending_plot_multistack.pop(key)
+            plotted.multistack_id = self._pending_plot_multistack[key]
 
     def _plot_calculated_signals(self) -> None:
-        """Show what the queued calculations produced, with one plot rebuild."""
-        others = list(dict.fromkeys(self._calc_redraw_panels))
+        """Show what the queued calculations produced, with one rebuild per tab.
+
+        A signal asked for is added to each tab that asked for it, in its saved
+        look; a tab showing a recalculated signal is drawn again.
+        """
+        redraw = list(dict.fromkeys(self._calc_redraw_panels))
         self._calc_redraw_panels = []
-        if not self._closing:
-            open_tabs = self.plot_tabs.panels()
-            for panel in others:
-                if panel in open_tabs:      # unless closed meanwhile
-                    panel.redraw()
         keys = [
             key for key in dict.fromkeys(self._calc_plot_keys)
             # Deleted, or dropped by a new Load + Decode, while others ran.
             if self.calculated_signals.cached_series(key) is not None
         ]
         self._calc_plot_keys = []
-        if not keys or self._closing:
+        if self._closing:
             return
-        panel = self.plot_panel
-        new_keys = [key for key in keys if key not in panel._items]
-        if new_keys:
-            panel.begin_batch_add()
-            for key in new_keys:
-                self.add_signal_to_plot(key, fit=False)
+        open_tabs = self.plot_tabs.panels()
+        wanted: dict[PlotPanel, list[str]] = {}
         for key in keys:
-            self._apply_pending_generated_plot_state(key)
-        if new_keys:
-            panel.end_batch_add()  # its one rebuild also draws replaced series
-        else:
-            panel.redraw()
+            for panel in self._calc_plot_targets.pop(key, []):
+                if panel in open_tabs:      # unless closed meanwhile
+                    wanted.setdefault(panel, []).append(key)
+        for panel in open_tabs:
+            new_keys = [key for key in wanted.get(panel, []) if key not in panel._items]
+            if new_keys:
+                panel.begin_batch_add()
+                for key in new_keys:
+                    panel.add_series(key, self.calculated_signals.cached_series(key))
+                    self._apply_pending_generated_plot_state(key, panel)
+                panel.end_batch_add()  # its one rebuild also draws replaced series
+            elif panel in redraw:
+                panel.redraw()
+        for key in keys:
+            self._drop_generated_look(key)
 
     def new_generated_signal(self) -> None:
         if self.store is None or self._calc_thread is not None:
@@ -1559,10 +1657,10 @@ class MainWindow(QMainWindow):
 
         for panel in self.plot_tabs.panels():
             panel.rename_series_key(key, new_key)
-        self._pending_plot_keys = [
-            new_key if pending_key == key else pending_key
-            for pending_key in self._pending_plot_keys
-        ]
+        if self._pending_tabs is not None:
+            self._pending_tabs.rename_signal(key, new_key)
+        if key in self._calc_plot_targets:
+            self._calc_plot_targets[new_key] = self._calc_plot_targets.pop(key)
         for state in (
             self._pending_plot_colors,
             self._pending_plot_visible,
@@ -1613,6 +1711,8 @@ class MainWindow(QMainWindow):
             return
         for panel in self.plot_tabs.panels():
             panel.forget_series(key)
+        self._calc_plot_targets.pop(key, None)
+        self._drop_generated_look(key)
         self.calculated_signals.delete(key)
         self._refresh_generated_signal_tree()
         self._log(f"Deleted generated signal: {definition.name}")
@@ -1811,17 +1911,17 @@ class MainWindow(QMainWindow):
             return
         self.calculated_signals.commit(definition, series)
         self._refresh_generated_signal_tree()
-        # Every tab showing it gets the new data. All are drawn by
-        # _plot_calculated_signals once the queue is empty: the tab on screen
-        # with what it adds, the others again as they are.
+        # Every tab showing it gets the new data, and is drawn again by
+        # _plot_calculated_signals once the queue is empty; so are the tabs
+        # that asked for it plotted.
         showing = [panel for panel in self.plot_tabs.panels()
                    if definition.key in panel._items]
         for panel in showing:
             panel.replace_series(definition.key, series, redraw=False)
-        if self.plot_panel in showing or plot_after:
+        self._calc_redraw_panels.extend(showing)
+        # A tab may ask while the calculation is queued for another reason.
+        if plot_after or definition.key in self._calc_plot_targets:
             self._calc_plot_keys.append(definition.key)
-        self._calc_redraw_panels.extend(
-            panel for panel in showing if panel is not self.plot_panel)
         if operation == "edit":
             self._refresh_dependents_after_edit(definition.key)
         action = "Updated" if operation == "edit" else "Created"
@@ -1886,6 +1986,9 @@ class MainWindow(QMainWindow):
             self._plot_calculated_signals()
 
     def save_configuration(self) -> None:
+        # The plot keys describe the first tab, which is what a version
+        # without tabs opens; 'tabs' then describes each in full.
+        first = self.plot_tabs.panels()[0]
         config = {
             'version': self.version,
             'measurement_path': self.measurement_path or self.blf_path,  # canonical key
@@ -1903,28 +2006,31 @@ class MainWindow(QMainWindow):
             'signals': [
                 {
                     'key':          k,
-                    'visible':      self.plot_panel._items[k].visible,
-                    'group':        self.plot_panel._items[k].group,
-                    'axis_visible': self.plot_panel._items[k].axis_visible,
-                    'own_axis':     self.plot_panel._items[k].own_axis,
-                    'multistack_id': self.plot_panel._items[k].multistack_id,
-                    'line_style':   self.plot_panel._items[k].line_style,
+                    'visible':      first._items[k].visible,
+                    'group':        first._items[k].group,
+                    'axis_visible': first._items[k].axis_visible,
+                    'own_axis':     first._items[k].own_axis,
+                    'multistack_id': first._items[k].multistack_id,
+                    'line_style':   first._items[k].line_style,
                 }
-                for k in self.plot_panel.plotted_keys()
+                for k in first.plotted_keys()
             ],
             'generated_signals': self.calculated_signals.to_config(),
-            'show_data_points': self.btn_points.isChecked(),
-            'hide_plot_lines': self.btn_hide_line.isChecked(),
+            'show_data_points': first._show_points,
+            'hide_plot_lines': first._hide_lines,
             'plot_background_color': self.plot_panel.background_color(),
-            'signal_colors': self.plot_panel.series_colors(),
-            'multi_axis': self.btn_multi_axis.isChecked(),
-            'stacked': self.btn_stacked.isChecked(),
-            'multistack': self.btn_multistack.isChecked(),
-            'cursor1': self.btn_cursor1.isChecked(),
-            'cursor2': self.btn_cursor2.isChecked(),
+            'signal_colors': first.series_colors(),
+            'multi_axis': plot_type(first) == 'multi_axis',
+            'stacked': plot_type(first) == 'stacked',
+            'multistack': plot_type(first) == 'multistack',
+            'cursor1': first._cursor1_enabled,
+            'cursor2': first._cursor2_enabled,
             'name_show_channel': self.plot_panel._name_show_channel,
             'name_show_message': self.plot_panel._name_show_message,           # Fix 4
             'table_column_widths': self.plot_panel.table_column_widths(),  # Fix 2
+            'tabs': self._saved_tabs(),
+            'current_tab': self.plot_tabs.bar.currentIndex(),
+            'synchronize_tabs': self.plot_tabs.synchronized,
         }
         path, _ = QFileDialog.getSaveFileName(self, 'Save configuration', 'osvanta_config.json', 'JSON Files (*.json)')
         if not path:
@@ -1958,7 +2064,6 @@ class MainWindow(QMainWindow):
         # An explicitly loaded configuration takes precedence over the
         # session-only measurement handoff.
         self._temporary_plot_handoff = None
-        self._pending_plot_type = None
 
         # measurement_path is the canonical key; blf_path is read as a fallback
         # for configs saved by older CANScope versions.
@@ -1978,67 +2083,14 @@ class MainWindow(QMainWindow):
             )
         elif cfg_dbc:
             self.channel_config = ChannelConfig.from_single_dbc(cfg_dbc)
-        # ── Parse signals list: supports new dict format and old plain-string format ──
-        signals_data         = list(data.get('signals') or [])
-        pending_keys         = []
-        pending_visible      = {}
-        pending_groups       = {}
-        pending_axis_visible = {}
-        pending_own_axis     = {}
-        pending_multistack   = {}
-        pending_line_styles  = {}
-        for s in signals_data:
-            if isinstance(s, str):
-                pending_keys.append(s)
-            elif isinstance(s, dict):
-                k = s.get('key')
-                if k:
-                    pending_keys.append(k)
-                    if 'visible' in s:
-                        pending_visible[k] = bool(s['visible'])
-                    if s.get('group'):
-                        pending_groups[k] = str(s['group'])
-                    if 'axis_visible' in s:
-                        pending_axis_visible[k] = bool(s['axis_visible'])
-                    if 'own_axis' in s:
-                        pending_own_axis[k] = bool(s['own_axis'])
-                    if 'multistack_id' in s:
-                        pending_multistack[k] = int(s['multistack_id'])
-                    if s.get('line_style'):
-                        pending_line_styles[k] = str(s['line_style'])
-        pending_colors = dict(data.get('signal_colors') or {})
-        # Queue styles on the plot panel: it applies them as each series is
-        # added, which covers both the reuse-current-data path below and the
-        # post-decode reload. Absent from a pre-v2 config → default style.
-        self.plot_panel.set_pending_line_styles(pending_line_styles)
+        saved = SavedTabs.from_config(data)
         generated_errors = self.calculated_signals.replace_definitions(
             data.get('generated_signals') or []
         )
         for error in generated_errors:
             self._log(f'Generated signal configuration skipped: {error}')
         self._refresh_generated_signal_tree()
-        generated_pending = {
-            key for key in pending_keys if self.calculated_signals.contains_key(key)
-        }
-        self._pending_plot_colors = {
-            key: value for key, value in pending_colors.items() if key in generated_pending
-        }
-        self._pending_plot_visible = {
-            key: value for key, value in pending_visible.items() if key in generated_pending
-        }
-        self._pending_plot_groups = {
-            key: value for key, value in pending_groups.items() if key in generated_pending
-        }
-        self._pending_plot_axis_visible = {
-            key: value for key, value in pending_axis_visible.items() if key in generated_pending
-        }
-        self._pending_plot_own_axis = {
-            key: value for key, value in pending_own_axis.items() if key in generated_pending
-        }
-        self._pending_plot_multistack = {
-            key: value for key, value in pending_multistack.items()
-            if key in generated_pending
-        }
+        self._clear_pending_generated_looks()
 
         # Fix 6: if data is already decoded, ask the user what to do
         use_current_data = False
@@ -2055,79 +2107,31 @@ class MainWindow(QMainWindow):
             )
             use_current_data = (reply == QMessageBox.StandardButton.Yes)
 
-        # Apply visual settings regardless of data source
-        self.btn_points.setChecked(bool(data.get('show_data_points', False)))
-        self.btn_hide_line.setChecked(
-            bool(data.get('hide_plot_lines', False)) and self.btn_points.isChecked()
-        )
+        # Apply visual settings regardless of data source: each tab's, then
+        # those every tab shares.
+        self._set_up_saved_tabs(saved)
         bg = data.get('plot_background_color')
         if bg:
-            self.plot_panel.set_background_color(str(bg))
-        multi_axis = bool(data.get('multi_axis', False))
-        multistack = bool(data.get('multistack', False))
-        stacked = bool(data.get('stacked', not multi_axis and not multistack))
-        self.btn_multi_axis.setChecked(False)
-        self.btn_stacked.setChecked(False)
-        self.btn_multistack.setChecked(False)
-        if multistack:
-            self.btn_multistack.setChecked(True)
-        elif multi_axis:
-            self.btn_multi_axis.setChecked(True)
-        else:
-            self.btn_stacked.setChecked(stacked)
-        self.btn_cursor1.setChecked(bool(data.get('cursor1', False)))
-        self.btn_cursor2.setChecked(bool(data.get('cursor2', False)))
-        self.plot_panel._name_show_channel = bool(data.get('name_show_channel', False))
-        self.plot_panel._name_show_message = bool(data.get('name_show_message', False))
+            self.plot_panel.set_background_color(str(bg))   # every tab follows
         col_widths = data.get('table_column_widths')
-        if col_widths:
-            self.plot_panel.set_table_column_widths([int(w) for w in col_widths])
+        for panel in self.plot_tabs.panels():
+            panel._name_show_channel = bool(data.get('name_show_channel', False))
+            panel._name_show_message = bool(data.get('name_show_message', False))
+            if col_widths:
+                panel.set_table_column_widths([int(w) for w in col_widths])
 
         if use_current_data:
             # Reuse already-decoded store — plot signals and restore all visual state
             self._log(f'Configuration loaded (using current data): {path}')
             self._update_status('Config applied', 'Plotting signals from configuration')
-            self.add_signals_to_plot(pending_keys)
-            for key, color in pending_colors.items():
-                self.plot_panel.set_series_color(key, color)
-            # A key that was already plotted is not re-added, so the pending
-            # queue never sees it — apply those styles directly.
-            for key, style in pending_line_styles.items():
-                self.plot_panel.set_series_line_style(key, style)
-            # Restore visibility and group assignments
-            needs_rebuild = False
-            for key in pending_keys:
-                if key in self.plot_panel._items:
-                    if key in pending_visible:
-                        self.plot_panel._items[key].visible = pending_visible[key]
-                        needs_rebuild = True
-                    if pending_groups.get(key):
-                        self.plot_panel._items[key].group = pending_groups[key]
-                        needs_rebuild = True
-                    if key in pending_axis_visible:
-                        self.plot_panel._items[key].axis_visible = pending_axis_visible[key]
-                        needs_rebuild = True
-                    if key in pending_own_axis:
-                        self.plot_panel._items[key].own_axis = pending_own_axis[key]
-                        needs_rebuild = True
-                    if key in pending_multistack:
-                        self.plot_panel._items[key].multistack_id = pending_multistack[key]
-                        needs_rebuild = True
-            if needs_rebuild:
-                self.plot_panel._rebuild_curves(preserve_selection=False)
+            self._plot_saved_tabs(saved)
             return
 
         # Reload from config measurement path (+ database, if the format needs one)
         self.measurement_path = cfg_mpath
         self.blf_path = cfg_mpath   # alias
         self.dbc_path = cfg_dbc
-        self._pending_plot_keys         = pending_keys
-        self._pending_plot_colors       = pending_colors
-        self._pending_plot_visible      = pending_visible
-        self._pending_plot_groups       = pending_groups
-        self._pending_plot_axis_visible = pending_axis_visible
-        self._pending_plot_own_axis     = pending_own_axis
-        self._pending_plot_multistack   = pending_multistack
+        self._pending_tabs = saved
         self._update_measurement_tab()
 
         if not cfg_mpath:
@@ -2153,15 +2157,15 @@ class MainWindow(QMainWindow):
             return
 
         self._log(f'Configuration loaded: {path}')
-        self.load_data(pending_plot_keys=self._pending_plot_keys)
+        self.load_data(pending_tabs=self._pending_tabs)
 
-    def load_data(self, pending_plot_keys: list[str] | None = None) -> None:
+    def load_data(self, pending_tabs: SavedTabs | None = None) -> None:
         # QAction.triggered emits its checked state.  A normal toolbar click
         # therefore arrives as ``False`` rather than ``None``; normalize it so
-        # the session handoff is armed.  Explicit configuration loads pass a
-        # real list and remain unchanged.
-        if isinstance(pending_plot_keys, bool):
-            pending_plot_keys = None
+        # the session handoff is armed.  Explicit configuration loads pass
+        # their tabs and remain unchanged.
+        if isinstance(pending_tabs, bool):
+            pending_tabs = None
         # A second load would replace _thread while the first still runs. The
         # first thread's _cleanup_worker then deletes the second's running
         # QThread, and Qt terminates the application.
@@ -2198,12 +2202,14 @@ class MainWindow(QMainWindow):
             if self.channel_config.is_empty() and database_mandatory_for(mpath):
                 self._update_status('Waiting for input', self._next_step_message())
                 return
-        if pending_plot_keys is None and self._temporary_plot_handoff:
-            self._arm_temporary_plot_handoff()
-        else:
-            self._pending_plot_keys = list(pending_plot_keys or [])
         # Signals plotted from here on, while decoding and after, are this file's.
         self._clear_plot_tabs(mpath)
+        # Every tab gets its signals back once decoded: the configuration's,
+        # or the last measurement's, set up on the tabs just emptied.
+        if pending_tabs is None and self._temporary_plot_handoff:
+            self._arm_temporary_plot_handoff()
+        else:
+            self._pending_tabs = pending_tabs
         self.calculated_signals.invalidate_cache()
         self._calc_queue.clear()
         self._finding_plot_keys = set()
@@ -2345,7 +2351,14 @@ class MainWindow(QMainWindow):
             if series is None:
                 definition = self.calculated_signals.definition(key)
                 if definition is not None:
+                    # Plotted in this tab once calculated, whichever tab is
+                    # on screen by then.
+                    targets = self._calc_plot_targets.setdefault(key, [])
+                    if self.plot_panel not in targets:
+                        targets.append(self.plot_panel)
                     self._queue_calculation(definition, "lazy", plot_after=True)
+                    if not self._calculation_is_pending(key):
+                        targets.remove(self.plot_panel)    # refused, or invalid
                 return False
         else:
             series = active_store.get_series(key)
@@ -2698,70 +2711,12 @@ class MainWindow(QMainWindow):
             f'Signals: {len(store.all_keys()):,} | '
             f'Samples: {store.total_samples:,}'
         )
-        temporary_handoff_active = (
-            self._temporary_plot_handoff is not None
-            and self._pending_plot_type is not None
-        )
-        self._apply_pending_plot_type()
-        if self._pending_plot_keys:
-            wanted       = list(self._pending_plot_keys)
-            colors       = dict(self._pending_plot_colors)
-            visible      = dict(getattr(self, '_pending_plot_visible',      {}))
-            groups       = dict(getattr(self, '_pending_plot_groups',       {}))
-            axis_visible = dict(getattr(self, '_pending_plot_axis_visible', {}))
-            own_axis     = dict(getattr(self, '_pending_plot_own_axis',     {}))
-            multistack   = dict(getattr(self, '_pending_plot_multistack',   {}))
-            self._pending_plot_keys = []
-            self.add_signals_to_plot(wanted)
-            for key, color in colors.items():
-                self.plot_panel.set_series_color(key, color)
-            # Restore visibility, group, and axis_visible from saved config
-            needs_rebuild = False
-            for key in wanted:
-                if key in self.plot_panel._items:
-                    if key in visible:
-                        self.plot_panel._items[key].visible = visible[key]
-                        needs_rebuild = True
-                    if key in groups and groups[key]:
-                        self.plot_panel._items[key].group = groups[key]
-                        needs_rebuild = True
-                    if key in axis_visible:
-                        self.plot_panel._items[key].axis_visible = axis_visible[key]
-                        needs_rebuild = True
-                    if key in own_axis:
-                        self.plot_panel._items[key].own_axis = own_axis[key]
-                        needs_rebuild = True
-                    if key in multistack:
-                        self.plot_panel._items[key].multistack_id = multistack[key]
-                        needs_rebuild = True
-            if needs_rebuild:
-                self.plot_panel._rebuild_curves(preserve_selection=False)
-            waiting_generated = {
-                key for key in wanted
-                if self.calculated_signals.contains_key(key)
-                and key not in self.plot_panel._items
-            }
-            self._pending_plot_colors = {
-                key: value for key, value in colors.items() if key in waiting_generated
-            }
-            self._pending_plot_visible = {
-                key: value for key, value in visible.items() if key in waiting_generated
-            }
-            self._pending_plot_groups = {
-                key: value for key, value in groups.items() if key in waiting_generated
-            }
-            self._pending_plot_axis_visible = {
-                key: value for key, value in axis_visible.items() if key in waiting_generated
-            }
-            self._pending_plot_own_axis = {
-                key: value for key, value in own_axis.items() if key in waiting_generated
-            }
-            self._pending_plot_multistack = {
-                key: value for key, value in multistack.items()
-                if key in waiting_generated
-            }
-        if temporary_handoff_active:
-            self._temporary_plot_handoff = None
+        saved = self._pending_tabs
+        self._pending_tabs = None
+        if saved is not None:
+            self._plot_saved_tabs(saved)
+            if saved.carried_over:
+                self._temporary_plot_handoff = None
         if load_warnings:
             shown = load_warnings[:20]
             details = '\n'.join(f'• {warning}' for warning in shown)

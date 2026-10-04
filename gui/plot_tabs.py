@@ -16,6 +16,10 @@ Synchronized tabs, the default, show one time: the tab coming into view takes
 over the time range and the cursors of the tab it replaces. Only one tab is
 ever on screen, so nothing is updated behind it. Unsynchronized, each tab keeps
 the time range and cursors it was left with.
+
+A configuration file, and the plots kept for the next measurement, describe
+each tab as describe_tab() does; SavedTabs reads them back. A configuration
+saved before tabs describes one plot, which becomes the tab on screen.
 """
 from __future__ import annotations
 
@@ -39,6 +43,120 @@ from gui.plot_widget import PlotPanel
 
 TAB_NAME = 'Tab {}'
 MAX_NAME_LENGTH = 40
+PLOT_TYPES = ('normal', 'multi_axis', 'stacked', 'multistack')
+
+
+def plot_type(panel: PlotPanel) -> str:
+    """The panel's plot mode, as a configuration names it."""
+    if panel._multistack_mode:
+        return 'multistack'
+    if panel._stacked_mode:
+        return 'stacked'
+    if panel._multi_axis:
+        return 'multi_axis'
+    return 'normal'
+
+
+def describe_tab(panel: PlotPanel, name: str) -> dict:
+    """A tab as a configuration keeps it: its name, plot mode, data points,
+    cursors, and each signal with its look."""
+    return {
+        'name': name,
+        'plot_type': plot_type(panel),
+        'show_data_points': panel._show_points,
+        'hide_plot_lines': panel._hide_lines,
+        'cursor1': panel._cursor1_enabled,
+        'cursor2': panel._cursor2_enabled,
+        'signals': [_signal_entry(key, panel._items[key]) for key in panel.plotted_keys()],
+    }
+
+
+def _signal_entry(key: str, plotted) -> dict:
+    return {
+        'key': key,
+        'color': plotted.color,
+        'visible': plotted.visible,
+        'group': plotted.group,
+        'axis_visible': plotted.axis_visible,
+        'own_axis': plotted.own_axis,
+        'multistack_id': plotted.multistack_id,
+        'line_style': plotted.line_style,
+    }
+
+
+@dataclass
+class SavedTabs:
+    """Tabs as a configuration, or the last measurement, left them."""
+
+    tabs: list[dict]
+    current: int = 0
+    # Saved before tabs: one plot, for the tab on screen.
+    single_plot: bool = False
+    synchronized: bool | None = None
+    # Kept from the last measurement, for the same tabs.
+    carried_over: bool = False
+
+    @classmethod
+    def from_config(cls, data: dict) -> SavedTabs:
+        """The tabs of a configuration file. One saved before tabs holds a
+        single plot, in its top-level keys, which old versions also read."""
+        tabs = [tab for tab in data.get('tabs') or [] if isinstance(tab, dict)]
+        sync = data.get('synchronize_tabs')
+        if tabs:
+            return cls(tabs, _index(data.get('current_tab'), len(tabs)),
+                       synchronized=None if sync is None else bool(sync))
+        multi_axis = bool(data.get('multi_axis', False))
+        multistack = bool(data.get('multistack', False))
+        stacked = bool(data.get('stacked', not multi_axis and not multistack))
+        colors = dict(data.get('signal_colors') or {})
+        signals = []
+        for entry in data.get('signals') or []:
+            if isinstance(entry, str):
+                entry = {'key': entry}
+            if isinstance(entry, dict) and entry.get('key'):
+                entry = dict(entry)
+                if entry['key'] in colors:
+                    entry.setdefault('color', colors[entry['key']])
+                signals.append(entry)
+        show_points = bool(data.get('show_data_points', False))
+        return cls([{
+            'plot_type': ('multistack' if multistack else 'multi_axis' if multi_axis
+                          else 'stacked' if stacked else 'normal'),
+            'show_data_points': show_points,
+            'hide_plot_lines': bool(data.get('hide_plot_lines', False)) and show_points,
+            'cursor1': bool(data.get('cursor1', False)),
+            'cursor2': bool(data.get('cursor2', False)),
+            'signals': signals,
+        }], single_plot=True)
+
+    @classmethod
+    def from_handoff(cls, data: dict) -> SavedTabs:
+        """The tabs kept for the next measurement. One kept before tabs is a
+        plot mode and its signals, for the tab on screen."""
+        tabs = [tab for tab in data.get('tabs') or [] if isinstance(tab, dict)]
+        if tabs:
+            return cls(tabs, _index(data.get('current_tab'), len(tabs)), carried_over=True)
+        return cls([{key: data[key] for key in ('plot_type', 'signals') if key in data}],
+                   single_plot=True, carried_over=True)
+
+    def rename_signal(self, old_key: str, new_key: str) -> None:
+        for tab in self.tabs:
+            for entry in tab.get('signals') or []:
+                if isinstance(entry, dict) and entry.get('key') == old_key:
+                    entry['key'] = new_key
+
+
+def signal_entries(tab: dict) -> list[dict]:
+    """A saved tab's signals, each with at least its key."""
+    return [entry for entry in tab.get('signals') or []
+            if isinstance(entry, dict) and entry.get('key')]
+
+
+def _index(value, count: int) -> int:
+    try:
+        return min(max(int(value), 0), count - 1)
+    except (TypeError, ValueError):
+        return 0
 
 
 @dataclass(frozen=True)

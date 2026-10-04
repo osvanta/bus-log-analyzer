@@ -117,22 +117,33 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
     window.choose_blf()
 
     saved = json.loads(temporary_config.read_text(encoding="utf-8"))
+    # Version 3: every tab, each a plot as version 2 kept the only one.
     assert saved == {
         "type": "canscope_temporary_plot_config",
-        "version": 2,
-        "plot_type": "stacked",
-        "signals": [
+        "version": 3,
+        "tabs": [
             {
-                "key": old_series.key,
-                "color": window._temporary_plot_handoff["signals"][0]["color"],
-                "visible": True,
-                "group": "",
-                "axis_visible": True,
-                "own_axis": False,
-                "multistack_id": -1,
-                "line_style": "solid",
+                "name": "Tab 1",
+                "plot_type": "stacked",
+                "show_data_points": False,
+                "hide_plot_lines": False,
+                "cursor1": False,
+                "cursor2": False,
+                "signals": [
+                    {
+                        "key": old_series.key,
+                        "color": window._temporary_plot_handoff["tabs"][0]["signals"][0]["color"],
+                        "visible": True,
+                        "group": "",
+                        "axis_visible": True,
+                        "own_axis": False,
+                        "multistack_id": -1,
+                        "line_style": "solid",
+                    }
+                ],
             }
         ],
+        "current_tab": 0,
     }
     assert "measurement_path" not in saved
     assert "channel_config" not in saved
