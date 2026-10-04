@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import cycle
 from pathlib import Path
@@ -398,11 +399,15 @@ class _CheckDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
+# Rows dragged out of a signal table: their signal keys, one to a line.
+ROW_MIME_TYPE = 'application/x-osvanta-row-reorder'
+
+
 class _ReorderTable(QTableWidget):
     """QTableWidget that fires a custom internal MIME drag so row-reorder drops
     are distinguishable from external SignalTree drops."""
 
-    _ROW_REORDER_MIME = 'application/x-osvanta-row-reorder'
+    _ROW_REORDER_MIME = ROW_MIME_TYPE
 
     def __init__(self, rows: int, cols: int, parent=None) -> None:
         super().__init__(rows, cols, parent)
@@ -504,6 +509,9 @@ class PlotPanel(QWidget):
     plotAreaShiftClicked = Signal(float)
     # The user changed or removed the tag under the signal table (a PlotTag).
     tagChanged = Signal(object)
+    # Signals to move to another tab: their keys, and that tab's position,
+    # or -1 for a new tab.
+    moveToTabRequested = Signal(list, int)
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -575,6 +583,9 @@ class PlotPanel(QWidget):
         self._checkbox_target_keys: list[str] = []  # pre-click multi-row snapshot
         self._batch_mode: bool = False          # True while batch-adding signals; suppresses per-add rebuilds
         self._rebuild_seq: int = 0              # bumped each rebuild and by fit_to_window(); lets deferred restores detect staleness
+        # The other tabs signals can move to, as (position, name); set by the
+        # tabs. Without it the signal menu has no "Move to tab".
+        self.move_targets: Callable[[], list[tuple[int, str]]] | None = None
         self.setAcceptDrops(True)
 
         # ── Normal / multi-axis plot ──────────────────────────────────────
@@ -1408,6 +1419,38 @@ class PlotPanel(QWidget):
             # _rebuild_curves has already restored the saved view range.
             if was_empty:
                 self.fit_to_window()
+
+    def take_series(self, signals: list[PlottedSignal]) -> list[str]:
+        """Plot signals moved here from another tab, as they looked there.
+
+        Each keeps its colour, line style, visibility, group and axis, and
+        signals that shared a MultiStack row share one here too. A signal
+        already plotted here stays as it is. One undo step; returns the keys
+        added.
+        """
+        signals = [moved for moved in signals if moved.key not in self._items]
+        if not signals:
+            return []
+        rows: dict[int, int] = {}
+        self.begin_batch_add()
+        try:
+            for moved in signals:
+                self.add_series(moved.key, moved.series, color=moved.color)
+                plotted = self._items[moved.key]
+                plotted.visible = moved.visible
+                plotted.group = moved.group
+                plotted.axis_visible = moved.axis_visible
+                plotted.own_axis = moved.own_axis
+                plotted.line_style = moved.line_style
+                if moved.multistack_id >= 0:
+                    if moved.multistack_id not in rows:
+                        rows[moved.multistack_id] = (
+                            plotted.multistack_id if plotted.multistack_id >= 0
+                            else self._next_multistack_id())
+                    plotted.multistack_id = rows[moved.multistack_id]
+        finally:
+            self.end_batch_add()
+        return [moved.key for moved in signals]
 
     def replace_series(self, key: str, series: SignalSeries, redraw: bool = True) -> bool:
         """Replace plotted data without changing its visual or viewport state.
@@ -3862,6 +3905,8 @@ class PlotPanel(QWidget):
         rm.triggered.connect(self.remove_selected_series)
         rm.setEnabled(has_sel)
         menu.addAction(rm)
+        if self.move_targets is not None:
+            self._add_move_to_tab_menu(menu, selected_keys)
         menu.addSeparator()
         grp_act = QAction('Group selected…', menu)
         grp_act.triggered.connect(self.group_selected)
@@ -3903,6 +3948,31 @@ class PlotPanel(QWidget):
         bg_act.triggered.connect(self._choose_plot_background_color)
         menu.addAction(bg_act)
         menu.exec(global_pos)
+
+    def _add_move_to_tab_menu(self, menu: QMenu, selected_keys: list) -> QMenu:
+        """Add "Move to tab", with the other tabs and a new one, and return it
+        for UI tests."""
+        keys = [str(key) for key in selected_keys if str(key) in self._items]
+        tabs = self._make_menu(menu)
+        tabs.setTitle('Move to tab')
+        for index, name in self.move_targets():
+            # A "&" in a tab's name is not a shortcut.
+            action = QAction(name.replace('&', '&&'), tabs)
+            action.triggered.connect(
+                lambda _checked=False, k=list(keys), i=index:
+                self.moveToTabRequested.emit(k, i)
+            )
+            tabs.addAction(action)
+        if tabs.actions():
+            tabs.addSeparator()
+        new_tab = QAction('New tab', tabs)
+        new_tab.triggered.connect(
+            lambda _checked=False, k=list(keys): self.moveToTabRequested.emit(k, -1)
+        )
+        tabs.addAction(new_tab)
+        tabs.setEnabled(bool(keys))
+        menu.addMenu(tabs)
+        return tabs
 
     def _add_move_to_new_stack_action(
         self, menu: QMenu, selected_keys: list

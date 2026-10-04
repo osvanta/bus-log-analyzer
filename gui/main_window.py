@@ -424,6 +424,8 @@ class MainWindow(QMainWindow):
         self.plot_panel.set_cursor1_enabled(self.btn_cursor1.isChecked())
         # From here on, the buttons show each tab as it comes into view.
         self.plot_tabs.currentPanelChanged.connect(self._show_plot_tab)
+        self.plot_tabs.signalsDropped.connect(self._add_signals_to_tab)
+        self.plot_tabs.signalsMoved.connect(self._move_signals_to_tab)
 
         # The plot buttons sit above the plot only, level with the signal
         # table's header, so the table runs the full height of the panel.
@@ -2334,6 +2336,46 @@ class MainWindow(QMainWindow):
             self.plot_panel.move_signals_to_stack(
                 plotted_keys, target_stack, confirm_units=False
             )
+
+    def _add_signals_to_tab(self, keys, index: int) -> None:
+        """Show the tab signals were dropped on, or a new tab (index -1), and
+        plot them in it."""
+        if index < 0:
+            self.plot_tabs.add_tab()
+        elif 0 <= index < self.plot_tabs.count():
+            self.plot_tabs.bar.setCurrentIndex(index)
+        else:
+            return
+        self.add_signals_to_plot(keys)
+
+    def _move_signals_to_tab(self, source: PlotPanel, keys, index: int) -> None:
+        """Move signals out of a tab into the tab at index, or into a new tab
+        (index -1), as they looked, in the order the tab showed them. The tab
+        on screen stays, unless they go to a new tab, which takes the plot
+        mode of the tab they came from."""
+        wanted = set(keys)
+        moving = [source._items[key] for key in source.plotted_keys() if key in wanted]
+        panels = self.plot_tabs.panels()
+        if not moving or source not in panels:
+            return
+        if index < 0:
+            target = self.plot_tabs.add_tab()
+            self._set_plot_type(plot_type(source))
+        elif 0 <= index < len(panels) and panels[index] is not source:
+            target = panels[index]
+        else:
+            return
+        was_empty = not target.plotted_keys()
+        target.take_series(moving)
+        moved = [signal.key for signal in moving if signal.key in target._items]
+        source.remove_series_many(moved)
+        if was_empty and target is self.plot_panel:
+            # A synchronized new tab shows the time the tab it came from shows.
+            self.plot_tabs.show_shared_time(target)
+        name = self.plot_tabs.names()[self.plot_tabs.panels().index(target)]
+        self._update_status(
+            f'Moved {len(moved)} signal(s) to {name}',
+            'Double-click the tab to rename it' if index < 0 else f'Click {name} to see them')
 
     def add_signal_to_plot(self, key: str, fit: bool = True) -> bool:
         # Generated signals are calculated only from a completed measurement;

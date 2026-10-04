@@ -12,6 +12,12 @@ PlotPanel of its own, so switching tabs shows that tab's table and plot as they
 were left, without drawing them again. The "+" button adds a tab, a double-click
 renames one, and its close button or right-click menu closes it.
 
+Signals dragged from the signal tree onto a tab are plotted in it, and onto
+"+" in a new tab; that tab comes on screen. Rows dragged from the signal table
+onto another tab, or sent there by "Move to tab" in the signal menu, move
+there with their look; the tab on screen stays, unless they go to a new tab,
+which takes the plot mode of the tab they came from.
+
 Synchronized tabs, the default, show one time: the tab coming into view takes
 over the time range and the cursors of the tab it replaces. Only one tab is
 ever on screen, so nothing is updated behind it. Unsynchronized, each tab keeps
@@ -29,6 +35,7 @@ from itertools import count
 
 from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLineEdit,
     QMenu,
@@ -39,11 +46,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.plot_widget import PlotPanel
+from gui.plot_widget import ROW_MIME_TYPE, PlotPanel
+from gui.signal_tree import SignalTreeWidget
 
 TAB_NAME = 'Tab {}'
 MAX_NAME_LENGTH = 40
 PLOT_TYPES = ('normal', 'multi_axis', 'stacked', 'multistack')
+# The outline of the tab, or of "+", that a drag would drop on.
+DROP_TARGET_COLOR = '#3d9ef0'
 
 
 def plot_type(panel: PlotPanel) -> str:
@@ -193,6 +203,12 @@ class PlotTabs(QObject):
 
     # The panel of the tab now on screen.
     currentPanelChanged = Signal(object)
+    # Signals from the signal tree dropped on a tab: their keys, and the
+    # tab's position, or -1 for a new tab.
+    signalsDropped = Signal(list, int)
+    # Signals to move out of a tab: its panel, their keys, and the position
+    # of the tab they go to, or -1 for a new tab.
+    signalsMoved = Signal(object, list, int)
 
     def __init__(self, new_panel: Callable[[], PlotPanel],
                  parent: QObject | None = None) -> None:
@@ -205,7 +221,7 @@ class PlotTabs(QObject):
         self._shared: TimeView | None = None
         self.synchronized = True
 
-        self.bar = QTabBar()
+        self.bar = _TabBar()
         self.bar.setMovable(True)
         self.bar.setExpanding(False)
         self.bar.setUsesScrollButtons(True)
@@ -215,13 +231,15 @@ class PlotTabs(QObject):
         self.bar.tabCloseRequested.connect(self.close_tab)
         self.bar.tabBarDoubleClicked.connect(self.rename_tab)
         self.bar.customContextMenuRequested.connect(self._tab_menu)
+        self.bar.dropped.connect(self._dropped)
 
-        self.add_button = QToolButton()
+        self.add_button = _AddTabButton()
         self.add_button.setText('+')
         self.add_button.setAutoRaise(True)
         self.add_button.setToolTip('New tab')
         self.add_button.setAccessibleName('New tab')
         self.add_button.clicked.connect(lambda: self.add_tab())
+        self.add_button.dropped.connect(lambda keys, rows: self._dropped(keys, rows, -1))
 
         self.strip = QWidget()
         layout = QHBoxLayout(self.strip)
@@ -254,6 +272,9 @@ class PlotTabs(QObject):
     def add_tab(self, name: str | None = None) -> PlotPanel:
         """Add a tab with a new, empty panel, and show it."""
         panel = self._new_panel()
+        panel.move_targets = lambda: self.other_tabs(panel)
+        panel.moveToTabRequested.connect(
+            lambda keys, index, source=panel: self.signalsMoved.emit(source, keys, index))
         tab_id = next(self._ids)
         self._panels[tab_id] = panel
         self.tables.addWidget(panel.table_panel)
@@ -271,6 +292,11 @@ class PlotTabs(QObject):
         else:
             self.bar.setCurrentIndex(index)
         return panel
+
+    def other_tabs(self, panel: PlotPanel) -> list[tuple[int, str]]:
+        """The tabs other than panel's, as (position, name)."""
+        return [(index, self.bar.tabText(index)) for index in range(self.bar.count())
+                if self._panels[self.bar.tabData(index)] is not panel]
 
     def show_neighbour(self, step: int) -> None:
         """Show the next tab (step 1) or the previous one (-1), round the end."""
@@ -341,6 +367,14 @@ class PlotTabs(QObject):
             number += 1
         return TAB_NAME.format(number)
 
+    def _dropped(self, keys: list, rows: bool, index: int) -> None:
+        """Signals dropped on the tab at index, or on "+" (-1): rows of the
+        tab on screen move there, signals from the signal tree are added."""
+        if rows:
+            self.signalsMoved.emit(self.current(), keys, index)
+        else:
+            self.signalsDropped.emit(keys, index)
+
     def _tab_menu(self, pos: QPoint) -> None:
         index = self.bar.tabAt(pos)
         menu = QMenu(self.bar)
@@ -387,6 +421,119 @@ class PlotTabs(QObject):
     def forget_shared_time(self) -> None:
         """Drop the shared time, as for another measurement."""
         self._shared = None
+
+
+def _dragged_signals(mime) -> tuple[list[str], bool]:
+    """The signal keys a drag carries, and whether they are rows of a signal
+    table rather than signals from the signal tree."""
+    for mime_type, rows in ((SignalTreeWidget.MIME_TYPE, False), (ROW_MIME_TYPE, True)):
+        if mime.hasFormat(mime_type):
+            payload = bytes(mime.data(mime_type)).decode('utf-8')
+            return [key.strip() for key in payload.splitlines() if key.strip()], rows
+    return [], False
+
+
+class _DropOutline(QFrame):
+    """Outlines the place a drag would drop on."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName('dropOutline')
+        self.setStyleSheet(
+            f'#dropOutline {{ border: 2px solid {DROP_TARGET_COLOR}; border-radius: 3px; }}')
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def show_at(self, rect) -> None:
+        self.setGeometry(rect)
+        self.show()
+        self.raise_()
+
+
+class _TabBar(QTabBar):
+    """The tabs, which take signals dropped on them. Rows of the signal table
+    drop only on a tab other than the one on screen."""
+
+    # The keys dropped, whether they are rows of the signal table, and the tab.
+    dropped = Signal(list, bool, int)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
+        self._outline = _DropOutline(self)
+
+    def _drop_tab(self, event) -> int:
+        keys, rows = _dragged_signals(event.mimeData())
+        index = self.tabAt(event.position().toPoint())
+        if not keys or index < 0 or (rows and index == self.currentIndex()):
+            return -1
+        return index
+
+    def dragEnterEvent(self, event) -> None:
+        # A drag move event follows at once, and finds the tab.
+        if _dragged_signals(event.mimeData())[0]:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        index = self._drop_tab(event)
+        if index < 0:
+            self._outline.hide()
+            event.ignore()
+            return
+        self._outline.show_at(self.tabRect(index))
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._outline.hide()
+
+    def dropEvent(self, event) -> None:
+        self._outline.hide()
+        index = self._drop_tab(event)
+        if index < 0:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.dropped.emit(*_dragged_signals(event.mimeData()), index)
+
+
+class _AddTabButton(QToolButton):
+    """The "+" button: it adds a tab, and takes signals dropped on it into a
+    new tab."""
+
+    # The keys dropped, and whether they are rows of the signal table.
+    dropped = Signal(list, bool)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
+        self._outline = _DropOutline(self)
+
+    def dragEnterEvent(self, event) -> None:
+        if _dragged_signals(event.mimeData())[0]:
+            self._outline.show_at(self.rect())
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if _dragged_signals(event.mimeData())[0]:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._outline.hide()
+
+    def dropEvent(self, event) -> None:
+        self._outline.hide()
+        keys, rows = _dragged_signals(event.mimeData())
+        if not keys:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.dropped.emit(keys, rows)
 
 
 class _NameEditor(QLineEdit):
