@@ -184,7 +184,8 @@ def test_the_release_test_drives_the_application(tmp_path, blf_path, sample_dbc_
          '--quit-when-done'],
         cwd=REPO_ROOT,
         env=dict(os.environ, QT_QPA_PLATFORM='offscreen', PYTHONPATH=str(REPO_ROOT),
-                 PYTHONIOENCODING='utf-8', OSVANTA_CRASH_LOG=str(tmp_path / 'crash.log')),
+                 PYTHONIOENCODING='utf-8', OSVANTA_CRASH_LOG=str(tmp_path / 'crash.log'),
+                 OSVANTA_APP_LOG=str(tmp_path / 'app.log')),
         capture_output=True, text=True, timeout=300,
     )
 

@@ -6,28 +6,36 @@
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
 from itertools import cycle
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import (
     Qt, QTimer, Signal, QRectF, QPointF, QSize, QByteArray, QMimeData,
-    QItemSelectionModel,
+    QItemSelectionModel, QEvent,
 )
-from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QDragEnterEvent, QDropEvent, QPen, QPainter
+from PySide6.QtGui import (
+    QAction, QBrush, QColor, QDrag, QDragEnterEvent, QDropEvent, QFont, QPen, QPainter,
+    QPalette,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QInputDialog,
     QGraphicsTextItem,
     QColorDialog,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QMenu,
     QMessageBox,
+    QSizePolicy,
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
@@ -38,7 +46,78 @@ from PySide6.QtWidgets import (
 )
 
 from core.signal_store import SignalSeries
+from gui.plot_tag import SEPARATOR, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
+
+
+# A cursor is black on a light plot background and white on a dark one.
+_CURSOR_ON_LIGHT = '#000000'
+_CURSOR_ON_DARK = '#ffffff'
+# Under the mouse a cursor turns red and thicker, which stands out against
+# either background.
+_CURSOR_HOVER_COLOR = '#ff0000'
+
+
+def _is_dark(color: str) -> bool:
+    """True for a dark plot background. An unreadable colour reads as black."""
+    c = QColor(color)
+    return (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) / 255 < 0.5
+
+
+def _cursor_color_on(background: str) -> str:
+    return _CURSOR_ON_DARK if _is_dark(background) else _CURSOR_ON_LIGHT
+
+
+def _cursor_line_font(base: QFont) -> QFont:
+    """The font of the line under the plot and of the tag beside it: a point
+    larger than the table's, so the cursor readout stands out. A font sized
+    in pixels stays as it is."""
+    font = QFont(base)
+    if base.pointSizeF() > 0:
+        font.setPointSizeF(base.pointSizeF() + 1)
+    return font
+
+
+class _CursorLine(pg.InfiniteLine):
+    """A draggable vertical cursor: Cursor 1 is solid, Cursor 2 dashed.
+
+    In the stacked layout one cursor is a separate line in every row; `group`
+    holds them all, so the mouse over any row lights up the whole cursor.
+    """
+
+    def __init__(self, label: str, label_opts: dict, color: str,
+                 dashed: bool = False) -> None:
+        style = Qt.PenStyle.DashLine if dashed else Qt.PenStyle.SolidLine
+        super().__init__(
+            angle=90, movable=True,
+            pen=pg.mkPen(color=color, width=1.5, style=style),
+            hoverPen=pg.mkPen(color=_CURSOR_HOVER_COLOR, width=3.0, style=style),
+            label=label, labelOpts={**label_opts, 'color': color},
+        )
+        self._style = style
+        self.group: list[_CursorLine] = [self]
+
+    def set_color(self, color: str) -> None:
+        """Recolour the line and its label, keeping the dash and any hover."""
+        self.pen = pg.mkPen(color=color, width=1.5, style=self._style)
+        if getattr(self, 'label', None) is not None:
+            self.label.setColor(color)
+        self._light_group()
+
+    def setMouseHover(self, hover: bool) -> None:
+        super().setMouseHover(hover)
+        self._light_group()
+
+    def _light_group(self) -> None:
+        # Lit while the mouse is over any line of the group. The mouse moving
+        # straight from one row's line to the next enters the new line before
+        # it leaves the old one, so the group is lit throughout.
+        lit = any(line.mouseHovering for line in self.group)
+        for line in self.group:
+            pen = line.hoverPen if lit else line.pen
+            if line.currentPen is not pen:
+                line.currentPen = pen
+                line.update()
 
 
 class _LeftAxis(pg.AxisItem):
@@ -369,6 +448,49 @@ class _ReorderTable(QTableWidget):
         super().mousePressEvent(event)
 
 
+class _ElidedLabel(QLabel):
+    """One line of text after a fixed prefix, shortened with "…" when it is
+    too long for the label's width.
+
+    The label never holds its layout wider than the space it is given, and
+    shows nothing, not even the prefix, while its text is empty.
+    """
+
+    def __init__(self, prefix: str = '',
+                 elide: Qt.TextElideMode = Qt.TextElideMode.ElideRight,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._prefix = prefix
+        self._elide = elide
+        self._full_text = ''
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        # Ignored: the label takes the width it is given, and its text sets
+        # no minimum width for the layout.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def full_text(self) -> str:
+        return self._full_text
+
+    def set_full_text(self, text: str) -> None:
+        self._full_text = text
+        self._fit_text()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_text()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            self._fit_text()
+
+    def _fit_text(self) -> None:
+        metrics = self.fontMetrics()
+        room = max(0, self.width() - metrics.horizontalAdvance(self._prefix))
+        text = metrics.elidedText(self._full_text, self._elide, room)
+        self.setText(self._prefix + text if text else '')
+
+
 class PlotPanel(QWidget):
     selectionChanged = Signal(str)
     signalDropped = Signal(list)
@@ -376,6 +498,12 @@ class PlotPanel(QWidget):
     backgroundColorChanged = Signal(str)
     signalColorChanged = Signal(str, str)
     signalLineStyleChanged = Signal(str, str)
+    # Time under a left click inside a plot area, except on a cursor line.
+    plotAreaClicked = Signal(float)
+    # The same for a left click with Shift held.
+    plotAreaShiftClicked = Signal(float)
+    # The user changed or removed the tag under the signal table (a PlotTag).
+    tagChanged = Signal(object)
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -394,7 +522,7 @@ class PlotPanel(QWidget):
         super().__init__(parent)
         self._items: dict[str, PlottedSignal] = {}
         self._current_key: str | None = None
-        self._cursor_label_base = 'Cursor: move mouse over plot'
+        self._cursor_label_base = 'Click the plot to place Cursor 1'
         self._show_points = False
         self._hide_lines = False
         # Adaptive-point machinery: a single-shot debounce timer coalesces the
@@ -418,6 +546,10 @@ class PlotPanel(QWidget):
         self._stacked_c1_lines: list[pg.InfiniteLine] = []
         self._stacked_c2_lines: list[pg.InfiniteLine] = []
         self._proxy = None          # legacy name kept; now stores the connected scene
+        # Whether these hooks are connected now. They are connected only in
+        # some plot modes, and disconnecting one that is not makes PySide6 warn.
+        self._multi_axis_resize_hooked = False
+        self._stacked_click_hooked = False
         self._row_lookup: dict[str, int] = {}   # key → table row; rebuilt by _refresh_table
         self._color_cycle = cycle([
             '#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00',
@@ -433,7 +565,7 @@ class PlotPanel(QWidget):
         # loaded before the measurement finishes decoding, so the style has to
         # survive until add_series() sees the key. Entries are consumed on use.
         self._pending_line_styles: dict[str, str] = {}
-        self._cursor1_enabled: bool = True   # mirrors button default
+        self._cursor1_enabled: bool = True   # MainWindow syncs it to its Cursor 1 button
         # Signal name display flags (default: signal name only)
         self._name_show_channel: bool = False
         self._name_show_message: bool = False
@@ -502,22 +634,21 @@ class PlotPanel(QWidget):
         self.view_stack.addWidget(self.plot_host)   # index 0 – normal
         self.view_stack.addWidget(self.glw)          # index 1 – stacked
 
-        # ── Status / hint labels ──────────────────────────────────────────
-        self.drop_hint = QLabel(
-            'Drag signal(s) here, double-click them, or right-click and choose Plot selected signal(s)'
-        )
+        # ── Cursor readout ────────────────────────────────────────────────
+        # How to plot signals is told on the empty plot, so no hint line
+        # under the plot repeats it.
         self.cursor_label = QLabel(self._cursor_label_base)
-        self.cursor2_label = QLabel('')
-        self.drop_hint.hide()
+        self.cursor_label.setFont(_cursor_line_font(self.font()))
         self.cursor_label.hide()
-        self.cursor2_label.hide()
+        # On the cursor line, after the readout: which file the plotted
+        # signals come from. A long name keeps its start and its extension.
+        self.file_name_label = _ElidedLabel(SEPARATOR, Qt.TextElideMode.ElideMiddle)
+        self.file_name_label.setFont(self.cursor_label.font())
+        self.file_name_label.hide()
 
         # ── Cursor 1: draggable vertical line (ON by default) ─────────────
-        self.v_line = pg.InfiniteLine(
-            angle=90, movable=True,
-            pen=pg.mkPen(color='#0000ff', width=1.5),
-            label='C1', labelOpts={'color': '#0000ff', 'position': 0.95}
-        )
+        self.v_line = _CursorLine('C1', {'position': 0.95},
+                                  _cursor_color_on(self._background_color))
         self.h_line = pg.InfiniteLine(angle=0, movable=False,
                                       pen=pg.mkPen(color='#555', width=1))
         self.v_line.sigPositionChanged.connect(self._on_cursor1_moved)
@@ -525,11 +656,9 @@ class PlotPanel(QWidget):
         self.plot.addItem(self.h_line, ignoreBounds=True)
 
         # ── Cursor 2: draggable, off by default ──────────────────────────
-        self.v_line2 = pg.InfiniteLine(
-            angle=90, movable=True,
-            pen=pg.mkPen(color='#0000ff', width=1.5, style=Qt.PenStyle.DashLine),
-            label='C2', labelOpts={'color': '#0000ff', 'position': 0.85}
-        )
+        self.v_line2 = _CursorLine('C2', {'position': 0.85},
+                                   _cursor_color_on(self._background_color),
+                                   dashed=True)
         self.v_line2.sigPositionChanged.connect(self._on_cursor2_moved)
         # v_line2 not added to plot until cursor 2 is enabled
 
@@ -571,7 +700,32 @@ class PlotPanel(QWidget):
         self.table_panel = QWidget()
         _tbl_layout = QVBoxLayout(self.table_panel)
         _tbl_layout.setContentsMargins(0, 0, 0, 0)
+        _tbl_layout.setSpacing(0)
         _tbl_layout.addWidget(self.table, stretch=1)
+        # As tall as what lies under the plot, its margin and the cursor
+        # line, so the table ends level with the plot.
+        self._table_bottom_gap = QWidget()
+        self._table_bottom_gap.setObjectName('tableBottomGap')
+        self._table_bottom_gap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self._table_bottom_gap.setFixedHeight(0)
+        _tbl_layout.addWidget(self._table_bottom_gap)
+        # The user's tag, on the cursor line's level. A double-click on the
+        # strip, or its right-click menu, edits it.
+        self._tag = PlotTag()
+        self.tag_label = _ElidedLabel()
+        self.tag_label.setObjectName('plotTag')
+        self.tag_label.setFont(self.cursor_label.font())
+        self.tag_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.tag_label.hide()
+        self._tag_layout = QHBoxLayout(self._table_bottom_gap)
+        self._tag_layout.setSpacing(0)
+        self._tag_layout.addWidget(self.tag_label)
+        self._table_bottom_gap.installEventFilter(self)
+        # A tag with the date shows the new date from midnight on.
+        self._tag_date_timer = QTimer(self)
+        self._tag_date_timer.setSingleShot(True)
+        self._tag_date_timer.timeout.connect(self._show_tag)
+        self._show_tag()
         # Drag-and-drop onto the signal table:
         #   • Internal drags (row reorder) use _ReorderTable.startDrag → custom MIME
         #   • External drags (from SignalTreeWidget) use SignalTreeWidget.MIME_TYPE
@@ -605,9 +759,18 @@ class PlotPanel(QWidget):
         _root = QVBoxLayout(self)
         _root.setContentsMargins(4, 4, 4, 4)
         _root.addWidget(self.view_stack, stretch=1)
-        _root.addWidget(self.drop_hint)
-        _root.addWidget(self.cursor_label)
-        _root.addWidget(self.cursor2_label)
+        # The cursor line keeps a line's height under the empty plot, but no
+        # width. Plotting the first signals then resizes neither the plot nor
+        # the table beside it, which would draw every stacked row once more.
+        self._cursor_line = QWidget()
+        self._cursor_line.setMinimumHeight(self.cursor_label.sizeHint().height())
+        _cursor_line = QHBoxLayout(self._cursor_line)
+        _cursor_line.setContentsMargins(0, 0, 0, 0)
+        _cursor_line.setSpacing(0)
+        _cursor_line.addWidget(self.cursor_label)
+        _cursor_line.addWidget(self.file_name_label, stretch=1)
+        _root.addWidget(self._cursor_line)
+        self.view_stack.installEventFilter(self)
 
         self._setup_mouse_proxy()
         self._update_empty_state_ui()
@@ -1075,36 +1238,67 @@ class PlotPanel(QWidget):
             return 0.0
 
     def set_cursor1_enabled(self, enabled: bool) -> None:
-        """Show/hide Cursor 1. When turned ON, always centres it in the current view."""
+        """Show/hide Cursor 1 and its table column. When turned ON, always
+        centres it in the current view."""
         self._cursor1_enabled = bool(enabled)
-        cx = self._current_view_centre()
+        self.table.setColumnHidden(2, not enabled)
+        self._show_cursor1_lines()
         if enabled:
-            self.v_line.setPos(cx)
-            if self._stacked_mode:
-                # Stacked: show/move per-row lines; label only on bottom row
-                last = len(self._stacked_c1_lines) - 1
-                for i, line in enumerate(self._stacked_c1_lines):
-                    line.setPos(cx)
-                    line.setPen(pg.mkPen(color='#0000ff', width=1.5))
-                    if hasattr(line, 'label') and line.label is not None:
-                        line.label.setVisible(i == last)
-            else:
-                # Normal/multi-axis: v_line lives in self.plot only
-                try: self.plot.addItem(self.v_line, ignoreBounds=True)
-                except Exception: pass
-            if self._items:
-                self._update_table_values(cx, col=2)
+            self.move_cursor1(self._current_view_centre())
         else:
-            if self._stacked_mode:
-                # Hide by making invisible (don't remove — rebuild re-adds them)
-                for line in self._stacked_c1_lines:
-                    line.setPen(pg.mkPen(color='#00000000', width=0))
-                    if hasattr(line, 'label') and line.label is not None:
-                        line.label.setVisible(False)
-            else:
-                try: self.plot.removeItem(self.v_line)
-                except Exception: pass
+            self._update_cursor_labels()
+
+    def _show_cursor1_lines(self) -> None:
+        """Show or hide every Cursor 1 line to match _cursor1_enabled.
+
+        Hidden rather than removed or drawn with a transparent pen: a hidden
+        line takes no hover or drag, where a transparent one still turned red
+        under the mouse and could be dragged while Cursor 1 was off.
+        """
+        for line in (self.v_line, *self._stacked_c1_lines):
+            line.setVisible(self._cursor1_enabled)
+
+    def move_cursor1(self, x: float) -> None:
+        """Put Cursor 1 at time x in every layout and refresh its values."""
+        self.v_line.blockSignals(True)
+        self.v_line.setPos(x)
+        self.v_line.blockSignals(False)
+        self._syncing_c1 = True
+        try:
+            for line in self._stacked_c1_lines:
+                line.setPos(x)
+        finally:
+            self._syncing_c1 = False
+        if self._items:
+            self._update_table_values(x, col=2)
         self._update_cursor_labels()
+
+    def move_cursor2(self, x: float) -> None:
+        """Put Cursor 2 at time x in every layout and refresh its values."""
+        self.v_line2.blockSignals(True)
+        self.v_line2.setPos(x)
+        self.v_line2.blockSignals(False)
+        self._syncing_c2 = True
+        try:
+            for line in self._stacked_c2_lines:
+                line.setPos(x)
+        finally:
+            self._syncing_c2 = False
+        if self._items and self._cursor2_enabled:
+            self._update_table_values(x, col=3)
+        self._update_cursor_labels()
+
+    def _bring_cursors_into(self, x_min: float, x_max: float) -> None:
+        """Move a cursor that lies outside [x_min, x_max] into it.
+
+        After an earlier, longer recording a cursor can be left far past the
+        end of the one now plotted, out of view.
+        """
+        width = x_max - x_min
+        if not x_min <= self.v_line.value() <= x_max:
+            self.move_cursor1(x_min + width / 2)
+        if not x_min <= self.v_line2.value() <= x_max:
+            self.move_cursor2(x_min + width * 0.6)
 
     def set_cursor2_enabled(self, enabled: bool) -> None:
         """Show/hide Cursor 2. When turned ON, always centres it in the current view."""
@@ -1117,21 +1311,18 @@ class PlotPanel(QWidget):
                 xr = self.plot.plotItem.vb.viewRange()[0]
         except Exception:
             xr = [0.0, 10.0]
-        span = max(abs(xr[1] - xr[0]) * 0.1, 0.5)
-        cx2 = cx + span
+        # A tenth of the visible width right of the centre keeps Cursor 2 in
+        # view however short or long the visible section is.
+        cx2 = cx + abs(xr[1] - xr[0]) * 0.1
         self.v_line2.setPos(cx2)
         if enabled:
             if self._stacked_mode:
                 # Rebuild stacked rows with C2 lines (triggers _rebuild_curves)
                 # If lines already exist, just show them
                 if self._stacked_c2_lines:
-                    last2 = len(self._stacked_c2_lines) - 1
-                    for i, line in enumerate(self._stacked_c2_lines):
+                    for line in self._stacked_c2_lines:
                         line.setPos(cx2)
-                        line.setPen(pg.mkPen(color='#0000ff', width=1.5,
-                                             style=Qt.PenStyle.DashLine))
-                        if hasattr(line, 'label') and line.label is not None:
-                            line.label.setVisible(i == last2)
+                        line.setVisible(True)
                 else:
                     # Rebuild to add C2 lines to all rows
                     self._rebuild_curves(preserve_selection=True)
@@ -1143,15 +1334,13 @@ class PlotPanel(QWidget):
                 self._update_table_values(cx2, col=3)
         else:
             if self._stacked_mode:
+                # Hidden, not drawn transparent, so it takes no hover or drag.
                 for line in self._stacked_c2_lines:
-                    line.setPen(pg.mkPen(color='#00000000', width=0))
-                    if hasattr(line, 'label') and line.label is not None:
-                        line.label.setVisible(False)
+                    line.setVisible(False)
             else:
                 try: self.plot.removeItem(self.v_line2)
                 except Exception: pass
             self.table.setColumnHidden(3, True)
-            self.cursor2_label.hide()
         self._update_cursor_labels()
 
     def set_stacked(self, enabled: bool) -> None:
@@ -1313,10 +1502,9 @@ class PlotPanel(QWidget):
 
     def _clear_rendered_items(self) -> None:
         # Disconnect resize hook before clearing
-        try:
+        if self._multi_axis_resize_hooked:
             self.plot.plotItem.vb.sigResized.disconnect(self._update_multi_axis_views)
-        except Exception:
-            pass
+            self._multi_axis_resize_hooked = False
 
         # Stop listening for X-range changes and cancel any pending point
         # recompute — the ViewBoxes and scatters are about to be destroyed.
@@ -1363,12 +1551,10 @@ class PlotPanel(QWidget):
         _saved_c2 = self.v_line2.value() if (self._cursor2_enabled and hasattr(self, 'v_line2')) else 0.0
 
         # Recreate draggable cursor lines preserving movable=True
-        self.v_line = pg.InfiniteLine(
-            angle=90, movable=True,
-            pen=pg.mkPen(color='#0000ff', width=1.5),
-            label='C1', labelOpts={'color': '#0000ff', 'position': 0.95}
-        )
+        self.v_line = _CursorLine('C1', {'position': 0.95},
+                                  _cursor_color_on(self._background_color))
         self.v_line.setPos(_saved_c1)   # restore position immediately
+        self.v_line.setVisible(self._cursor1_enabled)
         self.h_line = pg.InfiniteLine(angle=0, movable=False,
                                       pen=pg.mkPen(color='#555', width=1))
         self.v_line.sigPositionChanged.connect(self._on_cursor1_moved)
@@ -1380,21 +1566,18 @@ class PlotPanel(QWidget):
                 self.v_line2.sigPositionChanged.disconnect()
             except Exception:
                 pass
-            self.v_line2 = pg.InfiniteLine(
-                angle=90, movable=True,
-                pen=pg.mkPen(color='#0000ff', width=1.5, style=Qt.PenStyle.DashLine),
-                label='C2', labelOpts={'color': '#0000ff', 'position': 0.85}
-            )
+            self.v_line2 = _CursorLine('C2', {'position': 0.85},
+                                       _cursor_color_on(self._background_color),
+                                       dashed=True)
             self.v_line2.setPos(_saved_c2)  # restore position immediately
             self.v_line2.sigPositionChanged.connect(self._on_cursor2_moved)
             self.plot.addItem(self.v_line2, ignoreBounds=True)
 
         # Clear stacked items
         # Fix 2: disconnect stacked right-click before clearing scene
-        try:
+        if self._stacked_click_hooked:
             self.glw.scene().sigMouseClicked.disconnect(self._on_stacked_scene_click)
-        except Exception:
-            pass
+            self._stacked_click_hooked = False
         self._stacked_vlines.clear()
         self._stacked_c1_lines.clear()  # per-row C1 lines (each row owns its instance)
         self._stacked_c2_lines.clear()  # per-row C2 lines
@@ -1766,7 +1949,9 @@ class PlotPanel(QWidget):
                 # branch), so schedule the anchor now in case setWidth() doesn't fire
                 # a resizeEvent (e.g. same width after signal reorder).
                 QTimer.singleShot(0, main_axis._apply_title_pos)
-            self.plot.plotItem.vb.sigResized.connect(self._update_multi_axis_views)
+            if not self._multi_axis_resize_hooked:
+                self.plot.plotItem.vb.sigResized.connect(self._update_multi_axis_views)
+                self._multi_axis_resize_hooked = True
             QTimer.singleShot(10, self._update_multi_axis_views)
         else:
             if isinstance(main_axis, _LeftAxis):
@@ -1855,38 +2040,44 @@ class PlotPanel(QWidget):
             # A QGraphicsItem can only belong to ONE scene — sharing across
             # GLW rows causes crashes. Sync is done in _on_stacked_c1/c2_moved.
             _c1_label     = 'C1' if idx == n - 1 else ''
-            _c1_labelOpts = {'color': '#0000ff', 'position': 0.95} if idx == n - 1 else {}
-            c1 = pg.InfiniteLine(
-                angle=90, movable=True,
-                pen=pg.mkPen(color='#0000ff', width=1.5),
-                label=_c1_label, labelOpts=_c1_labelOpts
-            )
+            _c1_labelOpts = {'position': 0.95} if idx == n - 1 else {}
+            c1 = _CursorLine(_c1_label, _c1_labelOpts,
+                             _cursor_color_on(self._background_color))
             c1.setPos(self.v_line.value())
             c1.sigPositionChanged.connect(self._on_stacked_c1_moved)
             # Respect current cursor1 toggle state on rebuild
-            c1_enabled = getattr(self, '_cursor1_enabled', True)
-            if not c1_enabled:
-                c1.setPen(pg.mkPen(color='#00000000', width=0))
-                if hasattr(c1, 'label') and c1.label is not None:
-                    c1.label.setVisible(False)
+            c1.setVisible(self._cursor1_enabled)
             p.addItem(c1, ignoreBounds=True)
             self._stacked_c1_lines.append(c1)
 
             if self._cursor2_enabled:
                 _c2_label     = 'C2' if idx == n - 1 else ''
-                _c2_labelOpts = {'color': '#0000ff', 'position': 0.85} if idx == n - 1 else {}
-                c2 = pg.InfiniteLine(
-                    angle=90, movable=True,
-                    pen=pg.mkPen(color='#0000ff', width=1.5,
-                                 style=Qt.PenStyle.DashLine),
-                    label=_c2_label, labelOpts=_c2_labelOpts
-                )
+                _c2_labelOpts = {'position': 0.85} if idx == n - 1 else {}
+                c2 = _CursorLine(_c2_label, _c2_labelOpts,
+                                 _cursor_color_on(self._background_color), dashed=True)
                 c2.setPos(self.v_line2.value())
                 c2.sigPositionChanged.connect(self._on_stacked_c2_moved)
                 p.addItem(c2, ignoreBounds=True)
                 self._stacked_c2_lines.append(c2)
 
             self._stacked_plots.append(p)
+
+        # Each cursor's row lines light up together under the mouse.
+        for lines in (self._stacked_c1_lines, self._stacked_c2_lines):
+            for line in lines:
+                line.group = list(lines)
+        self._lay_out_stacked_rows()
+
+    def _lay_out_stacked_rows(self) -> None:
+        """Lay the stacked rows out at their final size now.
+
+        A new row's axes get their size inside the row's own layout, which
+        Qt otherwise runs only after the rows have been drawn once. Drawn at
+        the old size, every row was drawn again.
+        """
+        for plot in self._stacked_plots:
+            plot.layout.activate()
+        self.glw.ci.layout.activate()
 
     # ── Curve configuration & style ──────────────────────────────────────
 
@@ -2185,11 +2376,9 @@ class PlotPanel(QWidget):
         scene.sigMouseMoved.connect(self._mouse_moved)
         self._proxy = scene   # keep ref so we can disconnect on next rebuild
         # Fix 2: connect right-click handler for stacked mode
-        if self._stacked_mode and self._stacked_plots:
-            try:
-                self.glw.scene().sigMouseClicked.connect(self._on_stacked_scene_click)
-            except Exception:
-                pass
+        if self._stacked_mode and self._stacked_plots and not self._stacked_click_hooked:
+            self.glw.scene().sigMouseClicked.connect(self._on_stacked_scene_click)
+            self._stacked_click_hooked = True
 
     # ── Cursor handlers ──────────────────────────────────────────────────────
 
@@ -2260,15 +2449,17 @@ class PlotPanel(QWidget):
 
     def _update_cursor_labels(self) -> None:
         x1 = self.v_line.value()
-        txt = f'C1: t={x1:.4f} s'
-        if self._cursor2_enabled:
-            x2   = self.v_line2.value()
+        x2 = self.v_line2.value()
+        if self._cursor1_enabled and self._cursor2_enabled:
+            # A time delta needs both cursors on the plot.
             dt   = abs(x2 - x1)
-            txt += f'   |   C2: t={x2:.4f} s   |   ΔT={dt:.4f} s'
-            self.cursor2_label.setText(f'Time delta = {dt:.4f} s  (C1={x1:.4f} s  C2={x2:.4f} s)')
-            self.cursor2_label.show()
+            txt = f'C1: t={x1:.4f} s   |   C2: t={x2:.4f} s   |   ΔT={dt:.4f} s'
+        elif self._cursor1_enabled:
+            txt = f'C1: t={x1:.4f} s'
+        elif self._cursor2_enabled:
+            txt = f'C2: t={x2:.4f} s'
         else:
-            self.cursor2_label.hide()
+            txt = self._cursor_label_base
         self.cursor_label.setText(txt)
 
     # ── Mouse cursor (hover tracking for h-line only) ─────────────────────
@@ -2331,13 +2522,19 @@ class PlotPanel(QWidget):
         x_min, x_max = min(all_ts), max(all_ts)
         if x_min == x_max:
             x_max += 1.0
+        self._bring_cursors_into(x_min, x_max)
 
         if self._stacked_mode:
+            if self._stacked_plots:
+                # Row 0 only; the link carries it to the other rows. A row
+                # just added is not laid out yet, and setting the range on it
+                # would reach row 0 shifted by its stale geometry, hiding the
+                # start of the recording.
+                self._stacked_plots[0].setXRange(x_min, x_max, padding=0.02)
             for i, row_keys in enumerate(self._stacked_row_keys):
                 if i >= len(self._stacked_plots):
                     break
                 p = self._stacked_plots[i]
-                p.setXRange(x_min, x_max, padding=0.02)
                 vals = [
                     value
                     for key in row_keys
@@ -2586,6 +2783,10 @@ class PlotPanel(QWidget):
         self.plot.setBackground(color)
         self.glw.setBackground(color)
         self._apply_panel_background()
+        cursor_color = _cursor_color_on(color)
+        for line in (self.v_line, self.v_line2,
+                     *self._stacked_c1_lines, *self._stacked_c2_lines):
+            line.set_color(cursor_color)
         self.table.viewport().update()
         self.backgroundColorChanged.emit(color)
 
@@ -2602,13 +2803,19 @@ class PlotPanel(QWidget):
         self.overlay_label.setText(text)
         self.overlay_label.setVisible(bool(text))
 
+    def set_measurement_file(self, path: str | None) -> None:
+        """Name, after the cursor readout, the file the plotted signals come
+        from; None or '' names none. The full path is the label's tooltip."""
+        self.file_name_label.set_full_text(Path(path).name if path else '')
+        self.file_name_label.setToolTip(path or '')
+        self.file_name_label.setVisible(bool(self._items) and bool(path))
+
     def _update_empty_state_ui(self) -> None:
         has_items = bool(self._items)
         self.overlay_label.setVisible((not has_items) and bool(self.overlay_label.text()))
-        self.drop_hint.setVisible(has_items)
         self.cursor_label.setVisible(has_items)
-        if not has_items:
-            self.cursor2_label.hide()
+        self.file_name_label.setVisible(has_items and bool(self.file_name_label.full_text()))
+        self._show_tag()
         if has_items and self._stacked_mode:
             self.view_stack.setCurrentIndex(1)
         else:
@@ -2798,7 +3005,8 @@ class PlotPanel(QWidget):
         """_refresh_table() blanks the Cursor 1/2 columns for every row —
         repopulate them from the current cursor positions afterward."""
         self._refresh_table()
-        self._update_table_values(self.v_line.value(), col=2)
+        if self._cursor1_enabled:
+            self._update_table_values(self.v_line.value(), col=2)
         if self._cursor2_enabled:
             self._update_table_values(self.v_line2.value(), col=3)
 
@@ -2911,7 +3119,6 @@ class PlotPanel(QWidget):
         self._current_key = None
         self.plot.setLabel('left', 'Value')
         self.cursor_label.setText(self._cursor_label_base)
-        self.cursor2_label.hide()
         self._update_empty_state_ui()
         self.plot.enableAutoRange()
         self.plot.autoRange()
@@ -3705,6 +3912,7 @@ class PlotPanel(QWidget):
             self.table.setCurrentCell(-1, -1)
             self.table.blockSignals(False)
             self._refresh_highlight()
+            self._emit_plot_area_click(event, [p.vb for p in self._stacked_plots])
             return
         if btn != Qt.MouseButton.RightButton:
             return
@@ -3750,6 +3958,30 @@ class PlotPanel(QWidget):
         self.table.setCurrentCell(-1, -1)
         self.table.blockSignals(False)
         self._refresh_highlight()
+        self._emit_plot_area_click(event, [self.plot.plotItem.vb])
+
+    def _emit_plot_area_click(self, event, view_boxes) -> None:
+        """Emit plotAreaClicked, or plotAreaShiftClicked with Shift held, with
+        the time under a left click in one of view_boxes. A click on a cursor
+        line is left alone, since it is the start of a drag that never moved;
+        one cursor would otherwise jump onto the other."""
+        if not self._items:
+            return
+        pos = event.scenePos()
+        for vb in view_boxes:
+            if not vb.sceneBoundingRect().contains(pos):
+                continue
+            for item in vb.scene().items(pos):
+                while item is not None:   # a line's label is its child
+                    if isinstance(item, pg.InfiniteLine) and item.movable:
+                        return
+                    item = item.parentItem()
+            x = vb.mapSceneToView(pos).x()
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.plotAreaShiftClicked.emit(x)
+            else:
+                self.plotAreaClicked.emit(x)
+            return
 
     def _install_plot_background_menu(self) -> None:
         pi   = getattr(self.plot, 'plotItem', None)
@@ -3784,33 +4016,144 @@ class PlotPanel(QWidget):
 
     def _theme_colors(self) -> dict:
         """Return palette dict used by _CheckDelegate for theme-aware checkbox colours."""
-        bg = self._background_color.lstrip('#')
-        try:
-            r, g, b = int(bg[0:2], 16), int(bg[2:4], 16), int(bg[4:6], 16)
-            lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-        except (ValueError, IndexError):
-            lum = 0.0
-        if lum < 0.5:
+        if _is_dark(self._background_color):
             return {'check_border': '#808080', 'check_bg': '#2a2a2a', 'check_mark': '#ffffff'}
         return {'check_border': '#606060', 'check_bg': '#ffffff', 'check_mark': '#101010'}
 
+    @staticmethod
+    def _header_colors() -> tuple[str, str, str]:
+        """Background, text and border of the signal table's header.
+
+        The header follows the application's light or dark theme, not the
+        plot background: the window colour, like the plot buttons level with
+        it, and the window's text colour, so black in light mode and white in
+        dark mode.
+        """
+        palette = QApplication.palette()
+        window = palette.color(QPalette.ColorRole.Window)
+        text = palette.color(QPalette.ColorRole.WindowText)
+        # A fifth of the way from the window colour to the text colour.
+        border = QColor(*(round(w + (t - w) * 0.2) for w, t in (
+            (window.red(), text.red()), (window.green(), text.green()),
+            (window.blue(), text.blue()))))
+        return window.name(), text.name(), border.name()
+
+    def eventFilter(self, watched, event) -> bool:
+        # The garbage collector empties a panel caught in a reference cycle
+        # before Qt deletes it, and the children it watches still send their
+        # last events here while Qt does.
+        if not self.__dict__:
+            return False
+        if watched is self.view_stack and event.type() in (QEvent.Type.Resize,
+                                                           QEvent.Type.Move):
+            self._match_table_bottom_to_plot()
+        elif watched is self._table_bottom_gap:
+            if (event.type() == QEvent.Type.MouseButtonDblClick
+                    and event.button() == Qt.MouseButton.LeftButton):
+                self.edit_tag()
+                return True
+            if event.type() == QEvent.Type.ContextMenu:
+                self._show_tag_menu(event.globalPos())
+                return True
+        return super().eventFilter(watched, event)
+
+    def _match_table_bottom_to_plot(self) -> None:
+        # The table and this panel both reach the bottom of the main
+        # window's splitter, so the space under the plot here is the space
+        # to leave under the table.
+        plot = self.view_stack.geometry()
+        self._table_bottom_gap.setFixedHeight(max(0, self.height() - plot.y() - plot.height()))
+        # The tag lies as far under the table as the cursor line under the
+        # plot, and as tall, so the two read as one line.
+        root = self.layout()
+        margins = root.contentsMargins()
+        self._tag_layout.setContentsMargins(
+            margins.left(), root.spacing(), margins.right(), margins.bottom())
+
+    # ── Tag ───────────────────────────────────────────────────────────────
+
+    def tag(self) -> PlotTag:
+        return self._tag
+
+    def set_tag(self, tag: PlotTag) -> None:
+        self._tag = tag
+        self._show_tag()
+
+    def edit_tag(self) -> None:
+        dialog = PlotTagDialog(self._tag, self)
+        if dialog.exec() and dialog.tag() != self._tag:
+            self.set_tag(dialog.tag())
+            self.tagChanged.emit(self._tag)
+
+    def _remove_tag(self) -> None:
+        self.set_tag(PlotTag())
+        self.tagChanged.emit(self._tag)
+
+    def _tag_menu(self) -> QMenu:
+        has_tag = self._tag != PlotTag()
+        menu = QMenu(self)
+        menu.addAction('Edit Tag…' if has_tag else 'Add Tag…', self.edit_tag)
+        if has_tag:
+            menu.addAction('Remove Tag', self._remove_tag)
+        return menu
+
+    def _show_tag_menu(self, global_pos) -> None:
+        self._tag_menu().exec(global_pos)
+
+    def _show_tag(self) -> None:
+        text = self._tag.compose(current_user_name(), datetime.date.today())
+        self.tag_label.set_full_text(text)
+        self.tag_label.setVisible(bool(self._items) and bool(text))
+        self._table_bottom_gap.setToolTip(
+            'Double-click to edit the tag' if text
+            else 'Double-click to add a tag: your text, user name or the date')
+        self._tag_date_timer.stop()
+        if self._tag.date:
+            now = datetime.datetime.now()
+            midnight = datetime.datetime.combine(
+                now.date() + datetime.timedelta(days=1), datetime.time())
+            # A second past midnight, so the new day has begun.
+            self._tag_date_timer.start(int((midnight - now).total_seconds() * 1000) + 1000)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        # A switch between light and dark mode while the application runs.
+        # None until the panel is built and styled for the first time.
+        applied = getattr(self, '_applied_header_colors', None)
+        if (event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange)
+                and applied is not None and self._header_colors() != applied):
+            self._apply_panel_background()
+
     def _apply_panel_background(self) -> None:
         bg = self._background_color
-        # Fix 3: header always grey/black — immune to plot background colour changes
+        header_bg, header_text, header_border = self._applied_header_colors = self._header_colors()
+        # No frame, and no line above or left of the header: the table sits
+        # flush in the panel's top-left corner, and the header row, the window
+        # colour across the panel's width, joins the window around it as the
+        # plot buttons' row beside it does. A frame would be painted in the
+        # plot background, a dark ring around the header on a dark plot.
         self.table_panel.setStyleSheet(f'''
             QWidget {{ background-color: {bg}; }}
             QLabel  {{ background-color: {bg}; color: white; }}
             QTableWidget {{
                 background-color: {bg};
                 alternate-background-color: {bg};
-                gridline-color: #444444;
+                gridline-color: {header_border};
                 color: white;
                 selection-background-color: #2d4f7c;
+                border: none;
             }}
+            QHeaderView, QWidget#tableBottomGap {{
+                background-color: {header_bg};
+                border: none;
+            }}
+            QLabel#plotTag {{ background-color: {header_bg}; color: {header_text}; }}
             QHeaderView::section {{
-                background-color: #4a4a4a;
-                color: #000000;
-                border: 1px solid #333333;
+                background-color: {header_bg};
+                color: {header_text};
+                border: none;
+                border-right: 1px solid {header_border};
+                border-bottom: 1px solid {header_border};
                 font-weight: bold;
                 padding: 3px;
             }}

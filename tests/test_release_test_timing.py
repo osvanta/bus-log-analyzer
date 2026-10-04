@@ -341,7 +341,8 @@ def test_the_timing_scenarios_time_a_real_run(tmp_path, blf_path, sample_dbc_pat
          '--known-good', str(known), '--quit-when-done'],
         cwd=REPO_ROOT,
         env=dict(os.environ, QT_QPA_PLATFORM='offscreen', PYTHONPATH=str(REPO_ROOT),
-                 PYTHONIOENCODING='utf-8', OSVANTA_CRASH_LOG=str(tmp_path / 'crash.log')),
+                 PYTHONIOENCODING='utf-8', OSVANTA_CRASH_LOG=str(tmp_path / 'crash.log'),
+                 OSVANTA_APP_LOG=str(tmp_path / 'app.log')),
         capture_output=True, text=True, timeout=300,
     )
 

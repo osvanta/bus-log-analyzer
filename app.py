@@ -32,6 +32,12 @@ def main() -> int:
     from gui.crash_log import CrashLog
     crash_log = CrashLog(app)  # noqa: F841 — alive until exit
 
+    # The application opens no console: what one would have shown, and every
+    # line of the Log panel, goes to a log file instead. After the crash log,
+    # which takes over the C runtime's stderr only while sys.stderr is missing.
+    from gui.app_log import AppLog
+    app_log = AppLog(APP_NAME, APP_VERSION)  # noqa: F841 — alive until exit
+
     # Before any worker thread exists: an automatic collection on a worker
     # thread destroys discarded plot items there and crashes Qt.
     from gui.gc_guard import GuiThreadGarbageCollector

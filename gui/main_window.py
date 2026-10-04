@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -67,8 +67,13 @@ from core.bus_types import (
     sort_key,
 )
 from core.channel_config import ChannelConfig
+from gui import app_log
 from gui.dbc_manager import DBCManagerDialog
+from gui.edge_tab import EdgeTab
 from core.signal_store import SignalStore
+from gui.overflow_row import OverflowButtonRow
+from gui.plot_icons import icon_button
+from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
 from gui.plot_widget import PlotPanel
 from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
@@ -192,11 +197,14 @@ class MainWindow(QMainWindow):
         self._temporary_plot_config_path = (
             self._application_root() / 'osvanta_temp_plot_config.json'
         )
+        # The user's own settings, such as the tag under the signal table.
+        self._user_settings_path = (
+            self._application_root() / 'osvanta_user_settings.json'
+        )
         # Store keys plotted by the most recent plot_finding() call — cleared
         # and replaced (not accumulated) on each subsequent finding click.
         self._finding_plot_keys: set[str] = set()
         self._raw_frame_dialog = None
-        self._log_file_path = Path(__file__).resolve().parents[1] / 'osvanta_dev.log'
         # Set when the window is closed while a worker thread still runs:
         # the window is hidden, results still arriving are dropped, and the
         # close is retried until the last thread has stopped.
@@ -245,7 +253,8 @@ class MainWindow(QMainWindow):
             install_shortcut(self)
 
         self._log(f'{self.app_name} {self.version} started.')
-        self._log(f'Dev log file: {self._log_file_path}')
+        if app_log.log_path() is not None:
+            self._log(f'App log file: {app_log.log_path()}')
         self._update_measurement_tab()
 
     def _splash_status(self, message: str) -> None:
@@ -275,12 +284,15 @@ class MainWindow(QMainWindow):
         self.plot_panel.backgroundColorChanged.connect(self._on_background_color_changed)
         self.plot_panel.signalColorChanged.connect(self._on_signal_color_changed)
         self.plot_panel.signalLineStyleChanged.connect(self._on_signal_line_style_changed)
+        self.plot_panel.plotAreaClicked.connect(self._place_cursor1)
+        self.plot_panel.plotAreaShiftClicked.connect(self._place_cursor2)
+        self.plot_panel.set_tag(load_plot_tag(self._user_settings_path))
+        self.plot_panel.tagChanged.connect(self._save_plot_tag)
 
-        button_row = QWidget()
-        button_layout = QHBoxLayout(button_row)
-        button_layout.setContentsMargins(0, 0, 0, 0)
-        self.btn_fit = QPushButton('Fit to Window')
-        self.btn_fit_v = QPushButton('Fit Vertical')
+        self.plot_button_row = OverflowButtonRow()
+        self.btn_fit = icon_button('fit_window', 'Fit to Window', 'Fit to Window (F)')
+        self.btn_fit_v = icon_button('fit_vertical', 'Fit Vertical',
+                                     'Fit Vertical (V): fit the height, keep the time range')
         self.btn_multi_axis = QPushButton('Multi-Axis')
         self.btn_multi_axis.setCheckable(True)
         self.btn_stacked = QPushButton('Stacked')
@@ -288,21 +300,28 @@ class MainWindow(QMainWindow):
         self.btn_stacked.setChecked(True)  # default plot mode on app startup
         self.btn_multistack = QPushButton('MultiStack')
         self.btn_multistack.setCheckable(True)
-        self.btn_cursor1 = QPushButton('Cursor 1')
+        self.btn_cursor1 = icon_button('cursor1', 'Cursor 1',
+                                       'Cursor 1, or click the plot to place it')
         self.btn_cursor1.setCheckable(True)
         self.btn_cursor1.setChecked(False)  # OFF by default
-        self.btn_cursor2 = QPushButton('Cursor 2')
+        self.btn_cursor2 = icon_button('cursor2', 'Cursor 2',
+                                       'Cursor 2, or Shift+click the plot to place it')
         self.btn_cursor2.setCheckable(True)
-        self.btn_points = QPushButton('Show Data Points')
+        self.btn_points = icon_button('points', 'Show Data Points', 'Show Data Points')
         self.btn_points.setCheckable(True)
-        self.btn_hide_line = QPushButton('Hide Line')
+        self.btn_hide_line = icon_button('hide_line', 'Hide Line',
+                                         'Hide Line: the data points only, once they are shown')
         self.btn_hide_line.setCheckable(True)
         self.btn_hide_line.setEnabled(False)
-        for btn in (self.btn_fit, self.btn_fit_v, self.btn_multi_axis,
-                    self.btn_stacked, self.btn_multistack, self.btn_cursor1,
+        # The plot modes, which keep their text, then the icon buttons.
+        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack):
+            self.plot_button_row.add_button(btn)
+        self.plot_button_row.add_gap(18)
+        for btn in (self.btn_fit, self.btn_fit_v, self.btn_cursor1,
                     self.btn_cursor2, self.btn_points, self.btn_hide_line):
-            button_layout.addWidget(btn)
-        button_layout.addStretch(1)
+            # As tall as the text buttons; the icon alone would make it taller.
+            btn.setFixedHeight(self.btn_stacked.sizeHint().height())
+            self.plot_button_row.add_button(btn)
 
         self.btn_fit.clicked.connect(self.plot_panel.fit_to_window)
         self.btn_fit_v.clicked.connect(self.plot_panel.fit_vertical)
@@ -314,16 +333,29 @@ class MainWindow(QMainWindow):
         self.btn_points.toggled.connect(self._toggle_points)
         self.btn_hide_line.toggled.connect(self._toggle_line)
         self.plot_panel.set_stacked(self.btn_stacked.isChecked())
+        # The buttons were set before their toggled signals were connected.
+        self.plot_panel.set_cursor1_enabled(self.btn_cursor1.isChecked())
+
+        # The plot buttons sit above the plot only, level with the signal
+        # table's header, so the table runs the full height of the panel.
+        # Buttons that do not fit the plot's width move into a "»" menu.
+        plot_column = QWidget()
+        plot_column_layout = QVBoxLayout(plot_column)
+        plot_column_layout.setContentsMargins(0, 0, 0, 0)
+        plot_column_layout.setSpacing(0)
+        plot_column_layout.addWidget(self.plot_button_row)
+        plot_column_layout.addWidget(self.plot_panel, stretch=1)
+        self._level_plot_buttons_with_table_header()
 
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(6, 6, 6, 6)
-        center_layout.addWidget(button_row)
+        self._center_layout = center_layout
 
         self.center_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.center_splitter.setChildrenCollapsible(False)
         self.center_splitter.addWidget(self.plot_panel.table_panel)
-        self.center_splitter.addWidget(self.plot_panel)
+        self.center_splitter.addWidget(plot_column)
         self.center_splitter.setStretchFactor(0, 0)
         self.center_splitter.setStretchFactor(1, 1)
         self.center_splitter.setSizes([240, 1280])
@@ -371,37 +403,18 @@ class MainWindow(QMainWindow):
         self.left_dock.visibilityChanged.connect(self._sync_panel_toggle_buttons)
         self.bottom_dock.visibilityChanged.connect(self._sync_panel_toggle_buttons)
 
-        self.left_edge_btn = QToolButton(self)
-        self.left_edge_btn.setFixedWidth(22)
-        self.left_edge_btn.setMinimumHeight(36)
-        self.left_edge_btn.setStyleSheet("""
-QToolButton {
-    background-color: #2d3a4a; color: #e0e8f0;
-    border: 1px solid #4a6080; border-radius: 4px;
-    font-size: 11px; font-weight: bold; padding: 2px;
-}
-QToolButton:hover { background-color: #3a5070; border-color: #6090b0; }
-QToolButton:pressed { background-color: #1a2a3a; }
-""")
-        self.left_edge_btn.setToolTip('Show / hide signal panel')
+        # Handles on the panels' edges, in the gap between each panel and the
+        # plot area, so they cover nothing.
+        self.left_edge_btn = EdgeTab(Qt.Orientation.Vertical, self)
         self.left_edge_btn.clicked.connect(self._toggle_left_panel)
         self.left_edge_btn.show()
 
-        self.bottom_edge_btn = QToolButton(self)
-        self.bottom_edge_btn.setFixedHeight(22)
-        self.bottom_edge_btn.setMinimumWidth(36)
-        self.bottom_edge_btn.setStyleSheet("""
-QToolButton {
-    background-color: #2d3a4a; color: #e0e8f0;
-    border: 1px solid #4a6080; border-radius: 4px;
-    font-size: 11px; font-weight: bold; padding: 2px;
-}
-QToolButton:hover { background-color: #3a5070; border-color: #6090b0; }
-QToolButton:pressed { background-color: #1a2a3a; }
-""")
-        self.bottom_edge_btn.setToolTip('Show / hide log panel')
+        self.bottom_edge_btn = EdgeTab(Qt.Orientation.Horizontal, self)
         self.bottom_edge_btn.clicked.connect(self._toggle_bottom_panel)
         self.bottom_edge_btn.show()
+        # The handles follow the plot area whenever a panel is shown, hidden,
+        # moved or resized.
+        center_panel.installEventFilter(self)
 
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
@@ -416,6 +429,23 @@ QToolButton:pressed { background-color: #1a2a3a; }
         self.statusBar().addPermanentWidget(self.debug_mode_label)
         self.statusBar().addPermanentWidget(self.status_next_step_label, 1)
         self._sync_panel_toggle_buttons()
+
+    def _level_plot_buttons_with_table_header(self) -> None:
+        """Give the plot buttons and the signal table's header one height,
+        so the plot starts level with the table's first row."""
+        table = self.plot_panel.table
+        header = table.horizontalHeader()
+        # Polish first so the sizes include the table's style sheet.
+        table.ensurePolished()
+        self.plot_button_row.ensurePolished()
+        frame = table.frameWidth()
+        # The plot panel's margin lies between the buttons and the plot, so
+        # the header is that much taller than the buttons' row.
+        gap = self.plot_panel.layout().contentsMargins().top()
+        height = max(self.plot_button_row.sizeHint().height(),
+                     header.sizeHint().height() + frame - gap)
+        self.plot_button_row.setFixedHeight(height)
+        header.setMinimumHeight(height + gap - frame)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar('Main')
@@ -883,6 +913,12 @@ QToolButton:pressed { background-color: #1a2a3a; }
             return Path(sys.executable).resolve().parent
         return Path(__file__).resolve().parents[1]
 
+    def _save_plot_tag(self, tag: PlotTag) -> None:
+        try:
+            save_plot_tag(self._user_settings_path, tag)
+        except OSError as exc:
+            self._log(f'Tag save warning: {exc}')
+
     def _capture_temporary_plot_configuration(self) -> dict | None:
         """Persist the current plot-only setup for the next measurement."""
         keys = self.plot_panel.plotted_keys()
@@ -1005,6 +1041,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
         """Remove decoded and plotted state belonging to the previous file."""
         self.plot_panel.clear_all()
         self.plot_panel.discard_undo_history()
+        self.plot_panel.set_measurement_file(None)
         self.signal_tree.set_payload({})
         self.signal_tree.set_generated_signals([])
         self.calculated_signals.invalidate_cache()
@@ -1219,15 +1256,29 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _toggle_cursor1(self, checked: bool) -> None:
         self.plot_panel.set_cursor1_enabled(checked)
-        self.btn_cursor1.setText('Cursor 1: ON' if checked else 'Cursor 1')
         self._update_status('Cursor 1 updated',
-                            'Drag C1 line on the plot to measure')
+                            'Click the plot or drag the C1 line to measure')
+
+    def _place_cursor1(self, x: float) -> None:
+        """A click on the plot puts Cursor 1 there, switching it on first."""
+        if not self.btn_cursor1.isChecked():
+            self.btn_cursor1.setChecked(True)
+        self.plot_panel.move_cursor1(x)
+        self._update_status(f'Cursor 1 at t={x:.4f} s',
+                            'Click the plot or drag the C1 line to measure')
 
     def _toggle_cursor2(self, checked: bool) -> None:
         self.plot_panel.set_cursor2_enabled(checked)
-        self.btn_cursor2.setText('Cursor 2: ON' if checked else 'Cursor 2')
         self._update_status('Cursor 2 updated',
-                            'Drag C2 line to measure time delta between cursors')
+                            'Shift+click the plot or drag the C2 line to measure')
+
+    def _place_cursor2(self, x: float) -> None:
+        """A Shift+click on the plot puts Cursor 2 there, switching it on first."""
+        if not self.btn_cursor2.isChecked():
+            self.btn_cursor2.setChecked(True)
+        self.plot_panel.move_cursor2(x)
+        self._update_status(f'Cursor 2 at t={x:.4f} s',
+                            'Shift+click the plot or drag the C2 line to measure')
 
     def _shortcut_change_signal_color(self) -> None:
         key = self.plot_panel._current_key
@@ -1260,7 +1311,6 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _toggle_points(self, checked: bool) -> None:
         self.plot_panel.set_show_points(checked)
-        self.btn_points.setText('Hide Data Points' if checked else 'Show Data Points')
         if not checked:
             self.btn_hide_line.setChecked(False)
         self.btn_hide_line.setEnabled(checked)
@@ -2041,6 +2091,8 @@ QToolButton:pressed { background-color: #1a2a3a; }
             self._pending_plot_keys = list(pending_plot_keys or [])
         self.plot_panel.clear_all()
         self.plot_panel.discard_undo_history()
+        # Signals plotted from here on, while decoding and after, are this file's.
+        self.plot_panel.set_measurement_file(mpath)
         self.calculated_signals.invalidate_cache()
         self._calc_queue.clear()
         self._finding_plot_keys = set()
@@ -2441,6 +2493,8 @@ QToolButton:pressed { background-color: #1a2a3a; }
         ('Space',           'Plot selected signal(s) from the signal tree'),
         ('C',               'Change color of the selected signal'),
         ('R',               'Toggle Cursor 1 and Cursor 2 on/off together'),
+        ('Click on plot',   'Place Cursor 1 there, switching it on if it is off'),
+        ('Shift + click on plot', 'Place Cursor 2 there, switching it on if it is off'),
         ('Delete',          'Remove selected signal from plot'),
         ('Ctrl + Z',        'Undo last plot action (up to 3 levels)'),
         ('Ctrl + S',        'Save current configuration to JSON'),
@@ -2450,7 +2504,7 @@ QToolButton:pressed { background-color: #1a2a3a; }
     def show_shortcuts(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle('Keyboard Shortcuts')
-        dlg.resize(560, 340)
+        dlg.resize(560, 420)
         tbl = QTableWidget(len(self._SHORTCUTS), 2, dlg)
         tbl.setHorizontalHeaderLabels(['Shortcut', 'Action'])
         tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -2691,26 +2745,66 @@ QToolButton:pressed { background-color: #1a2a3a; }
         bottom_visible = self.bottom_dock.isVisible()
         self.left_toggle_btn.setText('◀' if left_visible else '▶')
         self.bottom_toggle_btn.setText('▼' if bottom_visible else '▲')
-        self.left_edge_btn.setText('◀' if left_visible else '▶')
-        self.bottom_edge_btn.setText('▼' if bottom_visible else '▲')
+        self.left_edge_btn.setToolTip(
+            'Hide the signal panel' if left_visible else 'Show the signal panel')
+        self.bottom_edge_btn.setToolTip(
+            'Hide the log panel' if bottom_visible else 'Show the log panel')
+        self.left_edge_btn.setAccessibleName(self.left_edge_btn.toolTip())
+        self.bottom_edge_btn.setAccessibleName(self.bottom_edge_btn.toolTip())
         self._position_panel_toggle_buttons()
 
     def _position_panel_toggle_buttons(self) -> None:
-        left_w = self.left_edge_btn.width() or 18
-        left_h = max(self.left_edge_btn.sizeHint().height(), 36)
-        x = 2
-        y = max(80, (self.height() - left_h) // 2)
-        self.left_edge_btn.setGeometry(x, y, left_w, left_h)
-        self.left_edge_btn.raise_()
+        # Each handle lies in the gap between its panel and the plot area,
+        # centred along the panel's edge. With the panel hidden or floating
+        # it lies on the plot area's edge where the panel docks, and the plot
+        # area keeps a gap that wide on that side. Its chevron points the way
+        # the panel moves on a click.
+        tab = EdgeTab.THICKNESS
+        margins = [6, 6, 6, 6]   # left, top, right, bottom
+        Arrow = Qt.ArrowType
 
-        btn_w = max(self.bottom_edge_btn.sizeHint().width(), 36)
-        btn_h = self.bottom_edge_btn.height() or 18
-        bottom_h = self.bottom_dock.height() if self.bottom_dock.isVisible() else 0
-        y = self.height() - self.statusBar().height() - bottom_h - btn_h + 10
-        y = max(80, y)
-        x = max(40, (self.width() - btn_w) // 2)
-        self.bottom_edge_btn.setGeometry(x, y, btn_w, btn_h)
-        self.bottom_edge_btn.raise_()
+        side = self.left_edge_btn
+        on_right = self.dockWidgetArea(self.left_dock) == Qt.DockWidgetArea.RightDockWidgetArea
+        docked = self.left_dock.isVisible() and not self.left_dock.isFloating()
+        if not docked:
+            margins[2 if on_right else 0] = max(6, tab)
+        bottom = self.bottom_edge_btn
+        on_top = self.dockWidgetArea(self.bottom_dock) == Qt.DockWidgetArea.TopDockWidgetArea
+        bottom_docked = self.bottom_dock.isVisible() and not self.bottom_dock.isFloating()
+        if not bottom_docked:
+            margins[1 if on_top else 3] = max(6, tab)
+        self._center_layout.setContentsMargins(*margins)
+
+        central = self.centralWidget().geometry()
+        if docked:
+            dock = self.left_dock.geometry()
+            x = dock.left() - tab if on_right else dock.right() + 1
+            middle = dock.center().y()
+        else:
+            x = central.right() + 1 - tab if on_right else central.left()
+            middle = central.center().y()
+        side.move(x, middle - side.height() // 2)
+        hide, show = (Arrow.RightArrow, Arrow.LeftArrow) if on_right else (Arrow.LeftArrow, Arrow.RightArrow)
+        side.set_arrow(hide if self.left_dock.isVisible() else show)
+        side.raise_()
+
+        if bottom_docked:
+            dock = self.bottom_dock.geometry()
+            y = dock.bottom() + 1 if on_top else dock.top() - tab
+            middle = dock.center().x()
+        else:
+            y = central.top() if on_top else central.bottom() + 1 - tab
+            middle = self.rect().center().x()
+        bottom.move(middle - bottom.width() // 2, y)
+        hide, show = (Arrow.UpArrow, Arrow.DownArrow) if on_top else (Arrow.DownArrow, Arrow.UpArrow)
+        bottom.set_arrow(hide if self.bottom_dock.isVisible() else show)
+        bottom.raise_()
+
+    def eventFilter(self, watched, event) -> bool:
+        if (watched is self.centralWidget()
+                and event.type() in (QEvent.Type.Resize, QEvent.Type.Move)):
+            self._position_panel_toggle_buttons()
+        return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -2805,8 +2899,4 @@ QToolButton:pressed { background-color: #1a2a3a; }
 
     def _log(self, message: str) -> None:
         self.log_box.append(message)
-        try:
-            with self._log_file_path.open('a', encoding='utf-8') as fh:
-                fh.write(message + '\n')
-        except Exception:
-            pass
+        app_log.record(message)
