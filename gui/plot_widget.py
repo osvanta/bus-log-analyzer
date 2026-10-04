@@ -2603,6 +2603,32 @@ class PlotPanel(QWidget):
             self.plot.setXRange(x0, x1, padding=0)
         self.fit_vertical()
 
+    # ── The time shown, which tabs share (see gui.plot_tabs) ────────────────
+
+    def time_range(self) -> tuple[float, float] | None:
+        """The time range on screen, or None while nothing is plotted."""
+        x_range = self._visible_x_range() if self._items else None
+        return (x_range[0], x_range[1]) if x_range else None
+
+    def show_time_range(self, x_min: float, x_max: float) -> None:
+        """Show time x_min to x_max, keeping each row's height as it is."""
+        # As zoom_to_time does, a range restore queued by an earlier rebuild
+        # must not overwrite this one.
+        self._rebuild_seq += 1
+        if self._stacked_mode:
+            if self._stacked_plots:
+                # The other rows follow row 0 through their X link.
+                self._stacked_plots[0].setXRange(x_min, x_max, padding=0)
+        else:
+            self.plot.setXRange(x_min, x_max, padding=0)
+            if self._multi_axis:
+                self._update_multi_axis_views()
+
+    def cursor_state(self) -> tuple[bool, float, bool, float]:
+        """Whether Cursor 1 is on and its time, then the same for Cursor 2."""
+        return (self._cursor1_enabled, float(self.v_line.value()),
+                self._cursor2_enabled, float(self.v_line2.value()))
+
     def center_on_time(
         self,
         center: float,

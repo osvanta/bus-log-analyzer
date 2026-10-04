@@ -227,10 +227,14 @@ def test_plot_buttons_sit_above_the_plot_not_the_table(window):
     splitter = window.center_splitter
     table_side, plot_side = splitter.widget(0), splitter.widget(1)
 
-    assert table_side is window.plot_panel.table_panel
+    # Each tab's table, and its plot, in its column (see gui.plot_tabs).
+    tables, plots = window.plot_tabs.tables, window.plot_tabs.plots
+    assert table_side is tables
+    assert window.plot_panel.table_panel.parentWidget() is tables
     assert window.plot_button_row.parentWidget() is plot_side
-    assert window.plot_panel.parentWidget() is plot_side
-    assert window.plot_button_row.geometry().bottom() < window.plot_panel.geometry().top()
+    assert plots.parentWidget() is plot_side
+    assert window.plot_panel.parentWidget() is plots
+    assert window.plot_button_row.geometry().bottom() < plots.geometry().top()
     for button in (window.btn_fit, window.btn_stacked, window.btn_points):
         assert button.parentWidget() is window.plot_button_row
 

@@ -73,6 +73,7 @@ from gui.edge_tab import EdgeTab
 from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button
+from gui.plot_tabs import PlotTabs
 from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
 from gui.plot_widget import PlotPanel
 from gui.signal_tree import SignalTreeWidget
@@ -174,6 +175,14 @@ class MainWindow(QMainWindow):
         # row, so one per finished signal made restoring them after Load +
         # Decode slower with each signal added.
         self._calc_plot_keys: list[str] = []
+        # Tabs other than the one on screen that show a recalculated signal,
+        # drawn again with the rest once the queue is empty.
+        self._calc_redraw_panels: list[PlotPanel] = []
+        # What every tab shows, and so a tab added later too: the file the
+        # plotted signals come from, and the status on an empty plot.
+        self._plotted_file: str | None = None
+        self._status_overlay = ('', '')
+        self._spreading_background = False
         # Pre-scan cache: (path, channels, ids_per_channel)
         self._prescan_cache: tuple[
             str, list[BusChannel], dict[BusChannel, set[int]],
@@ -269,6 +278,58 @@ class MainWindow(QMainWindow):
                 return answer
         return super().nativeEvent(event_type, message)
 
+    @property
+    def plot_panel(self) -> PlotPanel:
+        """The plot panel of the tab on screen."""
+        return self.plot_tabs.current()
+
+    def _new_plot_panel(self) -> PlotPanel:
+        """The panel of a tab being added, wired to this window.
+
+        A tab after the first starts as the application does, in Stacked
+        with the cursors off, and looks like the tab on screen.
+        """
+        panel = PlotPanel()
+        panel.set_tag(self._plot_tag)
+        if self.plot_tabs.count():
+            shown = self.plot_panel
+            panel.set_background_color(shown.background_color())
+            panel._name_show_channel = shown._name_show_channel
+            panel._name_show_message = shown._name_show_message
+            panel.set_table_column_widths(shown.table_column_widths())
+            panel.table.horizontalHeader().setMinimumHeight(self._table_header_height)
+            panel.set_measurement_file(self._plotted_file)
+            panel.set_status_overlay(*self._status_overlay)
+            panel.set_stacked(True)
+            panel.set_cursor1_enabled(False)
+        panel.selectionChanged.connect(self._on_plot_selection_changed)
+        panel.signalDropped.connect(self.add_signals_to_plot)
+        panel.signalDroppedToStack.connect(self._add_signals_to_multistack)
+        panel.backgroundColorChanged.connect(self._on_background_color_changed)
+        panel.signalColorChanged.connect(self._on_signal_color_changed)
+        panel.signalLineStyleChanged.connect(self._on_signal_line_style_changed)
+        panel.plotAreaClicked.connect(self._place_cursor1)
+        panel.plotAreaShiftClicked.connect(self._place_cursor2)
+        panel.tagChanged.connect(self._save_plot_tag)
+        return panel
+
+    def _show_plot_tab(self, panel: PlotPanel) -> None:
+        """Set the plot buttons to the tab now on screen, without acting on it."""
+        checked = {
+            self.btn_multi_axis: panel._multi_axis,
+            self.btn_stacked: panel._stacked_mode and not panel._multistack_mode,
+            self.btn_multistack: panel._multistack_mode,
+            self.btn_cursor1: panel._cursor1_enabled,
+            self.btn_cursor2: panel._cursor2_enabled,
+            self.btn_points: panel._show_points,
+            self.btn_hide_line: panel._hide_lines,
+        }
+        for button, state in checked.items():
+            button.blockSignals(True)
+            button.setChecked(state)
+            button.blockSignals(False)
+        self.btn_hide_line.setEnabled(panel._show_points)
+
     def _splash_status(self, message: str) -> None:
         """Forward a status message to the splash screen if still visible."""
         if self._splash is not None:
@@ -276,7 +337,10 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.signal_tree = SignalTreeWidget()
-        self.plot_panel = PlotPanel()
+        # One plot panel per tab; plot_panel is the one on screen.
+        self._plot_tag = load_plot_tag(self._user_settings_path)
+        self.plot_tabs = PlotTabs(self._new_plot_panel, self)
+        self.plot_tabs.add_tab()
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.diagnostics_box = QTextEdit()
@@ -288,18 +352,6 @@ class MainWindow(QMainWindow):
         self.signal_tree.generatedRenameRequested.connect(self.rename_generated_signal)
         self.signal_tree.generatedEditRequested.connect(self.edit_generated_signal)
         self.signal_tree.generatedDeleteRequested.connect(self.delete_generated_signal)
-        self.plot_panel.selectionChanged.connect(self._on_plot_selection_changed)
-        self.plot_panel.signalDropped.connect(self.add_signals_to_plot)
-        self.plot_panel.signalDroppedToStack.connect(
-            self._add_signals_to_multistack
-        )
-        self.plot_panel.backgroundColorChanged.connect(self._on_background_color_changed)
-        self.plot_panel.signalColorChanged.connect(self._on_signal_color_changed)
-        self.plot_panel.signalLineStyleChanged.connect(self._on_signal_line_style_changed)
-        self.plot_panel.plotAreaClicked.connect(self._place_cursor1)
-        self.plot_panel.plotAreaShiftClicked.connect(self._place_cursor2)
-        self.plot_panel.set_tag(load_plot_tag(self._user_settings_path))
-        self.plot_panel.tagChanged.connect(self._save_plot_tag)
 
         self.plot_button_row = OverflowButtonRow()
         self.btn_fit = icon_button('fit_window', 'Fit to Window', 'Fit to Window (F)')
@@ -334,9 +386,19 @@ class MainWindow(QMainWindow):
             # As tall as the text buttons; the icon alone would make it taller.
             btn.setFixedHeight(self.btn_stacked.sizeHint().height())
             self.plot_button_row.add_button(btn)
+        # Apart from the plot's own buttons, at the right end of the row.
+        self.btn_sync_tabs = icon_button(
+            'sync_tabs', 'Synchronize Tabs',
+            'Synchronize tabs: every tab shows the same time range and cursors')
+        self.btn_sync_tabs.setCheckable(True)
+        self.btn_sync_tabs.setChecked(self.plot_tabs.synchronized)
+        self.btn_sync_tabs.setFixedHeight(self.btn_stacked.sizeHint().height())
+        self.btn_sync_tabs.toggled.connect(self.plot_tabs.set_synchronized)
+        self.plot_button_row.add_end_button(self.btn_sync_tabs)
 
-        self.btn_fit.clicked.connect(self.plot_panel.fit_to_window)
-        self.btn_fit_v.clicked.connect(self.plot_panel.fit_vertical)
+        # Each acts on the tab on screen when clicked.
+        self.btn_fit.clicked.connect(lambda: self.plot_panel.fit_to_window())
+        self.btn_fit_v.clicked.connect(lambda: self.plot_panel.fit_vertical())
         self.btn_multi_axis.toggled.connect(self._toggle_multi_axis)
         self.btn_stacked.toggled.connect(self._toggle_stacked)
         self.btn_multistack.toggled.connect(self._toggle_multistack)
@@ -347,6 +409,8 @@ class MainWindow(QMainWindow):
         self.plot_panel.set_stacked(self.btn_stacked.isChecked())
         # The buttons were set before their toggled signals were connected.
         self.plot_panel.set_cursor1_enabled(self.btn_cursor1.isChecked())
+        # From here on, the buttons show each tab as it comes into view.
+        self.plot_tabs.currentPanelChanged.connect(self._show_plot_tab)
 
         # The plot buttons sit above the plot only, level with the signal
         # table's header, so the table runs the full height of the panel.
@@ -356,17 +420,19 @@ class MainWindow(QMainWindow):
         plot_column_layout.setContentsMargins(0, 0, 0, 0)
         plot_column_layout.setSpacing(0)
         plot_column_layout.addWidget(self.plot_button_row)
-        plot_column_layout.addWidget(self.plot_panel, stretch=1)
+        plot_column_layout.addWidget(self.plot_tabs.plots, stretch=1)
         self._level_plot_buttons_with_table_header()
 
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(6, 6, 6, 6)
         self._center_layout = center_layout
+        # The tabs, over the signal table and the plot they switch.
+        center_layout.addWidget(self.plot_tabs.strip)
 
         self.center_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.center_splitter.setChildrenCollapsible(False)
-        self.center_splitter.addWidget(self.plot_panel.table_panel)
+        self.center_splitter.addWidget(self.plot_tabs.tables)
         self.center_splitter.addWidget(plot_column)
         self.center_splitter.setStretchFactor(0, 0)
         self.center_splitter.setStretchFactor(1, 1)
@@ -457,7 +523,9 @@ class MainWindow(QMainWindow):
         height = max(self.plot_button_row.sizeHint().height(),
                      header.sizeHint().height() + frame - gap)
         self.plot_button_row.setFixedHeight(height)
-        header.setMinimumHeight(height + gap - frame)
+        # Every tab's table header, as its tab is added.
+        self._table_header_height = height + gap - frame
+        header.setMinimumHeight(self._table_header_height)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar('Main')
@@ -495,17 +563,20 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self._act_can_trace)
 
     def _build_shortcuts(self) -> None:
-        QShortcut(QKeySequence(Qt.Key.Key_Delete), self, activated=self.plot_panel.remove_selected_series)
+        # The plot shortcuts act on the tab on screen when pressed.
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), self, activated=lambda: self.plot_panel.remove_selected_series())
         QShortcut(QKeySequence('Ctrl+S'), self, activated=self.save_configuration)
-        QShortcut(QKeySequence('F'), self, activated=self.plot_panel.fit_to_window)
-        QShortcut(QKeySequence('V'), self, activated=self.plot_panel.fit_vertical)
+        QShortcut(QKeySequence('F'), self, activated=lambda: self.plot_panel.fit_to_window())
+        QShortcut(QKeySequence('V'), self, activated=lambda: self.plot_panel.fit_vertical())
         QShortcut(QKeySequence('C'), self, activated=self._shortcut_change_signal_color)
         QShortcut(QKeySequence('R'), self, activated=self._shortcut_toggle_cursors)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=lambda: self.add_signals_to_plot(self.signal_tree.selected_signal_keys()))
         # Raw Frames hidden from GUI to prevent hang on large files — accessible via shortcut
         QShortcut(QKeySequence('Ctrl+Shift+R'), self, activated=self.show_raw_frames)
         QShortcut(QKeySequence('Ctrl+Alt+D'), self, activated=self.toggle_debug_mode)
-        QShortcut(QKeySequence('Ctrl+Z'), self, activated=self.plot_panel.undo)
+        QShortcut(QKeySequence('Ctrl+Z'), self, activated=lambda: self.plot_panel.undo())
+        QShortcut(QKeySequence('Ctrl+Tab'), self, activated=lambda: self.plot_tabs.show_neighbour(1))
+        QShortcut(QKeySequence('Ctrl+Shift+Tab'), self, activated=lambda: self.plot_tabs.show_neighbour(-1))
 
     def toggle_debug_mode(self) -> None:
         """Toggle the hidden, session-only CAN load forensic mode."""
@@ -928,6 +999,10 @@ class MainWindow(QMainWindow):
         return Path(__file__).resolve().parents[1]
 
     def _save_plot_tag(self, tag: PlotTag) -> None:
+        # One tag, under every tab's table.
+        self._plot_tag = tag
+        for panel in self.plot_tabs.panels():
+            panel.set_tag(tag)
         try:
             save_plot_tag(self._user_settings_path, tag)
         except OSError as exc:
@@ -1051,11 +1126,20 @@ class MainWindow(QMainWindow):
             self.btn_multi_axis.setChecked(False)
         self._pending_plot_type = None
 
+    def _clear_plot_tabs(self, measurement_path: str | None) -> None:
+        """Empty every tab, for the measurement at measurement_path."""
+        self._plotted_file = measurement_path
+        self._calc_redraw_panels = []
+        for panel in self.plot_tabs.panels():
+            panel.clear_all()
+            panel.discard_undo_history()
+            panel.set_measurement_file(measurement_path)
+        # Another measurement's time means nothing for this one.
+        self.plot_tabs.forget_shared_time()
+
     def _reset_for_new_measurement(self) -> None:
         """Remove decoded and plotted state belonging to the previous file."""
-        self.plot_panel.clear_all()
-        self.plot_panel.discard_undo_history()
-        self.plot_panel.set_measurement_file(None)
+        self._clear_plot_tabs(None)
         self.signal_tree.set_payload({})
         self.signal_tree.set_generated_signals([])
         self.calculated_signals.invalidate_cache()
@@ -1381,6 +1465,13 @@ class MainWindow(QMainWindow):
 
     def _plot_calculated_signals(self) -> None:
         """Show what the queued calculations produced, with one plot rebuild."""
+        others = list(dict.fromkeys(self._calc_redraw_panels))
+        self._calc_redraw_panels = []
+        if not self._closing:
+            open_tabs = self.plot_tabs.panels()
+            for panel in others:
+                if panel in open_tabs:      # unless closed meanwhile
+                    panel.redraw()
         keys = [
             key for key in dict.fromkeys(self._calc_plot_keys)
             # Deleted, or dropped by a new Load + Decode, while others ran.
@@ -1466,7 +1557,8 @@ class MainWindow(QMainWindow):
         if new_key == key:
             return
 
-        self.plot_panel.rename_series_key(key, new_key)
+        for panel in self.plot_tabs.panels():
+            panel.rename_series_key(key, new_key)
         self._pending_plot_keys = [
             new_key if pending_key == key else pending_key
             for pending_key in self._pending_plot_keys
@@ -1519,7 +1611,8 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.plot_panel.forget_series(key)
+        for panel in self.plot_tabs.panels():
+            panel.forget_series(key)
         self.calculated_signals.delete(key)
         self._refresh_generated_signal_tree()
         self._log(f"Deleted generated signal: {definition.name}")
@@ -1718,11 +1811,17 @@ class MainWindow(QMainWindow):
             return
         self.calculated_signals.commit(definition, series)
         self._refresh_generated_signal_tree()
-        # Drawn by _plot_calculated_signals once the queue is empty.
-        if key_is_plotted := definition.key in self.plot_panel._items:
-            self.plot_panel.replace_series(definition.key, series, redraw=False)
-        if key_is_plotted or plot_after:
+        # Every tab showing it gets the new data. All are drawn by
+        # _plot_calculated_signals once the queue is empty: the tab on screen
+        # with what it adds, the others again as they are.
+        showing = [panel for panel in self.plot_tabs.panels()
+                   if definition.key in panel._items]
+        for panel in showing:
+            panel.replace_series(definition.key, series, redraw=False)
+        if self.plot_panel in showing or plot_after:
             self._calc_plot_keys.append(definition.key)
+        self._calc_redraw_panels.extend(
+            panel for panel in showing if panel is not self.plot_panel)
         if operation == "edit":
             self._refresh_dependents_after_edit(definition.key)
         action = "Updated" if operation == "edit" else "Created"
@@ -1743,8 +1842,8 @@ class MainWindow(QMainWindow):
             self.calculated_signals.invalidate_series(dependent)
         names = ", ".join(self._generated_signal_name(k) for k in dependents)
         self._log(f"Invalidated dependent generated signals: {names}")
-        # Only on-screen curves are recalculated now; the rest wait until plotted.
-        plotted = set(self.plot_panel.plotted_keys())
+        # Only curves in a tab are recalculated now; the rest wait until plotted.
+        plotted = {key for panel in self.plot_tabs.panels() for key in panel.plotted_keys()}
         for dependent in dependents:
             if dependent not in plotted:
                 continue
@@ -2103,10 +2202,8 @@ class MainWindow(QMainWindow):
             self._arm_temporary_plot_handoff()
         else:
             self._pending_plot_keys = list(pending_plot_keys or [])
-        self.plot_panel.clear_all()
-        self.plot_panel.discard_undo_history()
         # Signals plotted from here on, while decoding and after, are this file's.
-        self.plot_panel.set_measurement_file(mpath)
+        self._clear_plot_tabs(mpath)
         self.calculated_signals.invalidate_cache()
         self._calc_queue.clear()
         self._finding_plot_keys = set()
@@ -2181,6 +2278,9 @@ class MainWindow(QMainWindow):
             self.plot_panel.end_batch_add()
         elif plotted and was_empty:
             self.plot_panel.fit_to_window()
+        if plotted and was_empty:
+            # A synchronized tab shows the time the other tabs show.
+            self.plot_tabs.show_shared_time(self.plot_panel)
 
         if plotted:
             self._update_status(f'Plotted {plotted} signal(s)', 'Use Fit to Window, reorder, or export selected CSV')
@@ -2511,6 +2611,8 @@ class MainWindow(QMainWindow):
         ('Shift + click on plot', 'Place Cursor 2 there, switching it on if it is off'),
         ('Delete',          'Remove selected signal from plot'),
         ('Ctrl + Z',        'Undo last plot action (up to 3 levels)'),
+        ('Ctrl + Tab',      'Show the next plot tab (Ctrl + Shift + Tab: the previous one)'),
+        ('Double-click on a tab', 'Rename the tab'),
         ('Ctrl + S',        'Save current configuration to JSON'),
         ('Ctrl + Shift + R','Open Raw CAN Frame viewer (BLF / ASC only)'),
     ]
@@ -2564,7 +2666,8 @@ class MainWindow(QMainWindow):
         if self.store is None and self._worker is not None:
             # Store is being built by the worker — get reference via worker
             pass   # curves hold direct series references — just redraw
-        self.plot_panel.refresh_plotted_curves()
+        for panel in self.plot_tabs.panels():
+            panel.refresh_plotted_curves()
 
     def _on_worker_finished(self, store: SignalStore) -> None:
         if self._closing:
@@ -2825,7 +2928,17 @@ class MainWindow(QMainWindow):
         self._position_panel_toggle_buttons()
 
     def _on_background_color_changed(self, color: str) -> None:
+        if self._spreading_background:
+            return
         self._log(f'Plot background color changed: {color}')
+        # Every tab has the one background.
+        self._spreading_background = True
+        try:
+            for panel in self.plot_tabs.panels():
+                if panel.background_color() != color:
+                    panel.set_background_color(color)
+        finally:
+            self._spreading_background = False
 
     def _on_signal_color_changed(self, key: str, color: str) -> None:
         self._log(f'Signal color changed: {key} -> {color}')
@@ -2839,7 +2952,9 @@ class MainWindow(QMainWindow):
     def _update_status(self, state: str, next_step: str) -> None:
         self.status_state_label.setText(f'State: {state}')
         self.status_next_step_label.setText(f'Next: {next_step}')
-        self.plot_panel.set_status_overlay(f'State: {state}', f'Next: {next_step}')
+        self._status_overlay = (f'State: {state}', f'Next: {next_step}')
+        for panel in self.plot_tabs.panels():
+            panel.set_status_overlay(*self._status_overlay)
 
     # Actions enabled/disabled per app state
     # needs_file  = requires measurement file to be selected
