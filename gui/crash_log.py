@@ -13,7 +13,7 @@ Python handler sees. An exception in a slot or a worker thread is printed to
 a stderr that does not exist. A native crash leaves only an Event Viewer entry
 with a module offset, and a frozen window leaves nothing at all.
 
-``CrashLog`` appends each of these to ``osvanta_crash.log`` next to the
+``CrashLog`` appends each of these to ``BLA_crash.log`` next to the
 executable (next to app.py when run from source):
 
 - Qt fatal and critical messages, a fatal one followed by every thread's
@@ -55,7 +55,7 @@ from PySide6.QtCore import (
     qInstallMessageHandler, qVersion,
 )
 
-LOG_NAME = 'osvanta_crash.log'
+LOG_NAME = 'BLA_crash.log'
 FREEZE_SECONDS = 20.0
 # Rotated at start-up, so a log never grows past this by more than a session.
 MAX_BYTES = 1_000_000

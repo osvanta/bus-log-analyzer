@@ -172,6 +172,21 @@ def test_the_report_names_no_measurement_or_database(tmp_path):
     assert 'cannot read F1' in text
 
 
+def test_the_built_app_finds_appdebugger_beside_it_and_back(tmp_path, monkeypatch):
+    from gui.release_test.runner import launcher
+    app = _touch(tmp_path / 'BusLogAnalyzer.exe')
+    debugger = _touch(tmp_path / 'appdebugger.exe')
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+
+    for running in (app, debugger):
+        monkeypatch.setattr(sys, 'executable', str(running))
+        assert launcher(False) == [str(app)]
+        assert launcher(True) == [str(debugger)]
+
+    debugger.unlink()
+    assert launcher(True) is None               # reported as missing, not run
+
+
 def test_the_release_test_drives_the_application(tmp_path, blf_path, sample_dbc_path):
     folder = tmp_path / 'measurements'
     (folder / 'can').mkdir(parents=True)
