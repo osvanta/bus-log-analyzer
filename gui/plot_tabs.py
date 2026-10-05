@@ -12,6 +12,12 @@ PlotPanel of its own, so switching tabs shows that tab's table and plot as they
 were left, without drawing them again. The "+" button adds a tab, a double-click
 renames one, and its close button or right-click menu closes it.
 
+The selected tab is outlined, with round top corners and feet that curve out
+into a thin line along the foot of the strip, which runs under the table and
+the plot from one side to the other, so the tab plainly owns what lies below
+it. A tab's close button is a small "x" raised beside its name, like a
+superscript, so a click on the name does not close the tab by accident.
+
 Signals dragged from the signal tree onto a tab are plotted in it, and onto
 "+" in a new tab; that tab comes on screen. Rows dragged from the signal table
 onto another tab, or sent there by "Move to tab" in the signal menu, move
@@ -33,19 +39,24 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from itertools import count
 
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QFrame,
     QHBoxLayout,
     QLineEdit,
     QMenu,
     QMessageBox,
+    QProxyStyle,
     QStackedWidget,
+    QStyle,
     QTabBar,
     QToolButton,
     QWidget,
 )
 
+from gui.edge_tab import _mix
 from gui.plot_widget import ROW_MIME_TYPE, PlotPanel
 from gui.signal_tree import SignalTreeWidget
 
@@ -54,6 +65,21 @@ MAX_NAME_LENGTH = 40
 PLOT_TYPES = ('normal', 'multi_axis', 'stacked', 'multistack')
 # The outline of the tab, or of "+", that a drag would drop on.
 DROP_TARGET_COLOR = '#3d9ef0'
+
+# The shape of a tab, in pixels. Each foot curves out over TAB_FLARE at either
+# side of the tab, inside the room the tab takes in the strip.
+TAB_HEIGHT = 28
+TAB_FLARE = 7
+TAB_RADIUS = 10
+TAB_PADDING = 12           # between a tab's side and its name
+CLOSE_SIZE = 12            # the "x", raised beside the name
+CLOSE_MARGIN = 6           # between the "x" and the tab's side
+STRIP_INDENT = 8           # the line along the strip, before the first tab
+# How far each colour lies from the window colour toward its text colour.
+_OUTLINE = 0.36            # the selected tab's outline, and the line along the strip
+_HOVER = 0.08              # another tab under the mouse
+_NAME = 0.62               # another tab's name
+_CLOSE = 0.5               # another tab's "x"
 
 
 def plot_type(panel: PlotPanel) -> str:
@@ -241,11 +267,13 @@ class PlotTabs(QObject):
         self.add_button.clicked.connect(lambda: self.add_tab())
         self.add_button.dropped.connect(lambda keys, rows: self._dropped(keys, rows, -1))
 
-        self.strip = QWidget()
+        self.strip = _TabStrip()
         layout = QHBoxLayout(self.strip)
-        layout.setContentsMargins(0, 0, 0, 0)
+        # The line starts a little before the first tab.
+        layout.setContentsMargins(STRIP_INDENT, 0, 0, 0)
         layout.setSpacing(2)
-        layout.addWidget(self.bar)
+        # Down on the line, which the selected tab's feet run into.
+        layout.addWidget(self.bar, 0, Qt.AlignmentFlag.AlignBottom)
         layout.addWidget(self.add_button)
         layout.addStretch(1)
 
@@ -339,7 +367,7 @@ class PlotTabs(QObject):
         editor.setMaxLength(MAX_NAME_LENGTH)
         editor.setText(self.bar.tabText(index))
         editor.selectAll()
-        rect = self.bar.tabRect(index)
+        rect = self.bar.tabRect(index).adjusted(TAB_FLARE + 2, 3, -TAB_FLARE - 2, -1)
         rect.setWidth(max(rect.width(), 120))
         editor.setGeometry(rect)
 
@@ -436,11 +464,12 @@ def _dragged_signals(mime) -> tuple[list[str], bool]:
 class _DropOutline(QFrame):
     """Outlines the place a drag would drop on."""
 
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(self, parent: QWidget, radius: int = 3) -> None:
         super().__init__(parent)
         self.setObjectName('dropOutline')
         self.setStyleSheet(
-            f'#dropOutline {{ border: 2px solid {DROP_TARGET_COLOR}; border-radius: 3px; }}')
+            f'#dropOutline {{ border: 2px solid {DROP_TARGET_COLOR}; '
+            f'border-radius: {radius}px; }}')
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.hide()
 
@@ -451,16 +480,59 @@ class _DropOutline(QFrame):
 
 
 class _TabBar(QTabBar):
-    """The tabs, which take signals dropped on them. Rows of the signal table
-    drop only on a tab other than the one on screen."""
+    """The tabs, drawn by _TabStyle, which take signals dropped on them. Rows
+    of the signal table drop only on a tab other than the one on screen."""
 
     # The keys dropped, whether they are rows of the signal table, and the tab.
     dropped = Signal(list, bool, int)
 
     def __init__(self) -> None:
         super().__init__()
+        # Kept here: a widget does not own the style it is given.
+        self._style = _TabStyle()
+        self.setStyle(self._style)
+        # The strip draws the line the tabs stand on.
+        self.setDrawBase(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self._closable = False
         self.setAcceptDrops(True)
-        self._outline = _DropOutline(self)
+        self._outline = _DropOutline(self, TAB_RADIUS)
+
+    def tabSizeHint(self, index: int) -> QSize:
+        width = 2 * TAB_FLARE + TAB_PADDING + self.fontMetrics().horizontalAdvance(
+            self.tabText(index))
+        if self.tabButton(index, QTabBar.ButtonPosition.RightSide) is not None:
+            width += 1 + CLOSE_SIZE + CLOSE_MARGIN
+        else:
+            width += TAB_PADDING
+        return QSize(width, TAB_HEIGHT)
+
+    def setTabsClosable(self, closable: bool) -> None:
+        """Give every tab its small "x", or take them away. QTabBar's own
+        close buttons are left out: they are as large as the name."""
+        self._closable = bool(closable)
+        for index in range(self.count()):
+            button = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
+            if self._closable and button is None:
+                button = _CloseButton(self)
+                button.clicked.connect(lambda _checked=False, b=button: self._close(b))
+                self.setTabButton(index, QTabBar.ButtonPosition.RightSide, button)
+            elif not self._closable and button is not None:
+                self.setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
+                button.deleteLater()
+
+    def tabsClosable(self) -> bool:
+        return self._closable
+
+    def _close(self, button: QAbstractButton) -> None:
+        for index in range(self.count()):
+            if self.tabButton(index, QTabBar.ButtonPosition.RightSide) is button:
+                self.tabCloseRequested.emit(index)
+                return
+
+    def tab_body(self, index: int) -> QRect:
+        """The tab itself, inside its feet."""
+        return self.tabRect(index).adjusted(TAB_FLARE, 2, -TAB_FLARE, 0)
 
     def _drop_tab(self, event) -> int:
         keys, rows = _dragged_signals(event.mimeData())
@@ -482,7 +554,7 @@ class _TabBar(QTabBar):
             self._outline.hide()
             event.ignore()
             return
-        self._outline.show_at(self.tabRect(index))
+        self._outline.show_at(self.tab_body(index))
         event.acceptProposedAction()
 
     def dragLeaveEvent(self, event) -> None:
@@ -496,6 +568,160 @@ class _TabBar(QTabBar):
             return
         event.acceptProposedAction()
         self.dropped.emit(*_dragged_signals(event.mimeData()), index)
+
+
+def _tab_outline(left: float, right: float, top: float, base: float) -> QPainterPath:
+    """A tab's outline: up from the line on a curving foot, round the top
+    corners, and down on to the line again."""
+    path = QPainterPath(QPointF(left - TAB_FLARE, base))
+    path.quadTo(left, base, left, base - TAB_FLARE)
+    path.lineTo(left, top + TAB_RADIUS)
+    path.quadTo(left, top, left + TAB_RADIUS, top)
+    path.lineTo(right - TAB_RADIUS, top)
+    path.quadTo(right, top, right, top + TAB_RADIUS)
+    path.lineTo(right, base - TAB_FLARE)
+    path.quadTo(right, base, right + TAB_FLARE, base)
+    return path
+
+
+class _TabStyle(QProxyStyle):
+    """Draws the tabs. The selected one is outlined and filled with the
+    window's colour, which covers the strip's line under it; another tab is
+    plain, and lit under the mouse. Places each tab's "x" high beside its name.
+
+    A tab dragged to another place is drawn here too, so it keeps its look.
+    """
+
+    def drawControl(self, element, option, painter, widget=None) -> None:
+        if element == QStyle.ControlElement.CE_TabBarTab:
+            self._draw_tab(option, painter)
+            return
+        super().drawControl(element, option, painter, widget)
+
+    def subElementRect(self, element, option, widget=None) -> QRect:
+        if element == QStyle.SubElement.SE_TabBarTabText:
+            return self._name_rect(option)
+        if element == QStyle.SubElement.SE_TabBarTabRightButton:
+            rect = option.rect
+            return QRect(rect.right() + 1 - TAB_FLARE - CLOSE_MARGIN - CLOSE_SIZE,
+                         rect.top() + 5, CLOSE_SIZE, CLOSE_SIZE)
+        return super().subElementRect(element, option, widget)
+
+    def pixelMetric(self, metric, option=None, widget=None) -> int:
+        # The selected tab stays level with the others.
+        if metric in (QStyle.PixelMetric.PM_TabBarTabShiftVertical,
+                      QStyle.PixelMetric.PM_TabBarTabShiftHorizontal):
+            return 0
+        return super().pixelMetric(metric, option, widget)
+
+    @staticmethod
+    def _name_rect(option) -> QRect:
+        rect = option.rect
+        left = rect.left() + TAB_FLARE + TAB_PADDING
+        if option.rightButtonSize.isEmpty():
+            right = rect.right() + 1 - TAB_FLARE - TAB_PADDING
+        else:
+            right = rect.right() - TAB_FLARE - CLOSE_MARGIN - CLOSE_SIZE
+        return QRect(left, rect.top() + 3, max(0, right - left), rect.height() - 3)
+
+    def _draw_tab(self, option, painter: QPainter) -> None:
+        window = option.palette.color(QPalette.ColorRole.Window)
+        text = option.palette.color(QPalette.ColorRole.WindowText)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        rect = option.rect
+        # Pixel centres, so a one-pixel line is sharp.
+        left = rect.left() + TAB_FLARE + 0.5
+        right = rect.right() + 0.5 - TAB_FLARE
+        top = rect.top() + 2.5
+        base = rect.bottom() + 0.5
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if selected:
+            outline = _tab_outline(left, right, top, base)
+            inside = QPainterPath(outline)
+            inside.lineTo(right + TAB_FLARE, base + 0.5)
+            inside.lineTo(left - TAB_FLARE, base + 0.5)
+            inside.closeSubpath()
+            painter.fillPath(inside, window)
+            painter.strokePath(outline, QPen(_mix(window, text, _OUTLINE), 1))
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            lit = QPainterPath()
+            lit.addRoundedRect(QRectF(left, top, right - left, base - top - 3),
+                               TAB_RADIUS, TAB_RADIUS)
+            painter.fillPath(lit, _mix(window, text, _HOVER))
+        painter.setPen(text if selected else _mix(window, text, _NAME))
+        # A "&" in a name is shown as it is, not as a shortcut.
+        painter.drawText(self._name_rect(option),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                         | Qt.TextFlag.TextSingleLine, option.text)
+        painter.restore()
+
+
+class _TabStrip(QWidget):
+    """The row of tabs, with a thin line along its foot, from one side of the
+    table and plot to the other. The selected tab's feet run into it."""
+
+    def paintEvent(self, event) -> None:
+        palette = self.palette()
+        color = _mix(palette.color(QPalette.ColorRole.Window),
+                     palette.color(QPalette.ColorRole.WindowText), _OUTLINE)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(color, 1))
+        y = self.height() - 0.5
+        painter.drawLine(QPointF(0, y), QPointF(self.width(), y))
+
+
+class _CloseButton(QAbstractButton):
+    """A tab's "x": small, round under the mouse, and raised beside the name
+    like a superscript."""
+
+    def __init__(self, bar: QTabBar) -> None:
+        super().__init__(bar)
+        self.setFixedSize(CLOSE_SIZE, CLOSE_SIZE)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.setToolTip('Close tab')
+        self.setAccessibleName('Close tab')
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+
+    def sizeHint(self) -> QSize:
+        return QSize(CLOSE_SIZE, CLOSE_SIZE)
+
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self.update()
+
+    def _on_selected_tab(self) -> bool:
+        bar = self.parentWidget()
+        return (isinstance(bar, QTabBar)
+                and bar.tabButton(bar.currentIndex(), QTabBar.ButtonPosition.RightSide) is self)
+
+    def paintEvent(self, event) -> None:
+        palette = self.palette()
+        window = palette.color(QPalette.ColorRole.Window)
+        text = palette.color(QPalette.ColorRole.WindowText)
+        hovered = self.underMouse() or self.isDown()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        area = QRectF(self.rect())
+        if hovered:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_mix(window, text, 0.28 if self.isDown() else 0.16))
+            painter.drawEllipse(area.adjusted(0.5, 0.5, -0.5, -0.5))
+        color = QColor(text) if hovered or self._on_selected_tab() else _mix(window, text, _CLOSE)
+        pen = QPen(color, 1.2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        middle, arm = area.center(), 2.5
+        painter.drawLine(QPointF(middle.x() - arm, middle.y() - arm),
+                         QPointF(middle.x() + arm, middle.y() + arm))
+        painter.drawLine(QPointF(middle.x() - arm, middle.y() + arm),
+                         QPointF(middle.x() + arm, middle.y() - arm))
 
 
 class _AddTabButton(QToolButton):

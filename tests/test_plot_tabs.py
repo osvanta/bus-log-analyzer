@@ -314,3 +314,101 @@ def test_ctrl_tab_shows_the_next_tab_round_the_end(qapp, window):
     tabs.show_neighbour(-1)
     tabs.show_neighbour(-1)
     assert tabs.bar.currentIndex() == 2
+
+
+# ── The look of the tabs ────────────────────────────────────────────────
+
+
+def _strip_image(qapp, window):
+    """The tab strip as drawn, one image pixel to a pixel of the strip."""
+    from PySide6.QtGui import QImage, QPalette
+    qapp.processEvents()
+    strip = window.plot_tabs.strip
+    image = QImage(strip.size(), QImage.Format.Format_ARGB32)
+    image.fill(strip.palette().color(QPalette.ColorRole.Window))
+    strip.render(image)
+    return image
+
+
+def _close_enough(color, expected) -> bool:
+    return all(abs(a - b) <= 3 for a, b in zip(color.getRgb()[:3], expected.getRgb()[:3]))
+
+
+def test_the_line_along_the_strip_opens_under_the_selected_tab_only(qapp, window):
+    from PySide6.QtGui import QPalette
+    from gui.edge_tab import _mix
+    from gui.plot_tabs import _OUTLINE
+    _new_tab(qapp, window)
+    _show(qapp, window, 0)
+    tabs = window.plot_tabs
+    palette = tabs.strip.palette()
+    background = palette.color(QPalette.ColorRole.Window)
+    line = _mix(background, palette.color(QPalette.ColorRole.WindowText), _OUTLINE)
+
+    image = _strip_image(qapp, window)
+    foot = image.height() - 1
+
+    def under(index):
+        return tabs.bar.mapTo(tabs.strip, tabs.bar.tabRect(index).center()).x()
+
+    assert _close_enough(image.pixelColor(under(0), foot), background)
+    assert _close_enough(image.pixelColor(under(1), foot), line)
+    assert _close_enough(image.pixelColor(2, foot), line)           # before the tabs
+    assert _close_enough(image.pixelColor(image.width() - 3, foot), line)  # at the far end
+
+    _show(qapp, window, 1)
+    image = _strip_image(qapp, window)
+    assert _close_enough(image.pixelColor(under(0), foot), line)
+    assert _close_enough(image.pixelColor(under(1), foot), background)
+
+
+def test_each_tab_has_a_small_close_button_raised_beside_its_name(qapp, window):
+    from PySide6.QtWidgets import QTabBar
+    from gui.plot_tabs import CLOSE_SIZE, TAB_FLARE, TAB_PADDING
+    bar = window.plot_tabs.bar
+    right = QTabBar.ButtonPosition.RightSide
+    assert bar.tabButton(0, right) is None          # the last tab cannot close
+
+    _new_tab(qapp, window)
+    window.plot_tabs.bar.setTabText(1, 'A longer name')
+    qapp.processEvents()
+
+    for index in range(bar.count()):
+        button = bar.tabButton(index, right)
+        tab = bar.tabRect(index)
+        name_end = (tab.left() + TAB_FLARE + TAB_PADDING
+                    + bar.fontMetrics().horizontalAdvance(bar.tabText(index)))
+        assert button.size().width() == button.size().height() == CLOSE_SIZE
+        # Above the middle of the name, as a superscript sits, and after it.
+        assert button.geometry().center().y() < tab.center().y()
+        assert button.geometry().left() >= name_end
+        assert tab.contains(button.geometry())
+
+
+def test_the_close_button_closes_its_own_tab(qapp, window):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QTabBar
+    _new_tab(qapp, window)
+    _new_tab(qapp, window)
+    bar = window.plot_tabs.bar
+
+    QTest.mouseClick(bar.tabButton(1, QTabBar.ButtonPosition.RightSide),
+                     Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+
+    assert window.plot_tabs.names() == ['Tab 1', 'Tab 3']
+
+
+def test_a_tab_name_fits_its_tab_and_an_ampersand_is_kept(qapp, window):
+    from PySide6.QtWidgets import QStyle, QStyleOptionTab
+    bar = window.plot_tabs.bar
+    bar.setTabText(0, 'Brakes & ABS')
+    qapp.processEvents()
+
+    option = QStyleOptionTab()
+    bar.initStyleOption(option, 0)
+
+    assert option.text == 'Brakes & ABS'            # not shortened
+    name = bar.style().subElementRect(QStyle.SubElement.SE_TabBarTabText, option, bar)
+    assert name.width() >= bar.fontMetrics().horizontalAdvance('Brakes & ABS')
