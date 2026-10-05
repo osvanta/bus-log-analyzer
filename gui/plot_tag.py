@@ -34,6 +34,8 @@ from PySide6.QtWidgets import (
 # Between the tag's parts, as between the parts of the cursor readout.
 SEPARATOR = '   |   '
 MAX_TEXT_LENGTH = 80
+# Shown, dimmed, where there is no tag, so the user finds out there can be one.
+TAG_HINT = '<double click here to add custom tag>'
 _SETTINGS_KEY = 'plot_tag'
 
 
