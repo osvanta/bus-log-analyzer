@@ -88,6 +88,45 @@ def test_open_file_shows_its_dialog_before_loading_the_readers():
     assert 'core.readers loaded when the dialog opened: False' in completed.stdout
 
 
+_SWEEP_SCRIPT = r"""
+import time
+from pathlib import Path
+from PySide6.QtWidgets import QApplication
+app = QApplication([])
+from gui.main_window import MainWindow
+leftover = Path(%r)
+window = MainWindow('Osvanta Bus Log Analyzer', 'v00.00.99')
+print('after build:', leftover.exists())
+window.show()
+deadline = time.monotonic() + 60
+while leftover.exists() and time.monotonic() < deadline:
+    app.processEvents()
+    time.sleep(0.01)
+print('after show:', leftover.exists())
+window.close()
+"""
+
+
+def test_start_up_removes_trace_files_earlier_versions_left(tmp_path):
+    # Every session of an earlier version left its last CAN Trace in the temp
+    # folder, up to hundreds of MB each, and nothing ever removed them.
+    leftover = tmp_path / 'osvanta_k3j9x0aa.rawdata'
+    leftover.write_bytes(bytes(64 * 1000))
+    temp = str(tmp_path)
+
+    completed = subprocess.run(
+        [sys.executable, '-c', _SWEEP_SCRIPT % str(leftover)],
+        cwd=REPO_ROOT,
+        env=dict(os.environ, QT_QPA_PLATFORM='offscreen', PYTHONPATH=str(REPO_ROOT),
+                 TEMP=temp, TMP=temp, TMPDIR=temp),
+        capture_output=True, text=True, timeout=180,
+    )
+
+    assert completed.returncode == 0, completed.stderr[-4000:]
+    assert 'after build: True' in completed.stdout, "removed before the window was up"
+    assert 'after show: False' in completed.stdout
+
+
 def test_the_open_file_dialog_offers_every_readable_format():
     from core.readers import ALL_SUFFIXES
     from gui.main_window import _MEASUREMENT_SUFFIXES

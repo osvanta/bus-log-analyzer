@@ -7,6 +7,9 @@
 """Tests for core/raw_frame_store.py — append, seal, get_window, match_mask."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -212,18 +215,138 @@ def test_match_mask_empty_store():
 
 # ── close / cleanup ───────────────────────────────────────────────────────
 
+def _disappears(path, seconds: float = 5.0) -> bool:
+    """Whether *path* is gone within *seconds*.
+
+    Windows deletes a delete-on-close file once its last handle closes, and
+    an antivirus scan may hold one a moment after the store's.
+    """
+    import os
+    import time
+
+    deadline = time.monotonic() + seconds
+    while os.path.exists(path):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
 def test_close_removes_temp_file():
     store = _populated_store(1, sealed=True)
     path = store._data_path
     store.close()
-    import os
-    assert not os.path.exists(path)
+    assert _disappears(path)
 
 
 def test_close_idempotent():
     store = _populated_store(1, sealed=True)
     store.close()
     store.close()   # second close must not raise
+
+
+_UNCLOSED_STORE_SCRIPT = r"""
+import sys, time
+sys.path.insert(0, %r)
+from core.raw_frame_store import RawFrameStore
+store = RawFrameStore()
+for number in range(20_000):    # past the 1 MB write buffer, so on disk
+    store.append(number * 0.001, 1, 0x100, 8, 'Rx', False, False, bytes(8), 'Msg', True)
+store.seal()
+import os
+print(os.getpid(), store._data_path, flush=True)
+time.sleep(60)
+"""
+
+
+def test_the_temp_file_goes_when_the_process_ends_without_close():
+    # The window still held the last measurement's store at exit, nothing
+    # called close(), and every session left its CAN Trace in the temp
+    # folder. Killed here: the hardest way a process can end, as Task Manager
+    # does, and a crash.
+    import os
+    import signal
+    import subprocess
+
+    repo_root = str(Path(__file__).resolve().parents[1])
+    process = subprocess.Popen(
+        [sys.executable, '-c', _UNCLOSED_STORE_SCRIPT % repo_root],
+        stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        pid, path = process.stdout.readline().split(' ', 1)
+        path = path.strip()
+        assert os.path.getsize(path) == 20_000 * 64
+        # By its own pid: a virtual environment's python.exe is a launcher
+        # that runs the interpreter as a child, which outlives the launcher.
+        os.kill(int(pid), signal.SIGTERM)    # TerminateProcess on Windows
+    finally:
+        process.kill()
+        process.wait(30)
+        process.stdout.close()
+
+    assert _disappears(path), "the killed process left its trace file behind"
+
+
+def test_sorting_and_closing_leave_no_temp_file(tmp_path, monkeypatch):
+    import tempfile
+
+    monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
+    store = _numbered_store([0.3, 0.1, 0.2])
+    unsorted = store._data_path
+
+    assert store.sort_by_time() is True
+    assert _disappears(unsorted), "the unsorted copy was left behind"
+    sorted_copy = store._data_path
+    store.seal()
+    store.close()
+    assert _disappears(sorted_copy)
+    assert list(tmp_path.iterdir()) == []
+
+
+def _numbered_rows(store: RawFrameStore) -> list[int]:
+    return [record.data[0] for record in store.get_window(range(len(store)))]
+
+
+def test_leftover_files_are_removed_and_a_running_copy_keeps_its_own(tmp_path, monkeypatch):
+    import tempfile
+
+    from core.raw_frame_store import remove_leftover_files
+
+    (tmp_path / 'osvanta_a1b2c3d4.rawdata').write_bytes(bytes(64 * 100))
+    (tmp_path / 'osvanta_e5f6g7h8.rawdata').write_bytes(b'')
+    kept = [tmp_path / 'osvanta_crash.log', tmp_path / 'other.rawdata',
+            tmp_path / 'osvanta_recovered_x.mf4']
+    for path in kept:
+        path.write_bytes(b'keep')
+    monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
+    # Another copy of the application, still loading: its rows are in the
+    # write buffer, its file still empty, and it is sealed only afterwards.
+    running = _numbered_store([0.0, 0.1, 0.2])
+
+    removed, freed = remove_leftover_files(tmp_path)
+
+    assert (removed, freed) == (3, 64 * 100)
+    assert sorted(tmp_path.iterdir()) == sorted(kept)
+    running.append(0.3, 1, 0x103, 8, 'Rx', False, False, bytes([3] * 8), 'Msg3', True)
+    running.seal()
+    assert _numbered_rows(running) == [0, 1, 2, 3]
+    running.close()
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows refuses to delete an open file')
+def test_a_file_an_earlier_version_still_has_open_is_skipped(tmp_path):
+    import os
+
+    from core.raw_frame_store import remove_leftover_files
+
+    # How earlier versions opened it: without delete-on-close.
+    fd = os.open(tmp_path / 'osvanta_old.rawdata', os.O_RDWR | os.O_CREAT | os.O_BINARY)
+    with os.fdopen(fd, 'w+b') as handle:
+        handle.write(bytes(64))
+        handle.flush()
+        assert remove_leftover_files(tmp_path) == (0, 0)
+    assert remove_leftover_files(tmp_path) == (1, 64)
 
 
 # ── LIN frames in the shared trace ─────────────────────────────────────────
@@ -451,7 +574,7 @@ def test_a_failed_sort_leaves_the_store_as_it_was(monkeypatch):
         store.sort_by_time()
     monkeypatch.undo()
 
-    assert len(created) == 1 and not os.path.exists(created[0]), \
+    assert len(created) == 1 and _disappears(created[0]), \
         "the half-written copy was left behind"
     assert store._data_path == data_path
     assert np.frombuffer(store.timestamps, dtype=np.float64).tolist() == [0.3, 0.1, 0.2]

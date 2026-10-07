@@ -15,7 +15,9 @@ Design goals
   The file is mmap-based for O(1) random access by frame index.
 * No cap on the number of frames — supports 200 MB+ BLF files (3M+ frames)
   with ~54 MB RAM + ~192 MB disk.
-* Temp file is auto-deleted when ``close()`` is called or the object is GC'd.
+* The temp file is opened delete-on-close, so Windows removes it when its last
+  handle closes: on ``close()``, on garbage collection, and when the process
+  ends, however it ends. Nothing has to run at exit.
 
 Memory layout (in-process)
 --------------------------
@@ -60,6 +62,7 @@ import os
 import struct
 import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
@@ -75,11 +78,59 @@ _LARGE_STORE_LIMIT = 500_000     # frames; disable data-hex search above this
 
 _DIR_STRINGS = ['Rx', 'Tx', 'Unknown']
 
+_FILE_PREFIX = 'osvanta_'
+_FILE_SUFFIX = '.rawdata'
+
 # Flag bits packed into the uint8 `flags` column.
 FLAG_EXTENDED = 1
 FLAG_FD       = 2
 FLAG_DECODED  = 4
 FLAG_LIN      = 8      # bus discriminator; absent means CAN
+
+
+def _create_data_file():
+    """Open a new temp data file that the operating system deletes.
+
+    Deleting it in close() was not enough: the window still holds the last
+    measurement's store when the application exits, Python does not collect
+    it, and every session left that trace behind in the temp folder. Opened
+    with O_TEMPORARY, Windows deletes the file when its last handle closes,
+    including when the process crashes or is killed. Elsewhere an open file
+    outlives its name, so the name goes at once.
+
+    Returns the buffered file and its path.
+    """
+    fd, path = tempfile.mkstemp(prefix=_FILE_PREFIX, suffix=_FILE_SUFFIX)
+    if hasattr(os, 'O_TEMPORARY'):
+        os.close(fd)
+        fd = os.open(path, os.O_RDWR | os.O_BINARY | os.O_NOINHERIT | os.O_TEMPORARY)
+    else:
+        os.unlink(path)
+    # A 1 MB write buffer: seal() flushes before it maps the file. Unbuffered,
+    # every 64-byte frame was its own write() call, several seconds for a
+    # large BLF.
+    return os.fdopen(fd, 'w+b', buffering=1 << 20), path
+
+
+def remove_leftover_files(directory: str | os.PathLike | None = None) -> tuple[int, int]:
+    """Delete the data files earlier versions left in the temp folder.
+
+    Returns how many files were deleted and the bytes freed. Another running
+    copy of the application is not disturbed: Windows refuses to delete a file
+    an earlier version still has open, and a current version's file stays
+    usable without its name.
+    """
+    removed = freed = 0
+    folder = Path(directory) if directory is not None else Path(tempfile.gettempdir())
+    for path in folder.glob(f'{_FILE_PREFIX}*{_FILE_SUFFIX}'):
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+        freed += size
+    return removed, freed
 
 
 class RawFrameRecord(NamedTuple):
@@ -141,12 +192,7 @@ class RawFrameStore:
         self._write_buf: bytearray = bytearray(_DATA_BYTES)
 
         # Create temp file immediately
-        fd, path = tempfile.mkstemp(prefix='osvanta_', suffix='.rawdata')
-        self._data_path = path
-        # Use a 1 MB write buffer — seal() calls flush() before mmap so this is safe.
-        # buffering=0 (unbuffered) caused one write() syscall per frame (64 B each),
-        # adding several seconds of overhead for large BLF files (hundreds of K frames).
-        self._data_file = os.fdopen(fd, 'w+b', buffering=1 << 20)
+        self._data_file, self._data_path = _create_data_file()
 
     # ── Write phase (during decode) ───────────────────────────────────────
 
@@ -349,8 +395,7 @@ class RawFrameStore:
         del timestamps          # a live buffer export would pin the column
 
         self._data_file.flush()
-        fd, path = tempfile.mkstemp(prefix='osvanta_', suffix='.rawdata')
-        data_file = os.fdopen(fd, 'w+b', buffering=1 << 20)
+        data_file, path = _create_data_file()
         try:
             source = mmap.mmap(self._data_file.fileno(),
                                length=count * _DATA_BYTES,
@@ -374,14 +419,12 @@ class RawFrameStore:
                 )
                 columns[name] = reordered
         except BaseException:
-            data_file.close()
-            os.unlink(path)
+            data_file.close()       # which deletes it
             raise
 
         for name, column in columns.items():
             setattr(self, name, column)
-        self._data_file.close()
-        os.unlink(self._data_path)
+        self._data_file.close()     # which deletes the unsorted copy
         self._data_file, self._data_path = data_file, path
         return True
 
@@ -413,7 +456,12 @@ class RawFrameStore:
         return len(self.timestamps)
 
     def close(self) -> None:
-        """Release mmap and delete temp file."""
+        """Release mmap and delete temp file.
+
+        Closing the last handle deletes the file. A map that cannot close yet,
+        because a NumPy view of it is still alive, deletes it once the view
+        goes.
+        """
         if self._mmap:
             try:
                 self._mmap.close()
@@ -426,12 +474,7 @@ class RawFrameStore:
             except Exception:
                 pass
             self._data_file = None
-        if self._data_path and os.path.exists(self._data_path):
-            try:
-                os.unlink(self._data_path)
-            except Exception:
-                pass
-            self._data_path = None
+        self._data_path = None
 
     def __del__(self) -> None:
         self.close()

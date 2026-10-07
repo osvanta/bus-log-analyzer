@@ -132,7 +132,26 @@ def _preload_measurement_support() -> None:
             import core.load_worker  # noqa: F401 — imports core.readers too
         except Exception:
             pass  # raised again, in full, where Open File imports it
+        _remove_leftover_trace_files()
     threading.Thread(target=load, name='Measurement support preload', daemon=True).start()
+
+
+def _remove_leftover_trace_files() -> None:
+    """Free the CAN Trace files earlier versions left in the temp folder.
+
+    Each of those sessions left the trace of its last bus log behind, up to
+    hundreds of MB each; see core.raw_frame_store._create_data_file().
+    """
+    try:
+        from core.raw_frame_store import remove_leftover_files
+        removed, freed = remove_leftover_files()
+    except Exception:
+        return
+    if removed:
+        app_log.record(
+            f'Removed {removed} CAN Trace file(s) left in the temp folder, '
+            f'{freed / 1_000_000:,.1f} MB.'
+        )
 
 
 class MainWindow(QMainWindow):

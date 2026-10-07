@@ -79,8 +79,10 @@ class ReleaseTest(QObject):
         for run in self._queue:
             run.skipped = 'stopped before it started'
         self._queue.clear()
-        if self._process is not None:
-            self._process.kill()
+        process = self._process     # _complete() clears it while we wait
+        if process is not None:
+            process.kill()
+            process.waitForFinished(5000)   # let go of its files in the work folder
 
     def _next(self) -> None:
         if not self._queue:
@@ -328,4 +330,6 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
         states.append(timing.pc_state())
     test.start()
     code = app.exec()
+    # Closing the window part-way quits before finish() runs.
+    shutil.rmtree(work_dir, ignore_errors=True)
     return outcome['code'] if args.quit_when_done else code
