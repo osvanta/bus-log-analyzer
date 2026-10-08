@@ -350,17 +350,9 @@ class _CheckDelegate(QStyledItemDelegate):
             painter.drawText(text_rect,
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                              str(text))
-            # Checkbox on the right side when text is present
-            box = 14
-            cx = option.rect.right() - box - 2
-            cy = option.rect.center().y() - box // 2
-        else:
-            # No text — centre the checkbox
-            box = 14
-            cx = option.rect.center().x() - box // 2
-            cy = option.rect.center().y() - box // 2
 
-        rect = QRectF(cx, cy, box, box)
+        box = self._BOX
+        rect = self.box_rect(option.rect, index)
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -397,9 +389,46 @@ class _CheckDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         return QSize(22, 22)
 
+    _BOX = 14
+    # A click this close outside the box still hits it.
+    _HIT_MARGIN = 3
+
+    @classmethod
+    def box_rect(cls, cell, index) -> QRectF:
+        """Where the box is drawn in *cell*: at its right when the cell has
+        text (a group's arrow), otherwise in its centre."""
+        box = cls._BOX
+        if index.data(Qt.ItemDataRole.DisplayRole):
+            x = cell.right() - box - 2
+        else:
+            x = cell.center().x() - box // 2
+        return QRectF(x, cell.center().y() - box // 2, box, box)
+
+    @classmethod
+    def hits_box(cls, cell, index, pos: QPointF) -> bool:
+        m = cls._HIT_MARGIN
+        return cls.box_rect(cell, index).adjusted(-m, -m, m, m).contains(pos)
+
     def editorEvent(self, event, model, option, index):
-        # Preserve native click-to-toggle behaviour.
-        return super().editorEvent(event, model, option, index)
+        # The style looks for a click on a box of its own at the cell's left,
+        # under a group's arrow; this one answers where the box is drawn.
+        mouse = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
+                 QEvent.Type.MouseButtonRelease)
+        if event.type() not in mouse:
+            return super().editorEvent(event, model, option, index)  # Space key
+        flags = index.flags()
+        if not (flags & Qt.ItemFlag.ItemIsUserCheckable
+                and flags & Qt.ItemFlag.ItemIsEnabled):
+            return False
+        if (event.button() != Qt.MouseButton.LeftButton
+                or not self.hits_box(option.rect, index, event.position())):
+            return False
+        if event.type() != QEvent.Type.MouseButtonRelease:
+            return True  # the box toggles on the release, as Qt's own does
+        state = index.data(Qt.ItemDataRole.CheckStateRole)
+        checked = state in (Qt.CheckState.Checked, Qt.CheckState.Checked.value)
+        new_state = Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked
+        return model.setData(index, new_state, Qt.ItemDataRole.CheckStateRole)
 
 
 class _ReorderTable(QTableWidget):
@@ -411,6 +440,9 @@ class _ReorderTable(QTableWidget):
     def __init__(self, rows: int, cols: int, parent=None) -> None:
         super().__init__(rows, cols, parent)
         self._panel: Any = None  # set to PlotPanel immediately after creation
+        # Whether the last click ended on a box: on a group's box, the panel
+        # leaves the group open or closed, as the click was not on its arrow.
+        self.released_on_box = False
 
     def startDrag(self, supported_actions: Qt.DropActions) -> None:  # type: ignore[override]
         panel = self._panel
@@ -450,6 +482,36 @@ class _ReorderTable(QTableWidget):
                 if len(selected) > 1 and clicked_key in selected:
                     panel._checkbox_target_keys = selected
         super().mousePressEvent(event)
+
+    def _box_at(self, pos: QPointF) -> bool:
+        index = self.indexAt(pos.toPoint())
+        return (index.isValid() and index.column() in (0, 6)
+                and bool(index.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+                and _CheckDelegate.hits_box(self.visualRect(index), index, pos))
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        self.released_on_box = self._box_at(event.position())
+        panel = self._panel
+        keep = (panel.selected_keys()
+                if self.released_on_box and panel is not None else None)
+        super().mouseReleaseEvent(event)
+        if keep is not None:
+            # On a row already selected Qt now selects that row alone; a
+            # click on a box leaves the selection as it was.
+            panel._restore_selection(keep)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        """A quick second click on a box or a group's arrow is a click.
+
+        Two quick clicks tick and untick a box, or close and reopen a group;
+        as a double-click the second would be lost.
+        """
+        index = self.indexAt(event.position().toPoint())
+        if (event.button() == Qt.MouseButton.LeftButton
+                and index.isValid() and index.column() in (0, 6)):
+            self.mousePressEvent(event)
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class _ElidedLabel(QLabel):
@@ -575,7 +637,6 @@ class PlotPanel(QWidget):
         self._name_show_message: bool = False
         self._collapsed_groups: dict[str, bool] = {}
         self._cursor2_enabled: bool = False
-        self._group_vis_changed: bool = False  # True when itemChanged fired before cellClicked
         self._checkbox_target_keys: list[str] = []  # pre-click multi-row snapshot
         self._batch_mode: bool = False          # True while batch-adding signals; suppresses per-add rebuilds
         self._rebuild_seq: int = 0              # bumped each rebuild and by fit_to_window(); lets deferred restores detect staleness
@@ -3490,10 +3551,12 @@ class PlotPanel(QWidget):
         # Col 1: GROUP NAME in Signal column — bold, clearly visible
         name_item = QTableWidgetItem(f'  {group_name}')
         name_item.setData(Qt.ItemDataRole.UserRole, f'__group__{group_name}')
+        # Not editable: a double-click renames through a dialog
+        # (_on_table_item_double_clicked); an editor in the cell would follow
+        # it and change nothing.
         name_item.setFlags(
             Qt.ItemFlag.ItemIsEnabled |
-            Qt.ItemFlag.ItemIsSelectable |
-            Qt.ItemFlag.ItemIsEditable   # allow double-click rename
+            Qt.ItemFlag.ItemIsSelectable
         )
         name_item.setBackground(bg)
         f2 = name_item.font()
@@ -3566,12 +3629,11 @@ class PlotPanel(QWidget):
             self._apply_visibility()
 
         elif key.startswith('__group__'):
-            # Col-0 group checkbox+arrow — handle visibility; flag suppresses collapse
+            # Col-0 group checkbox+arrow — the box shows or hides the group
             if not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
                 return
             group_name = key[len('__group__'):]
             checked    = item.checkState() == Qt.CheckState.Checked
-            self._group_vis_changed = True
             self._push_undo()
             for k, p in self._items.items():
                 if p.group == group_name:
@@ -3706,7 +3768,11 @@ class PlotPanel(QWidget):
         self._rebuild_curves(preserve_selection=True)
 
     def _on_table_item_double_clicked(self, item: QTableWidgetItem) -> None:
-        """Double-click on group header (col 0 arrow or col 1 name) → rename group."""
+        """Double-click on a group's name → rename the group.
+
+        A double-click on its arrow or box is two clicks; see
+        _ReorderTable.mouseDoubleClickEvent.
+        """
         key = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not isinstance(key, str) or not key.startswith('__group__'):
             return
@@ -3725,17 +3791,17 @@ class PlotPanel(QWidget):
         self._rebuild_curves(preserve_selection=True)
 
     def _on_table_cell_clicked(self, row: int, col: int) -> None:
-        """Click on group header arrow col → toggle collapse.
-        If the col-0 checkbox was what got clicked, itemChanged already fired
-        and set _group_vis_changed — skip collapse in that case.
+        """Click on a group header → close or open the group.
+
+        Except on the box in its first cell, which the delegate has already
+        toggled: that shows or hides the group's signals.
         """
         item0 = self.table.item(row, 0)
         if not item0:
             return
         key = item0.data(Qt.ItemDataRole.UserRole)
         if isinstance(key, str) and key.startswith('__group__'):
-            if self._group_vis_changed:
-                self._group_vis_changed = False  # consume the flag, skip collapse
+            if col == 0 and self.table.released_on_box:
                 return
             group_name = key[len('__group__'):]
             self._collapsed_groups[group_name] = not self._collapsed_groups.get(group_name, False)
