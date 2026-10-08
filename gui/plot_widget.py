@@ -60,6 +60,9 @@ _CURSOR_HOVER_COLOR = '#ff0000'
 # The tag hint's colour, this far from the strip's colour toward its text:
 # readable, yet plainly not a tag.
 _TAG_HINT_SHADE = 0.55
+# A group's row in the signal table, this far from the window colour toward
+# its text: the app's own colours, a shade apart from the table's header.
+_GROUP_ROW_SHADE = 0.08
 
 
 def _is_dark(color: str) -> bool:
@@ -326,7 +329,9 @@ class _CheckDelegate(QStyledItemDelegate):
         else:
             painter.fillRect(option.rect, option.palette.base())
 
-        t = self._panel._theme_colors()
+        # A group's box suits its row's colour; a signal's, the plot's.
+        t = self._panel._theme_colors(
+            bg_brush.color().name() if bg_brush is not None else None)
         state = index.data(Qt.ItemDataRole.CheckStateRole)
         checked = (state == Qt.CheckState.Checked.value or
                    state == Qt.CheckState.Checked)
@@ -3530,7 +3535,9 @@ class PlotPanel(QWidget):
         else:
             grp_cs = Qt.CheckState.Unchecked
 
-        bg = QBrush(QColor('#1e2e40'))
+        row_bg, row_text = self._group_row_colors()
+        bg = QBrush(QColor(row_bg))
+        fg = QBrush(QColor(row_text))
 
         # Col 0: collapse arrow + group visibility checkbox
         arrow_item = QTableWidgetItem(arrow)
@@ -3543,6 +3550,7 @@ class PlotPanel(QWidget):
         )
         arrow_item.setCheckState(grp_cs)
         arrow_item.setBackground(bg)
+        arrow_item.setForeground(fg)
         f = arrow_item.font()
         f.setBold(True)
         arrow_item.setFont(f)
@@ -3562,7 +3570,7 @@ class PlotPanel(QWidget):
         f2 = name_item.font()
         f2.setBold(True)
         name_item.setFont(f2)
-        name_item.setForeground(QBrush(QColor('#8ab8e0')))  # light blue
+        name_item.setForeground(fg)
         self.table.setItem(row_idx, 1, name_item)
 
         # Cols 2-6: empty, same background
@@ -4092,9 +4100,10 @@ class PlotPanel(QWidget):
         menu.addAction(act)
         menu.exec(self.plot.mapToGlobal(position))
 
-    def _theme_colors(self) -> dict:
-        """Return palette dict used by _CheckDelegate for theme-aware checkbox colours."""
-        if _is_dark(self._background_color):
+    def _theme_colors(self, background: str | None = None) -> dict:
+        """Return palette dict used by _CheckDelegate for theme-aware checkbox
+        colours, on *background* or else on the plot background."""
+        if _is_dark(background or self._background_color):
             return {'check_border': '#808080', 'check_bg': '#2a2a2a', 'check_mark': '#ffffff'}
         return {'check_border': '#606060', 'check_bg': '#ffffff', 'check_mark': '#101010'}
 
@@ -4115,6 +4124,37 @@ class PlotPanel(QWidget):
             (window.red(), text.red()), (window.green(), text.green()),
             (window.blue(), text.blue()))))
         return window.name(), text.name(), border.name()
+
+    @classmethod
+    def _group_row_colors(cls) -> tuple[str, str]:
+        """Background and text of a group's row in the signal table.
+
+        Like the header, the row follows the application's light or dark
+        theme, not the plot background; a shade apart from the header, so it
+        is not taken for it.
+        """
+        window, text, _border = cls._header_colors()
+        return _mix(QColor(window), QColor(text), _GROUP_ROW_SHADE).name(), text
+
+    def _recolor_group_rows(self) -> None:
+        """Give every group's row the theme's colours, after a switch between
+        light and dark mode."""
+        bg, fg = (QBrush(QColor(color)) for color in self._group_row_colors())
+        was_blocked = self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                first = self.table.item(row, 0)
+                key = first.data(Qt.ItemDataRole.UserRole) if first else None
+                if not (isinstance(key, str) and key.startswith('__group__')):
+                    continue
+                for col in range(self.table.columnCount()):
+                    item = self.table.item(row, col)
+                    if item is not None:
+                        item.setBackground(bg)
+                        if col in (0, 1):  # the arrow and the name
+                            item.setForeground(fg)
+        finally:
+            self.table.blockSignals(was_blocked)
 
     def eventFilter(self, watched, event) -> bool:
         # The garbage collector empties a panel caught in a reference cycle
@@ -4202,6 +4242,7 @@ class PlotPanel(QWidget):
         if (event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange)
                 and applied is not None and self._header_colors() != applied):
             self._apply_panel_background()
+            self._recolor_group_rows()
 
     def _apply_panel_background(self) -> None:
         bg = self._background_color
