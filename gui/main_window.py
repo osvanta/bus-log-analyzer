@@ -79,6 +79,7 @@ from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
 from gui.raw_frame_dialog import RawFrameDialog
 from gui.load_debug_window import LoadDebugWindow, LoadDebugWorker
+from gui.window_frame import CaptionlessWindow, TitleRow
 from core.debug_inspector import (
     format_runtime_failure,
     inspect_databases,
@@ -158,6 +159,9 @@ class MainWindow(QMainWindow):
     # Carries (kind, generation, inspector) to the debug worker. ``object``
     # is what lets PySide6 marshal the callable across the thread boundary.
     debugInspectionRequested = Signal(object)
+
+    # Set once the toolbar is built; Windows sends no message before then.
+    _window_frame: CaptionlessWindow | None = None
 
     def __init__(self, app_name: str, version: str, parent: QWidget | None = None, splash=None) -> None:
         super().__init__(parent)
@@ -275,6 +279,14 @@ class MainWindow(QMainWindow):
         if app_log.log_path() is not None:
             self._log(f'App log file: {app_log.log_path()}')
         self._update_measurement_tab()
+
+    def nativeEvent(self, event_type, message):
+        # The title bar's work, done by the top row: see gui.window_frame.
+        if self._window_frame is not None:
+            answer = self._window_frame.native_event(message)
+            if answer is not None:
+                return answer
+        return super().nativeEvent(event_type, message)
 
     def _splash_status(self, message: str) -> None:
         """Forward a status message to the splash screen if still visible."""
@@ -468,8 +480,10 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar('Main')
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        # The toolbar's row is the top of the window, in place of a title bar.
+        self.title_row = TitleRow(toolbar)
+        self.setMenuWidget(self.title_row)
+        self._window_frame = CaptionlessWindow(self, self.title_row)
         self._toolbar_actions: dict[str, QAction] = {}
         for text, slot in [
             ('Open File',    self.choose_blf),

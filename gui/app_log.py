@@ -7,8 +7,8 @@
 """A silent record of what the application said, in a file the user can send.
 
 The application opens no console window: the packaged build is windowed, and
-run_dev.bat starts it with pythonw. ``AppLog`` appends to ``osvanta_app.log``
-next to the executable (next to app.py when run from source):
+run_dev.bat starts it with pythonw. ``AppLog`` appends to
+``busloganalyzer_applog.log`` next to the executable (next to app.py when run from source):
 
 - Every line of the Log panel.
 - Where the application has no console, everything a console would have
@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-LOG_NAME = 'osvanta_app.log'
+LOG_NAME = 'busloganalyzer_applog.log'
 # Rotated at start-up, so a log never grows past this by more than a session.
 MAX_BYTES = 1_000_000
 # A message repeated many times a second must not fill the disk.
@@ -42,7 +42,7 @@ _PREAMBLE = (
     'Osvanta Bus Log Analyzer app log.\n'
     "The Log panel's lines and, where the application has no console, what a\n"
     'console would have shown. Each session starts with a ==== header.\n'
-    'Why the application ended is recorded in osvanta_crash.log.\n'
+    'Why the application ended is recorded in BLA_crash.log.\n'
 )
 
 _running: AppLog | None = None

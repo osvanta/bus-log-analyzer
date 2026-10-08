@@ -8,6 +8,7 @@
 
 from pathlib import Path
 import os
+import shutil
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -120,13 +121,14 @@ exe = EXE(
 # packaged exe ignores PYTHONDEVMODE and PYTHONMALLOC, so a second exe is the
 # only way to get them. It shares _internal with BusLogAnalyzer.exe and adds
 # about 25 MB. The release test runs with it (gui/release_test), and a user
-# can reproduce a crash with it for a bug report.
+# can reproduce a crash with it for a bug report. gui/release_test/runner.py
+# looks for it by this name.
 memcheck_exe = EXE(
     pyz,
     a.scripts,
     [('X dev', None, 'OPTION')],
     exclude_binaries=True,
-    name="BusLogAnalyzer_memcheck",
+    name="appdebugger",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -146,3 +148,8 @@ coll = COLLECT(
     upx_exclude=[],
     name="BusLogAnalyzer",
 )
+
+# A README beside the two executables, where the user sees it. Data files go
+# into _internal, so it is copied after the folder is assembled.
+shutil.copyfile(project_root / "resources" / "release_readme.txt",
+                Path(coll.name) / "README.txt")

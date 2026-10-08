@@ -56,9 +56,14 @@ ENV/
 Thumbs.db
 desktop.ini
 # ── Osvanta Bus Log Analyzer runtime files ─────────────────────────────
+busloganalyzer_applog.log
+BLA_crash.log
+# Older sessions, moved aside when a log is rotated at start-up.
+busloganalyzer_applog.log.1
+BLA_crash.log.1
+# The logs' earlier names, still in older checkouts.
 osvanta_app.log
 osvanta_crash.log
-# Older sessions, moved aside when a log is rotated at start-up.
 osvanta_*.log.1
 osvanta_dev.log
 osvanta_config.json

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-import fnmatch
+import re
 
 from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtGui import QAction, QDrag, QKeySequence, QShortcut, QStandardItemModel
@@ -24,6 +24,23 @@ from PySide6.QtWidgets import (
 )
 
 from core.bus_types import channel_label, sort_key, store_key_prefix
+
+
+def search_pattern(text: str) -> re.Pattern[str] | None:
+    """What the search box finds, or None when it is empty.
+
+    The text can be anywhere in a name, in any case. ``*`` stands for any
+    run of characters and ``?`` for one, so ``veh*speed`` finds
+    ``WheelBasedVehicleSpeed``; every other character means itself.
+    """
+    text = text.strip()
+    if not text:
+        return None
+    regex = ''.join(
+        '.*' if char == '*' else '.' if char == '?' else re.escape(char)
+        for char in text
+    )
+    return re.compile(regex, re.IGNORECASE | re.DOTALL)
 
 
 class SignalTree(QTreeWidget):
@@ -60,7 +77,12 @@ class SignalTreeWidget(QWidget):
         self._messages_expanded = True
 
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search signals... (type to filter)")
+        self.search_edit.setPlaceholderText("Search signals... (* and ? wildcards)")
+        self.search_edit.setToolTip(
+            "Finds the text anywhere in a signal name.\n"
+            "* stands for any text, ? for one character:\n"
+            "veh*speed finds WheelBasedVehicleSpeed."
+        )
 
         self.collapse_messages_button = QToolButton()
         self.collapse_messages_button.setText("Collapse")
@@ -137,19 +159,13 @@ class SignalTreeWidget(QWidget):
 
     def rebuild_tree(self) -> None:
         self.tree.clear()
-        pattern = self.search_edit.text().strip()
-        p_low = pattern.lower()
+        pattern = search_pattern(self.search_edit.text())
 
         generated_root = QTreeWidgetItem(["Generate Signals"])
         generated_root.setData(0, self._GENERATED_ROLE, True)
         for key, name, tooltip in self._generated_signals:
-            if pattern:
-                searchable = f"{name} {tooltip}".lower()
-                if '*' in p_low or '?' in p_low:
-                    if not fnmatch.fnmatch(searchable, f"*{p_low}*"):
-                        continue
-                elif p_low not in searchable:
-                    continue
+            if pattern and not pattern.search(f"{name} {tooltip}"):
+                continue
             signal_item = QTreeWidgetItem([name])
             signal_item.setData(0, Qt.ItemDataRole.UserRole, key)
             signal_item.setData(0, self._GENERATED_ROLE, True)
@@ -177,16 +193,8 @@ class SignalTreeWidget(QWidget):
                 message_item = QTreeWidgetItem([message_name])
                 added_message = False
                 for signal_name in sorted(signals):
-                    # Substring match: user types letters, no wildcards needed.
-                    # Also supports wildcard patterns if user includes * or ?.
-                    if pattern:
-                        s_low = signal_name.lower()
-                        # If pattern contains wildcard chars use fnmatch, else substring
-                        if '*' in p_low or '?' in p_low:
-                            if not fnmatch.fnmatch(s_low, p_low):
-                                continue
-                        elif p_low not in s_low:
-                            continue
+                    if pattern and not pattern.search(signal_name):
+                        continue
                     signal_item = QTreeWidgetItem([signal_name])
                     signal_item.setData(0, Qt.ItemDataRole.UserRole, f"{key_prefix}::{message_name}::{signal_name}")
                     signal_item.setToolTip(0, "Double-click, right-click, Ctrl/Shift-select, or drag this signal to the plot area")

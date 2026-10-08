@@ -46,7 +46,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.signal_store import SignalSeries
-from gui.plot_tag import SEPARATOR, PlotTag, PlotTagDialog, current_user_name
+from gui.edge_tab import _mix
+from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
 
 
@@ -56,6 +57,12 @@ _CURSOR_ON_DARK = '#ffffff'
 # Under the mouse a cursor turns red and thicker, which stands out against
 # either background.
 _CURSOR_HOVER_COLOR = '#ff0000'
+# The tag hint's colour, this far from the strip's colour toward its text:
+# readable, yet plainly not a tag.
+_TAG_HINT_SHADE = 0.55
+# A group's row in the signal table, this far from the window colour toward
+# its text: the app's own colours, a shade apart from the table's header.
+_GROUP_ROW_SHADE = 0.08
 
 
 def _is_dark(color: str) -> bool:
@@ -322,7 +329,9 @@ class _CheckDelegate(QStyledItemDelegate):
         else:
             painter.fillRect(option.rect, option.palette.base())
 
-        t = self._panel._theme_colors()
+        # A group's box suits its row's colour; a signal's, the plot's.
+        t = self._panel._theme_colors(
+            bg_brush.color().name() if bg_brush is not None else None)
         state = index.data(Qt.ItemDataRole.CheckStateRole)
         checked = (state == Qt.CheckState.Checked.value or
                    state == Qt.CheckState.Checked)
@@ -346,17 +355,9 @@ class _CheckDelegate(QStyledItemDelegate):
             painter.drawText(text_rect,
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                              str(text))
-            # Checkbox on the right side when text is present
-            box = 14
-            cx = option.rect.right() - box - 2
-            cy = option.rect.center().y() - box // 2
-        else:
-            # No text — centre the checkbox
-            box = 14
-            cx = option.rect.center().x() - box // 2
-            cy = option.rect.center().y() - box // 2
 
-        rect = QRectF(cx, cy, box, box)
+        box = self._BOX
+        rect = self.box_rect(option.rect, index)
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -393,9 +394,46 @@ class _CheckDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         return QSize(22, 22)
 
+    _BOX = 14
+    # A click this close outside the box still hits it.
+    _HIT_MARGIN = 3
+
+    @classmethod
+    def box_rect(cls, cell, index) -> QRectF:
+        """Where the box is drawn in *cell*: at its right when the cell has
+        text (a group's arrow), otherwise in its centre."""
+        box = cls._BOX
+        if index.data(Qt.ItemDataRole.DisplayRole):
+            x = cell.right() - box - 2
+        else:
+            x = cell.center().x() - box // 2
+        return QRectF(x, cell.center().y() - box // 2, box, box)
+
+    @classmethod
+    def hits_box(cls, cell, index, pos: QPointF) -> bool:
+        m = cls._HIT_MARGIN
+        return cls.box_rect(cell, index).adjusted(-m, -m, m, m).contains(pos)
+
     def editorEvent(self, event, model, option, index):
-        # Preserve native click-to-toggle behaviour.
-        return super().editorEvent(event, model, option, index)
+        # The style looks for a click on a box of its own at the cell's left,
+        # under a group's arrow; this one answers where the box is drawn.
+        mouse = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
+                 QEvent.Type.MouseButtonRelease)
+        if event.type() not in mouse:
+            return super().editorEvent(event, model, option, index)  # Space key
+        flags = index.flags()
+        if not (flags & Qt.ItemFlag.ItemIsUserCheckable
+                and flags & Qt.ItemFlag.ItemIsEnabled):
+            return False
+        if (event.button() != Qt.MouseButton.LeftButton
+                or not self.hits_box(option.rect, index, event.position())):
+            return False
+        if event.type() != QEvent.Type.MouseButtonRelease:
+            return True  # the box toggles on the release, as Qt's own does
+        state = index.data(Qt.ItemDataRole.CheckStateRole)
+        checked = state in (Qt.CheckState.Checked, Qt.CheckState.Checked.value)
+        new_state = Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked
+        return model.setData(index, new_state, Qt.ItemDataRole.CheckStateRole)
 
 
 class _ReorderTable(QTableWidget):
@@ -407,6 +445,9 @@ class _ReorderTable(QTableWidget):
     def __init__(self, rows: int, cols: int, parent=None) -> None:
         super().__init__(rows, cols, parent)
         self._panel: Any = None  # set to PlotPanel immediately after creation
+        # Whether the last click ended on a box: on a group's box, the panel
+        # leaves the group open or closed, as the click was not on its arrow.
+        self.released_on_box = False
 
     def startDrag(self, supported_actions: Qt.DropActions) -> None:  # type: ignore[override]
         panel = self._panel
@@ -446,6 +487,36 @@ class _ReorderTable(QTableWidget):
                 if len(selected) > 1 and clicked_key in selected:
                     panel._checkbox_target_keys = selected
         super().mousePressEvent(event)
+
+    def _box_at(self, pos: QPointF) -> bool:
+        index = self.indexAt(pos.toPoint())
+        return (index.isValid() and index.column() in (0, 6)
+                and bool(index.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+                and _CheckDelegate.hits_box(self.visualRect(index), index, pos))
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        self.released_on_box = self._box_at(event.position())
+        panel = self._panel
+        keep = (panel.selected_keys()
+                if self.released_on_box and panel is not None else None)
+        super().mouseReleaseEvent(event)
+        if keep is not None:
+            # On a row already selected Qt now selects that row alone; a
+            # click on a box leaves the selection as it was.
+            panel._restore_selection(keep)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        """A quick second click on a box or a group's arrow is a click.
+
+        Two quick clicks tick and untick a box, or close and reopen a group;
+        as a double-click the second would be lost.
+        """
+        index = self.indexAt(event.position().toPoint())
+        if (event.button() == Qt.MouseButton.LeftButton
+                and index.isValid() and index.column() in (0, 6)):
+            self.mousePressEvent(event)
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class _ElidedLabel(QLabel):
@@ -571,7 +642,6 @@ class PlotPanel(QWidget):
         self._name_show_message: bool = False
         self._collapsed_groups: dict[str, bool] = {}
         self._cursor2_enabled: bool = False
-        self._group_vis_changed: bool = False  # True when itemChanged fired before cellClicked
         self._checkbox_target_keys: list[str] = []  # pre-click multi-row snapshot
         self._batch_mode: bool = False          # True while batch-adding signals; suppresses per-add rebuilds
         self._rebuild_seq: int = 0              # bumped each rebuild and by fit_to_window(); lets deferred restores detect staleness
@@ -717,9 +787,17 @@ class PlotPanel(QWidget):
         self.tag_label.setFont(self.cursor_label.font())
         self.tag_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.tag_label.hide()
+        # In the tag's place while there is none: how to add one.
+        self.tag_hint = _ElidedLabel()
+        self.tag_hint.setObjectName('plotTagHint')
+        self.tag_hint.setFont(self.cursor_label.font())
+        self.tag_hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.tag_hint.set_full_text(TAG_HINT)
+        self.tag_hint.hide()
         self._tag_layout = QHBoxLayout(self._table_bottom_gap)
         self._tag_layout.setSpacing(0)
         self._tag_layout.addWidget(self.tag_label)
+        self._tag_layout.addWidget(self.tag_hint)
         self._table_bottom_gap.installEventFilter(self)
         # A tag with the date shows the new date from midnight on.
         self._tag_date_timer = QTimer(self)
@@ -3457,7 +3535,9 @@ class PlotPanel(QWidget):
         else:
             grp_cs = Qt.CheckState.Unchecked
 
-        bg = QBrush(QColor('#1e2e40'))
+        row_bg, row_text = self._group_row_colors()
+        bg = QBrush(QColor(row_bg))
+        fg = QBrush(QColor(row_text))
 
         # Col 0: collapse arrow + group visibility checkbox
         arrow_item = QTableWidgetItem(arrow)
@@ -3470,6 +3550,7 @@ class PlotPanel(QWidget):
         )
         arrow_item.setCheckState(grp_cs)
         arrow_item.setBackground(bg)
+        arrow_item.setForeground(fg)
         f = arrow_item.font()
         f.setBold(True)
         arrow_item.setFont(f)
@@ -3478,16 +3559,18 @@ class PlotPanel(QWidget):
         # Col 1: GROUP NAME in Signal column — bold, clearly visible
         name_item = QTableWidgetItem(f'  {group_name}')
         name_item.setData(Qt.ItemDataRole.UserRole, f'__group__{group_name}')
+        # Not editable: a double-click renames through a dialog
+        # (_on_table_item_double_clicked); an editor in the cell would follow
+        # it and change nothing.
         name_item.setFlags(
             Qt.ItemFlag.ItemIsEnabled |
-            Qt.ItemFlag.ItemIsSelectable |
-            Qt.ItemFlag.ItemIsEditable   # allow double-click rename
+            Qt.ItemFlag.ItemIsSelectable
         )
         name_item.setBackground(bg)
         f2 = name_item.font()
         f2.setBold(True)
         name_item.setFont(f2)
-        name_item.setForeground(QBrush(QColor('#8ab8e0')))  # light blue
+        name_item.setForeground(fg)
         self.table.setItem(row_idx, 1, name_item)
 
         # Cols 2-6: empty, same background
@@ -3554,12 +3637,11 @@ class PlotPanel(QWidget):
             self._apply_visibility()
 
         elif key.startswith('__group__'):
-            # Col-0 group checkbox+arrow — handle visibility; flag suppresses collapse
+            # Col-0 group checkbox+arrow — the box shows or hides the group
             if not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
                 return
             group_name = key[len('__group__'):]
             checked    = item.checkState() == Qt.CheckState.Checked
-            self._group_vis_changed = True
             self._push_undo()
             for k, p in self._items.items():
                 if p.group == group_name:
@@ -3694,7 +3776,11 @@ class PlotPanel(QWidget):
         self._rebuild_curves(preserve_selection=True)
 
     def _on_table_item_double_clicked(self, item: QTableWidgetItem) -> None:
-        """Double-click on group header (col 0 arrow or col 1 name) → rename group."""
+        """Double-click on a group's name → rename the group.
+
+        A double-click on its arrow or box is two clicks; see
+        _ReorderTable.mouseDoubleClickEvent.
+        """
         key = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not isinstance(key, str) or not key.startswith('__group__'):
             return
@@ -3713,17 +3799,17 @@ class PlotPanel(QWidget):
         self._rebuild_curves(preserve_selection=True)
 
     def _on_table_cell_clicked(self, row: int, col: int) -> None:
-        """Click on group header arrow col → toggle collapse.
-        If the col-0 checkbox was what got clicked, itemChanged already fired
-        and set _group_vis_changed — skip collapse in that case.
+        """Click on a group header → close or open the group.
+
+        Except on the box in its first cell, which the delegate has already
+        toggled: that shows or hides the group's signals.
         """
         item0 = self.table.item(row, 0)
         if not item0:
             return
         key = item0.data(Qt.ItemDataRole.UserRole)
         if isinstance(key, str) and key.startswith('__group__'):
-            if self._group_vis_changed:
-                self._group_vis_changed = False  # consume the flag, skip collapse
+            if col == 0 and self.table.released_on_box:
                 return
             group_name = key[len('__group__'):]
             self._collapsed_groups[group_name] = not self._collapsed_groups.get(group_name, False)
@@ -4014,9 +4100,10 @@ class PlotPanel(QWidget):
         menu.addAction(act)
         menu.exec(self.plot.mapToGlobal(position))
 
-    def _theme_colors(self) -> dict:
-        """Return palette dict used by _CheckDelegate for theme-aware checkbox colours."""
-        if _is_dark(self._background_color):
+    def _theme_colors(self, background: str | None = None) -> dict:
+        """Return palette dict used by _CheckDelegate for theme-aware checkbox
+        colours, on *background* or else on the plot background."""
+        if _is_dark(background or self._background_color):
             return {'check_border': '#808080', 'check_bg': '#2a2a2a', 'check_mark': '#ffffff'}
         return {'check_border': '#606060', 'check_bg': '#ffffff', 'check_mark': '#101010'}
 
@@ -4037,6 +4124,37 @@ class PlotPanel(QWidget):
             (window.red(), text.red()), (window.green(), text.green()),
             (window.blue(), text.blue()))))
         return window.name(), text.name(), border.name()
+
+    @classmethod
+    def _group_row_colors(cls) -> tuple[str, str]:
+        """Background and text of a group's row in the signal table.
+
+        Like the header, the row follows the application's light or dark
+        theme, not the plot background; a shade apart from the header, so it
+        is not taken for it.
+        """
+        window, text, _border = cls._header_colors()
+        return _mix(QColor(window), QColor(text), _GROUP_ROW_SHADE).name(), text
+
+    def _recolor_group_rows(self) -> None:
+        """Give every group's row the theme's colours, after a switch between
+        light and dark mode."""
+        bg, fg = (QBrush(QColor(color)) for color in self._group_row_colors())
+        was_blocked = self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                first = self.table.item(row, 0)
+                key = first.data(Qt.ItemDataRole.UserRole) if first else None
+                if not (isinstance(key, str) and key.startswith('__group__')):
+                    continue
+                for col in range(self.table.columnCount()):
+                    item = self.table.item(row, col)
+                    if item is not None:
+                        item.setBackground(bg)
+                        if col in (0, 1):  # the arrow and the name
+                            item.setForeground(fg)
+        finally:
+            self.table.blockSignals(was_blocked)
 
     def eventFilter(self, watched, event) -> bool:
         # The garbage collector empties a panel caught in a reference cycle
@@ -4104,6 +4222,7 @@ class PlotPanel(QWidget):
         text = self._tag.compose(current_user_name(), datetime.date.today())
         self.tag_label.set_full_text(text)
         self.tag_label.setVisible(bool(self._items) and bool(text))
+        self.tag_hint.setVisible(bool(self._items) and not text)
         self._table_bottom_gap.setToolTip(
             'Double-click to edit the tag' if text
             else 'Double-click to add a tag: your text, user name or the date')
@@ -4123,10 +4242,12 @@ class PlotPanel(QWidget):
         if (event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange)
                 and applied is not None and self._header_colors() != applied):
             self._apply_panel_background()
+            self._recolor_group_rows()
 
     def _apply_panel_background(self) -> None:
         bg = self._background_color
         header_bg, header_text, header_border = self._applied_header_colors = self._header_colors()
+        tag_hint = _mix(QColor(header_bg), QColor(header_text), _TAG_HINT_SHADE).name()
         # No frame, and no line above or left of the header: the table sits
         # flush in the panel's top-left corner, and the header row, the window
         # colour across the panel's width, joins the window around it as the
@@ -4148,6 +4269,7 @@ class PlotPanel(QWidget):
                 border: none;
             }}
             QLabel#plotTag {{ background-color: {header_bg}; color: {header_text}; }}
+            QLabel#plotTagHint {{ background-color: {header_bg}; color: {tag_hint}; }}
             QHeaderView::section {{
                 background-color: {header_bg};
                 color: {header_text};

@@ -171,6 +171,42 @@ def test_no_tag_by_default(qapp, window, settings_dir):
     assert not (settings_dir / 'osvanta_user_settings.json').exists()
 
 
+def test_a_hint_says_how_to_add_a_tag_while_there_is_none(qapp, window):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor
+
+    panel = window.plot_panel
+    hint, readout = panel.tag_hint, panel.cursor_label
+    assert not hint.isVisible()                     # nothing plotted
+
+    _plot(qapp, window)
+    splitter = window.center_splitter
+    assert hint.isVisible()
+    # Shortened, like the tag, when the table is too narrow for it.
+    assert hint.full_text() == '<double click here to add custom tag>'
+    assert hint.text().startswith('<double click')
+    assert hint.mapTo(splitter, QPoint(0, 0)).y() == readout.mapTo(splitter, QPoint(0, 0)).y()
+    assert hint.font() == readout.font()
+    # Dimmer than a tag: between the strip's colour and its text colour.
+    background, text, _border = (QColor(c) for c in panel._header_colors())
+    shown = hint.palette().color(hint.foregroundRole())
+    assert (min(background.lightness(), text.lightness()) < shown.lightness()
+            < max(background.lightness(), text.lightness()))
+
+    panel.set_tag(PlotTag(text='Powertrain'))
+    qapp.processEvents()
+    assert not hint.isVisible()
+    assert panel.tag_label.isVisible()
+
+    panel.set_tag(PlotTag())
+    qapp.processEvents()
+    assert hint.isVisible()
+
+    panel.clear_all()
+    qapp.processEvents()
+    assert not hint.isVisible()
+
+
 def test_double_click_under_the_table_sets_the_tag_and_saves_it(
         qapp, window, monkeypatch, settings_dir):
     _plot(qapp, window)
