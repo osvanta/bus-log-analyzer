@@ -32,6 +32,9 @@ the time range and cursors it was left with.
 A configuration file, and the plots kept for the next measurement, describe
 each tab as describe_tab() does; SavedTabs reads them back. A configuration
 saved before tabs describes one plot, which becomes the tab on screen.
+
+Several tabs are a Pro feature; multiple_tabs_allowed() decides. Without it
+the window has one plot, as before tabs: no strip, no "+", no "Move to tab".
 """
 from __future__ import annotations
 
@@ -80,6 +83,16 @@ _OUTLINE = 0.36            # the selected tab's outline, and the line along the 
 _HOVER = 0.08              # another tab under the mouse
 _NAME = 0.62               # another tab's name
 _CLOSE = 0.5               # another tab's "x"
+
+
+def multiple_tabs_allowed() -> bool:
+    """Whether more than one tab of plots may be open.
+
+    Several tabs are a Pro feature, and this is the one place that decides.
+    Until the licensing check is asked here, nobody has Pro, so the window
+    keeps one plot, as it had before tabs.
+    """
+    return False
 
 
 def plot_type(panel: PlotPanel) -> str:
@@ -235,6 +248,8 @@ class PlotTabs(QObject):
     # Signals to move out of a tab: its panel, their keys, and the position
     # of the tab they go to, or -1 for a new tab.
     signalsMoved = Signal(object, list, int)
+    # Whether more than one tab may now be open.
+    multipleAllowedChanged = Signal(bool)
 
     def __init__(self, new_panel: Callable[[], PlotPanel],
                  parent: QObject | None = None) -> None:
@@ -246,6 +261,7 @@ class PlotTabs(QObject):
         # The time of the tab shown last, for the next one shown.
         self._shared: TimeView | None = None
         self.synchronized = True
+        self.multiple_allowed = multiple_tabs_allowed()
 
         self.bar = _TabBar()
         self.bar.setMovable(True)
@@ -280,6 +296,29 @@ class PlotTabs(QObject):
         # The current tab's signal table, and its plot, each in its column.
         self.tables = QStackedWidget()
         self.plots = QStackedWidget()
+        self._show_what_is_allowed()
+
+    def set_multiple_allowed(self, allowed: bool) -> None:
+        """Allow more than one tab, or one only. Tabs already open stay open,
+        to be closed, but no tab is added while one is all that is allowed."""
+        self.multiple_allowed = bool(allowed)
+        self._show_what_is_allowed()
+        self.multipleAllowedChanged.emit(self.multiple_allowed)
+
+    def _show_what_is_allowed(self) -> None:
+        self.add_button.setVisible(self.multiple_allowed)
+        # One tab alone needs no strip.
+        if not (self.multiple_allowed or self.bar.count() > 1):
+            self.strip.hide()
+        elif self.strip.parent() is not None:  # never a window of its own
+            self.strip.show()
+        for panel in self._panels.values():
+            self._offer_moves(panel)
+
+    def _offer_moves(self, panel: PlotPanel) -> None:
+        """Give panel's signal menu "Move to tab", while tabs can be added."""
+        panel.move_targets = ((lambda: self.other_tabs(panel))
+                              if self.multiple_allowed else None)
 
     # ── The tabs ─────────────────────────────────────────────────────────
 
@@ -300,7 +339,7 @@ class PlotTabs(QObject):
     def add_tab(self, name: str | None = None) -> PlotPanel:
         """Add a tab with a new, empty panel, and show it."""
         panel = self._new_panel()
-        panel.move_targets = lambda: self.other_tabs(panel)
+        self._offer_moves(panel)
         panel.moveToTabRequested.connect(
             lambda keys, index, source=panel: self.signalsMoved.emit(source, keys, index))
         tab_id = next(self._ids)
@@ -315,6 +354,7 @@ class PlotTabs(QObject):
         finally:
             self.bar.blockSignals(False)
         self.bar.setTabsClosable(self.bar.count() > 1)
+        self._show_what_is_allowed()
         if self.bar.currentIndex() == index:
             self._show_tab(index)
         else:
@@ -357,6 +397,7 @@ class PlotTabs(QObject):
         panel.table_panel.deleteLater()
         panel.deleteLater()
         self.bar.setTabsClosable(self.bar.count() > 1)
+        self._show_what_is_allowed()
 
     def rename_tab(self, index: int) -> None:
         """Edit a tab's name in place: Enter keeps it, Escape does not."""
@@ -398,6 +439,8 @@ class PlotTabs(QObject):
     def _dropped(self, keys: list, rows: bool, index: int) -> None:
         """Signals dropped on the tab at index, or on "+" (-1): rows of the
         tab on screen move there, signals from the signal tree are added."""
+        if index < 0 and not self.multiple_allowed:
+            return
         if rows:
             self.signalsMoved.emit(self.current(), keys, index)
         else:
@@ -411,8 +454,10 @@ class PlotTabs(QObject):
             close = menu.addAction('Close Tab', lambda: self.close_tab(index))
             close.setEnabled(self.bar.count() > 1)
             menu.addSeparator()
-        menu.addAction('New Tab', lambda: self.add_tab())
-        menu.exec(self.bar.mapToGlobal(pos))
+        if self.multiple_allowed:
+            menu.addAction('New Tab', lambda: self.add_tab())
+        if menu.actions():
+            menu.exec(self.bar.mapToGlobal(pos))
 
     # ── Showing a tab, and the time synchronized tabs share ──────────────
 

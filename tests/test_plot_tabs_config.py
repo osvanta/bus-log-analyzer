@@ -46,6 +46,8 @@ def window(qapp, monkeypatch):
 
     for name in ('warning', 'critical', 'information'):
         monkeypatch.setattr(QMessageBox, name, Mock(return_value=QMessageBox.StandardButton.Ok))
+    # Several tabs are a Pro feature, which these tests are about.
+    monkeypatch.setattr('gui.plot_tabs.multiple_tabs_allowed', lambda: True)
     w = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
     w.store = _store('Speed', 'Torque', 'Current', 'Voltage')
     w.resize(1400, 800)

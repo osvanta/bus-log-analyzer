@@ -85,7 +85,9 @@ class OverflowButtonRow(QWidget):
                      super().minimumSizeHint().height())
 
     def _end_width(self) -> int:
-        return sum(b.sizeHint().width() + self.SPACING for b in self._end_buttons)
+        # An end button hidden on purpose takes no room.
+        return sum(b.sizeHint().width() + self.SPACING
+                   for b in self._end_buttons if b.isVisibleTo(self))
 
     def event(self, event: QEvent) -> bool:
         handled = super().event(event)

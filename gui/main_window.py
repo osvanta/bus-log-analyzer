@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import replace
 import json
 import os
 import sys
@@ -408,6 +409,9 @@ class MainWindow(QMainWindow):
         self.btn_sync_tabs.setFixedHeight(self.btn_stacked.sizeHint().height())
         self.btn_sync_tabs.toggled.connect(self.plot_tabs.set_synchronized)
         self.plot_button_row.add_end_button(self.btn_sync_tabs)
+        # Only while more than one tab is allowed.
+        self.btn_sync_tabs.setVisible(self.plot_tabs.multiple_allowed)
+        self.plot_tabs.multipleAllowedChanged.connect(self.btn_sync_tabs.setVisible)
 
         # Each acts on the tab on screen when clicked.
         self.btn_fit.clicked.connect(lambda: self.plot_panel.fit_to_window())
@@ -1059,8 +1063,17 @@ class MainWindow(QMainWindow):
         data = self._temporary_plot_handoff
         if not data:
             return
-        self._pending_tabs = SavedTabs.from_handoff(data)
+        self._pending_tabs = self._allowed_tabs(SavedTabs.from_handoff(data))
         self._set_up_saved_tabs(self._pending_tabs)
+
+    def _allowed_tabs(self, saved: SavedTabs) -> SavedTabs:
+        """The saved tabs this window may open: the first alone, while one
+        tab is all that is allowed."""
+        if self.plot_tabs.multiple_allowed or len(saved.tabs) < 2:
+            return saved
+        self._log(f'{len(saved.tabs)} tabs saved: the first is opened. '
+                  f'More than one tab is a Pro feature.')
+        return replace(saved, tabs=saved.tabs[:1], current=0)
 
     def _tab_positions(self, saved: SavedTabs) -> list[int]:
         """Which window tab each saved tab goes to: the same place, or the tab
@@ -2085,7 +2098,7 @@ class MainWindow(QMainWindow):
             )
         elif cfg_dbc:
             self.channel_config = ChannelConfig.from_single_dbc(cfg_dbc)
-        saved = SavedTabs.from_config(data)
+        saved = self._allowed_tabs(SavedTabs.from_config(data))
         generated_errors = self.calculated_signals.replace_definitions(
             data.get('generated_signals') or []
         )

@@ -57,6 +57,27 @@ def _resize(qapp, row, width):
     qapp.processEvents()
 
 
+def test_a_hidden_end_button_takes_no_room(qapp, row):
+    from PySide6.QtWidgets import QPushButton
+
+    end = QPushButton('Synchronize Tabs')
+    row.add_end_button(end)
+    qapp.processEvents()
+    # Room for the buttons alone, not for the end button as well.
+    _resize(qapp, row, _full_width(row) + 20)
+    assert row.overflowed_buttons()          # the end button's room is taken
+
+    end.hide()
+    qapp.processEvents()
+
+    assert row.overflowed_buttons() == []
+
+    end.show()
+    qapp.processEvents()
+
+    assert row.overflowed_buttons()
+
+
 def test_all_buttons_show_when_they_fit(qapp, row):
     _resize(qapp, row, _full_width(row) + 50)
 
