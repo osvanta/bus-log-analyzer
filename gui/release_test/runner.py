@@ -38,7 +38,8 @@ from gui.release_test.driver import LOAD_TIMEOUT
 from gui.release_test.plan import build_scenarios, find_measurements, select
 from gui.release_test.report import Run, anonymise, crash_log_session, files_list, judge, render
 
-MEMCHECK_SUFFIX = '_memcheck'
+APP_EXE = 'BusLogAnalyzer.exe'
+MEMCHECK_EXE = 'appdebugger.exe'          # named in BusLogAnalyzer.spec
 REPORTS_FOLDER = 'release_test_reports'   # in the test folder, beside the measurements
 START_SECONDS = 120.0       # per run, on top of LOAD_TIMEOUT per load
 MEMCHECK_SLOWDOWN = 3
@@ -48,8 +49,12 @@ def launcher(memcheck: bool) -> list[str] | None:
     """The command that starts this build, or its memory-checked twin."""
     if getattr(sys, 'frozen', False):
         exe = Path(sys.executable)
-        stem = exe.stem.removesuffix(MEMCHECK_SUFFIX)
-        target = exe.with_name(f'{stem}{MEMCHECK_SUFFIX if memcheck else ""}{exe.suffix}')
+        if memcheck:
+            target = exe.with_name(MEMCHECK_EXE)
+        elif exe.name.lower() == MEMCHECK_EXE:
+            target = exe.with_name(APP_EXE)
+        else:
+            target = exe
         return [str(target)] if target.exists() else None
     app_py = Path(__file__).resolve().parents[2] / 'app.py'
     return [sys.executable, *(['-X', 'dev'] if memcheck else []), str(app_py)]

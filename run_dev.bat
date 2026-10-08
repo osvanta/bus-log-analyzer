@@ -3,7 +3,7 @@ setlocal ENABLEEXTENSIONS ENABLEDELAYEDEXPANSION
 cd /d "%~dp0"
 
 rem pythonw: no console window beside the application. What a console would
-rem show goes to osvanta_app.log; run "python app.py" to watch it live.
+rem show goes to busloganalyzer_applog.log; run "python app.py" to watch it live.
 set "PYEXE="
 if exist .venv\Scripts\pythonw.exe (
     set "PYEXE=.venv\Scripts\pythonw.exe"
