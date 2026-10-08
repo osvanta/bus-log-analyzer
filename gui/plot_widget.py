@@ -46,7 +46,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.signal_store import SignalSeries
-from gui.plot_tag import SEPARATOR, PlotTag, PlotTagDialog, current_user_name
+from gui.edge_tab import _mix
+from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
 
 
@@ -56,6 +57,9 @@ _CURSOR_ON_DARK = '#ffffff'
 # Under the mouse a cursor turns red and thicker, which stands out against
 # either background.
 _CURSOR_HOVER_COLOR = '#ff0000'
+# The tag hint's colour, this far from the strip's colour toward its text:
+# readable, yet plainly not a tag.
+_TAG_HINT_SHADE = 0.55
 
 
 def _is_dark(color: str) -> bool:
@@ -717,9 +721,17 @@ class PlotPanel(QWidget):
         self.tag_label.setFont(self.cursor_label.font())
         self.tag_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.tag_label.hide()
+        # In the tag's place while there is none: how to add one.
+        self.tag_hint = _ElidedLabel()
+        self.tag_hint.setObjectName('plotTagHint')
+        self.tag_hint.setFont(self.cursor_label.font())
+        self.tag_hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.tag_hint.set_full_text(TAG_HINT)
+        self.tag_hint.hide()
         self._tag_layout = QHBoxLayout(self._table_bottom_gap)
         self._tag_layout.setSpacing(0)
         self._tag_layout.addWidget(self.tag_label)
+        self._tag_layout.addWidget(self.tag_hint)
         self._table_bottom_gap.installEventFilter(self)
         # A tag with the date shows the new date from midnight on.
         self._tag_date_timer = QTimer(self)
@@ -4104,6 +4116,7 @@ class PlotPanel(QWidget):
         text = self._tag.compose(current_user_name(), datetime.date.today())
         self.tag_label.set_full_text(text)
         self.tag_label.setVisible(bool(self._items) and bool(text))
+        self.tag_hint.setVisible(bool(self._items) and not text)
         self._table_bottom_gap.setToolTip(
             'Double-click to edit the tag' if text
             else 'Double-click to add a tag: your text, user name or the date')
@@ -4127,6 +4140,7 @@ class PlotPanel(QWidget):
     def _apply_panel_background(self) -> None:
         bg = self._background_color
         header_bg, header_text, header_border = self._applied_header_colors = self._header_colors()
+        tag_hint = _mix(QColor(header_bg), QColor(header_text), _TAG_HINT_SHADE).name()
         # No frame, and no line above or left of the header: the table sits
         # flush in the panel's top-left corner, and the header row, the window
         # colour across the panel's width, joins the window around it as the
@@ -4148,6 +4162,7 @@ class PlotPanel(QWidget):
                 border: none;
             }}
             QLabel#plotTag {{ background-color: {header_bg}; color: {header_text}; }}
+            QLabel#plotTagHint {{ background-color: {header_bg}; color: {tag_hint}; }}
             QHeaderView::section {{
                 background-color: {header_bg};
                 color: {header_text};
