@@ -7,10 +7,13 @@
 """
 Rectangle Zoom: with its button on, a left drag on the plot draws a box, and
 letting go zooms the plot to the box: the time range to its width, the
-height to its height. The button sits right after Fit Vertical.
+height to its height. With Shift held, what the plot showed shrinks into the
+box instead, and a double-click fits the whole recording. The button sits
+right after Fit Vertical.
 
-The drags are real mouse events sent through Qt to pyqtgraph's scene, in the
-stacked layout (the default), the single-plot layout and Multi-Axis.
+The drags and clicks are real mouse events sent through Qt to pyqtgraph's
+scene, in the stacked layout (the default), the single-plot layout and
+Multi-Axis.
 """
 from __future__ import annotations
 
@@ -41,7 +44,7 @@ def window(qapp, monkeypatch):
 
 
 def _plot(qapp, window, *signals):
-    """0–10 s at 10 ms; each signal is its scale times ten times the time."""
+    """0â€“10 s at 10 ms; each signal is its scale times ten times the time."""
     from core.signal_store import SignalSeries
 
     for name, unit, scale in signals:
@@ -52,9 +55,9 @@ def _plot(qapp, window, *signals):
     qapp.processEvents()
 
 
-SPEED = ('Speed', 'km/h', 1.0)      # 0–100
-TORQUE = ('Torque', 'km/h', 1.0)    # 0–100, Speed's unit: one axis with it
-TEMP = ('Temp', 'degC', 0.5)        # 0–50, an axis of its own in Multi-Axis
+SPEED = ('Speed', 'km/h', 1.0)      # 0â€“100
+TORQUE = ('Torque', 'km/h', 1.0)    # 0â€“100, Speed's unit: one axis with it
+TEMP = ('Temp', 'degC', 0.5)        # 0â€“50, an axis of its own in Multi-Axis
 
 
 def _view_and_box(panel, row=0):
@@ -69,7 +72,12 @@ def _at(panel, point, row=0) -> QPointF:
     return QPointF(view.mapFromScene(vb.mapViewToScene(QPointF(*point))))
 
 
-def _move(qapp, viewport, local, buttons):
+NO_KEY = Qt.KeyboardModifier.NoModifier
+SHIFT = Qt.KeyboardModifier.ShiftModifier
+LEFT = Qt.MouseButton.LeftButton
+
+
+def _move(qapp, viewport, local, buttons, modifier=NO_KEY):
     """Move the mouse straight to the plot. QTest.mouseMove moves the global
     cursor instead, so a window an earlier test left open can take it."""
     import pyqtgraph as pg
@@ -82,31 +90,80 @@ def _move(qapp, viewport, local, buttons):
     QTest.qWait(int(2000 / pg.getConfigOption('mouseRateLimit')) + 1)
     move = QMouseEvent(QEvent.Type.MouseMove, local,
                        QPointF(viewport.mapToGlobal(local.toPoint())),
-                       Qt.MouseButton.NoButton, buttons, Qt.KeyboardModifier.NoModifier)
+                       Qt.MouseButton.NoButton, buttons, modifier)
     QApplication.sendEvent(viewport, move)
     qapp.processEvents()
 
 
-def _press_and_move(qapp, panel, start, end, row=0, button=Qt.MouseButton.LeftButton):
-    """Press at start and move to end, in steps, each a (time, value) in one
-    plot row; the button is still down."""
+def _press_and_move_px(qapp, viewport, p0, p1, button=LEFT, modifier=NO_KEY):
+    """Press at p0 and move to p1, in steps, both viewport pixels; the button
+    is still down."""
     from PySide6.QtTest import QTest
 
+    QTest.mousePress(viewport, button, modifier, p0.toPoint())
+    for f in (0.25, 0.5, 0.75, 1.0):
+        _move(qapp, viewport, p0 + (p1 - p0) * f, button, modifier)
+
+
+def _drag_px(qapp, viewport, p0, p1, button=LEFT, modifier=NO_KEY):
+    """A drag from p0 to p1, viewport pixels, with modifier held throughout."""
+    from PySide6.QtTest import QTest
+
+    _press_and_move_px(qapp, viewport, p0, p1, button, modifier)
+    QTest.mouseRelease(viewport, button, modifier, p1.toPoint())
+    qapp.processEvents()
+
+
+def _press_and_move(qapp, panel, start, end, row=0, button=LEFT):
+    """Press at start and move to end, in steps, each a (time, value) in one
+    plot row; the button is still down."""
     view, _ = _view_and_box(panel, row)
     viewport = view.viewport()
-    p0, p1 = _at(panel, start, row), _at(panel, end, row)
-    QTest.mousePress(viewport, button, Qt.KeyboardModifier.NoModifier, p0.toPoint())
-    for f in (0.25, 0.5, 0.75, 1.0):
-        _move(qapp, viewport, p0 + (p1 - p0) * f, button)
+    p1 = _at(panel, end, row)
+    _press_and_move_px(qapp, viewport, _at(panel, start, row), p1, button)
     return viewport, p1
 
 
-def _drag(qapp, panel, start, end, row=0, button=Qt.MouseButton.LeftButton):
+def _drag(qapp, panel, start, end, row=0, button=LEFT, modifier=NO_KEY):
+    view, _ = _view_and_box(panel, row)
+    _drag_px(qapp, view.viewport(), _at(panel, start, row), _at(panel, end, row),
+             button, modifier)
+
+
+def _click(qapp, panel, point, row=0, modifier=NO_KEY):
     from PySide6.QtTest import QTest
 
-    viewport, p1 = _press_and_move(qapp, panel, start, end, row, button)
-    QTest.mouseRelease(viewport, button, Qt.KeyboardModifier.NoModifier, p1.toPoint())
+    view, _ = _view_and_box(panel, row)
+    QTest.mouseClick(view.viewport(), LEFT, modifier, _at(panel, point, row).toPoint())
     qapp.processEvents()
+
+
+def _double_click(qapp, panel, point, row=0):
+    """What Qt sends for a double-click: press, release, double-click,
+    release. QTest.mouseDClick leaves out the last release, on which
+    pyqtgraph reports the double-click."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    view, _ = _view_and_box(panel, row)
+    viewport = view.viewport()
+    local = _at(panel, point, row)
+    Type = QEvent.Type
+    for kind, buttons in ((Type.MouseButtonPress, LEFT), (Type.MouseButtonRelease, Qt.MouseButton.NoButton),
+                          (Type.MouseButtonDblClick, LEFT), (Type.MouseButtonRelease, Qt.MouseButton.NoButton)):
+        event = QMouseEvent(kind, local, QPointF(viewport.mapToGlobal(local.toPoint())),
+                            LEFT, buttons, NO_KEY)
+        QApplication.sendEvent(viewport, event)
+    qapp.processEvents()
+
+
+def _wait_out_a_double_click():
+    """Past the time a click waits in Rectangle Zoom for a second one."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    QTest.qWait(QApplication.doubleClickInterval() + 150)
 
 
 def _ranges(vb):
@@ -267,21 +324,130 @@ def test_a_box_too_flat_to_mean_anything_zooms_nowhere(qapp, window):
     assert _ranges(row0) == pytest.approx(before)
 
 
-def test_a_click_still_places_cursor1(qapp, window):
-    from PySide6.QtTest import QTest
-
+def test_a_click_still_places_cursor1_once_no_second_click_follows(qapp, window):
     _plot(qapp, window, SPEED, TORQUE)
     panel = window.plot_panel
+    row0 = panel._stacked_plots[0].vb
     window.btn_zoom_rect.setChecked(True)
-    before = _ranges(panel._stacked_plots[0].vb)
+    before = _ranges(row0)
 
-    QTest.mouseClick(panel.glw.viewport(), Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, _at(panel, (6.0, 50.0)).toPoint())
-    qapp.processEvents()
+    _click(qapp, panel, (6.0, 50.0))
+    # It may still be the first half of a double-click.
+    assert not window.btn_cursor1.isChecked()
+    _wait_out_a_double_click()
 
     assert window.btn_cursor1.isChecked()
-    assert panel.v_line.value() == pytest.approx(6.0, abs=_pixels(panel._stacked_plots[0].vb)[0])
+    assert panel.v_line.value() == pytest.approx(6.0, abs=_pixels(row0)[0])
+    assert _ranges(row0) == pytest.approx(before)
+
+
+def test_a_shift_click_still_places_cursor2_and_zooms_nowhere(qapp, window):
+    _plot(qapp, window, SPEED, TORQUE)
+    panel = window.plot_panel
+    row0 = panel._stacked_plots[0].vb
+    window.btn_zoom_rect.setChecked(True)
+    before, (tx, _) = _ranges(row0), _pixels(row0)
+
+    _click(qapp, panel, (6.0, 50.0), modifier=SHIFT)
+    _wait_out_a_double_click()
+
+    assert window.btn_cursor2.isChecked()
+    assert panel.v_line2.value() == pytest.approx(6.0, abs=tx)
+    # Switching Cursor 2 on builds the rows again.
     assert _ranges(panel._stacked_plots[0].vb) == pytest.approx(before)
+
+
+def test_two_clicks_too_far_apart_for_a_double_click_both_count(qapp, window):
+    _plot(qapp, window, SPEED, TORQUE)
+    panel = window.plot_panel
+    tx = _pixels(panel._stacked_plots[0].vb)[0]
+    placed = []
+    panel.plotAreaClicked.connect(placed.append)
+    window.btn_zoom_rect.setChecked(True)
+
+    # QTest spaces two clicks out by more than a double-click's time.
+    _click(qapp, panel, (3.0, 50.0))
+    _click(qapp, panel, (6.0, 50.0))
+    _wait_out_a_double_click()
+
+    assert placed == [pytest.approx(3.0, abs=tx), pytest.approx(6.0, abs=tx)]
+
+
+def test_shift_drag_shrinks_what_the_row_showed_into_the_box(qapp, window):
+    _plot(qapp, window, SPEED, TORQUE)
+    panel = window.plot_panel
+    row0, row1 = (p.vb for p in panel._stacked_plots)
+    (x0, x1), (y0, y1) = _ranges(row0)
+    _, row1_y = _ranges(row1)
+    corners = [_at(panel, (2.0, 60.0)), _at(panel, (4.0, 20.0))]
+    window.btn_zoom_rect.setChecked(True)
+
+    _drag(qapp, panel, (2.0, 60.0), (4.0, 20.0), row=0, modifier=SHIFT)
+
+    # The corners of what the row showed are now the corners of the box.
+    for corner, point in zip(corners, ((x0, y1), (x1, y0))):
+        moved = _at(panel, point)
+        assert (moved.x(), moved.y()) == pytest.approx((corner.x(), corner.y()), abs=2)
+    x, _ = _ranges(row0)
+    assert x[1] - x[0] > 4 * (x1 - x0)
+    # The rows share one time range; the other row keeps its height.
+    assert _ranges(row1)[0] == pytest.approx(x)
+    assert _ranges(row1)[1] == pytest.approx(row1_y)
+    assert window.btn_cursor2.isChecked() is False   # a drag, not a Shift+click
+
+
+def test_the_same_box_with_shift_zooms_every_axis_back_out(qapp, window):
+    window.btn_multi_axis.setChecked(True)
+    _plot(qapp, window, SPEED, TEMP)
+    panel = window.plot_panel
+    main = panel.plot.plotItem.vb
+    [(_, temp)] = panel._extra_axes
+    before = [(vb, _ranges(vb), _pixels(vb)) for vb in (main, temp)]
+    viewport = panel.plot.viewport()
+    p0, p1 = _at(panel, (2.0, 60.0)), _at(panel, (4.0, 20.0))
+    window.btn_zoom_rect.setChecked(True)
+
+    _drag_px(qapp, viewport, p0, p1)
+    assert _ranges(main)[0] == pytest.approx([2.0, 4.0], abs=before[0][2][0])
+    _drag_px(qapp, viewport, p0, p1, modifier=SHIFT)
+
+    for vb, (x, y), (tx, ty) in before:
+        assert _ranges(vb)[0] == pytest.approx(x, abs=tx)
+        assert _ranges(vb)[1] == pytest.approx(y, abs=ty)
+
+
+def test_a_double_click_fits_the_whole_recording_and_moves_no_cursor(qapp, window):
+    _plot(qapp, window, SPEED, TORQUE)
+    panel = window.plot_panel
+    rows = [p.vb for p in panel._stacked_plots]
+    whole = [(_ranges(vb), _pixels(vb)) for vb in rows]
+    window.btn_zoom_rect.setChecked(True)
+    _drag(qapp, panel, (2.0, 60.0), (4.0, 20.0), row=0)
+    _drag(qapp, panel, (3.0, 50.0), (3.5, 40.0), row=1)
+    assert _ranges(rows[0])[0][1] < 5.0
+
+    _double_click(qapp, panel, (3.2, 45.0), row=1)
+    _wait_out_a_double_click()
+
+    for vb, ((x, y), (tx, ty)) in zip(rows, whole):
+        assert _ranges(vb)[0] == pytest.approx(x, abs=tx)
+        assert _ranges(vb)[1] == pytest.approx(y, abs=ty)
+    assert not window.btn_cursor1.isChecked()
+    assert not window.btn_cursor2.isChecked()
+
+
+def test_without_rectangle_zoom_a_double_click_leaves_the_view(qapp, window):
+    _plot(qapp, window, SPEED, TORQUE)
+    panel = window.plot_panel
+    row0 = panel._stacked_plots[0].vb
+    row0.setXRange(2.0, 4.0, padding=0)
+    qapp.processEvents()
+    before = _ranges(row0)
+
+    _double_click(qapp, panel, (3.0, 50.0))
+
+    assert _ranges(row0) == pytest.approx(before)
+    assert window.btn_cursor1.isChecked()   # placed at once, as before
 
 
 def _all_view_boxes(panel):
@@ -342,8 +508,10 @@ def test_esc_leaves_rectangle_zoom_and_is_free_otherwise(qapp, window):
     assert not esc.isEnabled()
 
 
-def test_the_shortcuts_list_names_z_and_esc(window):
+def test_the_shortcuts_list_names_rectangle_zoom_keys_and_gestures(window):
     keys = dict(window._SHORTCUTS)
 
     assert 'Rectangle Zoom' in keys['Z']
     assert 'Rectangle Zoom' in keys['Esc']
+    assert 'zoom out' in keys['Shift + drag on plot']
+    assert 'whole recording' in keys['Double-click on plot']
