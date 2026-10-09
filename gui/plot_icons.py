@@ -45,6 +45,10 @@ DRAWINGS: dict[str, str] = {
     # Arrows between two bars: the height only.
     'fit_vertical': ('<path d="M5 3.5h14M5 20.5h14"/>'
                      '<path d="M12 7v10M9 9.5l3-3 3 3M9 14.5l3 3 3-3"/>'),
+    # A dashed box with a lens over its lower right corner.
+    'zoom_rect': ('<path stroke-linecap="butt" d="M2.5 6.5v-2a2 2 0 0 1 2-2h2M9.5 2.5h2.5'
+                  'M14 2.5h1a2 2 0 0 1 2 2v1.5M2.5 9.5v2.5M2.5 14v.5a2 2 0 0 0 2 2h2"/>'
+                  '<circle cx="13.8" cy="13.8" r="5"/><path d="M17.4 17.4l3.8 3.8"/>'),
     # As on the plot, Cursor 1 solid and Cursor 2 dashed, each with its number.
     'cursor1': '<path d="M8 3v18"/><path d="M13.5 10l3-2.5V17"/>',
     'cursor2': ('<path d="M8 3v18" stroke-dasharray="3 3"/>'

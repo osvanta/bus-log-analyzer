@@ -324,6 +324,9 @@ class MainWindow(QMainWindow):
         self.btn_fit = icon_button('fit_window', 'Fit to Window', 'Fit to Window (F)')
         self.btn_fit_v = icon_button('fit_vertical', 'Fit Vertical',
                                      'Fit Vertical (V): fit the height, keep the time range')
+        self.btn_zoom_rect = icon_button('zoom_rect', 'Rectangle Zoom',
+                                         'Rectangle Zoom (Z): drag a box on the plot to zoom into it')
+        self.btn_zoom_rect.setCheckable(True)
         self.btn_multi_axis = QPushButton('Multi-Axis')
         self.btn_multi_axis.setCheckable(True)
         self.btn_stacked = QPushButton('Stacked')
@@ -348,7 +351,7 @@ class MainWindow(QMainWindow):
         for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack):
             self.plot_button_row.add_button(btn)
         self.plot_button_row.add_gap(18)
-        for btn in (self.btn_fit, self.btn_fit_v, self.btn_cursor1,
+        for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
                     self.btn_cursor2, self.btn_points, self.btn_hide_line):
             # As tall as the text buttons; the icon alone would make it taller.
             btn.setFixedHeight(self.btn_stacked.sizeHint().height())
@@ -356,6 +359,7 @@ class MainWindow(QMainWindow):
 
         self.btn_fit.clicked.connect(self.plot_panel.fit_to_window)
         self.btn_fit_v.clicked.connect(self.plot_panel.fit_vertical)
+        self.btn_zoom_rect.toggled.connect(self._toggle_rect_zoom)
         self.btn_multi_axis.toggled.connect(self._toggle_multi_axis)
         self.btn_stacked.toggled.connect(self._toggle_stacked)
         self.btn_multistack.toggled.connect(self._toggle_multistack)
@@ -518,6 +522,12 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence('Ctrl+S'), self, activated=self.save_configuration)
         QShortcut(QKeySequence('F'), self, activated=self.plot_panel.fit_to_window)
         QShortcut(QKeySequence('V'), self, activated=self.plot_panel.fit_vertical)
+        QShortcut(QKeySequence('Z'), self, activated=self.btn_zoom_rect.toggle)
+        # Esc leaves Rectangle Zoom; while it is off, Esc is left to others,
+        # such as a table cell being edited.
+        self._esc_rect_zoom = QShortcut(QKeySequence(Qt.Key.Key_Escape), self,
+                                        activated=lambda: self.btn_zoom_rect.setChecked(False))
+        self._esc_rect_zoom.setEnabled(self.btn_zoom_rect.isChecked())
         QShortcut(QKeySequence('C'), self, activated=self._shortcut_change_signal_color)
         QShortcut(QKeySequence('R'), self, activated=self._shortcut_toggle_cursors)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=lambda: self.add_signals_to_plot(self.signal_tree.selected_signal_keys()))
@@ -1286,6 +1296,16 @@ class MainWindow(QMainWindow):
             self.btn_stacked.setChecked(False)
         self.plot_panel.set_multistack(checked)
         self._update_status('Plot mode updated', 'Drag signals into a stack to overlay them')
+
+    def _toggle_rect_zoom(self, checked: bool) -> None:
+        self.plot_panel.set_rect_zoom(checked)
+        self._esc_rect_zoom.setEnabled(checked)
+        if checked:
+            self._update_status('Rectangle Zoom on',
+                                'Drag a box on the plot to zoom into it; Esc to leave')
+        else:
+            self._update_status('Rectangle Zoom off',
+                                'Drag the plot to pan; F fits the whole recording')
 
     def _toggle_cursor1(self, checked: bool) -> None:
         self.plot_panel.set_cursor1_enabled(checked)
@@ -2523,6 +2543,8 @@ class MainWindow(QMainWindow):
     _SHORTCUTS: list[tuple[str, str]] = [
         ('F',               'Fit to Window — rescale X and Y to all data'),
         ('V',               'Fit Vertical — rescale Y only (keep current X)'),
+        ('Z',               'Rectangle Zoom on/off — drag a box on the plot to zoom into it'),
+        ('Esc',             'Leave Rectangle Zoom'),
         ('Space',           'Plot selected signal(s) from the signal tree'),
         ('C',               'Change color of the selected signal'),
         ('R',               'Toggle Cursor 1 and Cursor 2 on/off together'),

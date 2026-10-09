@@ -24,10 +24,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # In a process of its own: the test session keeps the collector off once
 # a Qt test has run (see _no_gc_during_qt in conftest.py).
+#
+# The collector runs as in the application: from the GUI thread's timer,
+# never on its own. An automatic collection at one point inside pyqtgraph's
+# plot menus, while the panel was being built, left the panel in an order
+# that the final collection tore down twice, and the process died with
+# 0xC0000374 (heap corruption). The application turns automatic collection
+# off before it builds a window, so it never collects there.
 _SCRIPT = r"""
 import gc
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
+from gui.gc_guard import GuiThreadGarbageCollector
+gc_guard = GuiThreadGarbageCollector(app)
 from gui.plot_widget import PlotPanel
 
 panel = PlotPanel()

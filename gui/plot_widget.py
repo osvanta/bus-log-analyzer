@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QInputDialog,
+    QGraphicsRectItem,
     QGraphicsTextItem,
     QColorDialog,
     QFrame,
@@ -180,6 +181,56 @@ class _LeftAxis(pg.AxisItem):
         # defer the anchor correction by one event-loop tick.
         if getattr(self, '_title_x', None) is not None:
             QTimer.singleShot(0, self._apply_title_pos)
+
+
+class _ZoomViewBox(pg.ViewBox):
+    """A plot area that, while Rectangle Zoom is on, turns a left drag into a
+    box and zooms the plot to the box when the button is let go.
+
+    The box stays inside the area, so in the stacked layout it stays in the
+    row it started in. The middle button still pans and the right button
+    still scales, and a drag on a cursor line or an axis is still theirs.
+    """
+
+    def __init__(self, panel: PlotPanel, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._panel = panel
+        self._zooming = False
+        self._zoom_box = QGraphicsRectItem(self)
+        self._zoom_box.setZValue(1e9)
+        self._zoom_box.hide()
+        self.show_zoom_cursor()
+
+    def show_zoom_cursor(self) -> None:
+        """A cross over the area while Rectangle Zoom is on."""
+        if self._panel._rect_zoom:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
+
+    def mouseDragEvent(self, ev, axis=None) -> None:
+        if ev.isStart():
+            # Decided once per drag, so a drag already under way finishes
+            # the way it started.
+            self._zooming = (self._panel._rect_zoom and axis is None
+                             and ev.button() == Qt.MouseButton.LeftButton)
+            if self._zooming:
+                color = QColor(_cursor_color_on(self._panel._background_color))
+                self._zoom_box.setPen(pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine))
+                color.setAlpha(40)
+                self._zoom_box.setBrush(color)
+        if not self._zooming:
+            super().mouseDragEvent(ev, axis)
+            return
+        ev.accept()
+        box = QRectF(ev.buttonDownPos(), ev.pos()).normalized().intersected(self.boundingRect())
+        if ev.isFinish():
+            self._zooming = False
+            self._zoom_box.hide()
+            self._panel._zoom_to_rect(self, box)
+        else:
+            self._zoom_box.setRect(box)
+            self._zoom_box.show()
 
 
 #: Line styles offered for a plotted signal, in menu order.
@@ -642,6 +693,7 @@ class PlotPanel(QWidget):
         self._name_show_message: bool = False
         self._collapsed_groups: dict[str, bool] = {}
         self._cursor2_enabled: bool = False
+        self._rect_zoom: bool = False           # Rectangle Zoom: a left drag zooms to a box
         self._checkbox_target_keys: list[str] = []  # pre-click multi-row snapshot
         self._batch_mode: bool = False          # True while batch-adding signals; suppresses per-add rebuilds
         self._rebuild_seq: int = 0              # bumped each rebuild and by fit_to_window(); lets deferred restores detect staleness
@@ -649,7 +701,7 @@ class PlotPanel(QWidget):
 
         # ── Normal / multi-axis plot ──────────────────────────────────────
         _left_axis = _LeftAxis()
-        self.plot = pg.PlotWidget(axisItems={'left': _left_axis})
+        self.plot = pg.PlotWidget(axisItems={'left': _left_axis}, viewBox=_ZoomViewBox(self))
         _left_axis._panel = self  # enables multi-axis drag routing in mouseDragEvent
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setLabel('bottom', 'Time (seconds)')
@@ -1980,7 +2032,7 @@ class PlotPanel(QWidget):
             else:
                 # Extra group → new floating AxisItem + ViewBox
                 axis = pg.AxisItem('left')
-                vb   = pg.ViewBox()
+                vb   = _ZoomViewBox(self)
                 # Disable auto-range before X-linking so the first setData()
                 # doesn't propagate an auto-range reset to the main plot.
                 vb.enableAutoRange(x=False, y=False)
@@ -2064,7 +2116,8 @@ class PlotPanel(QWidget):
             _left_ax = _StackedLeftAxis('left')
             p: pg.PlotItem = self.glw.addPlot(
                 row=idx, col=0,
-                axisItems={'left': _left_ax}
+                axisItems={'left': _left_ax},
+                viewBox=_ZoomViewBox(self),
             )
             p.showGrid(x=True, y=True, alpha=0.25)
             p.setMenuEnabled(False)
@@ -2806,6 +2859,50 @@ class PlotPanel(QWidget):
                     1.0 if y_min == 0 else abs(y_min) * 0.05
                 )
                 self.plot.setYRange(y_min - pad, y_max + pad, padding=0)
+
+    # A box narrower or flatter than this, in pixels, is a slip of the mouse
+    # and zooms nowhere.
+    _MIN_ZOOM_RECT_PX: int = 4
+
+    def set_rect_zoom(self, enabled: bool) -> None:
+        """Rectangle Zoom: while on, a left drag on the plot draws a box and
+        zooms to it. A click still places Cursor 1."""
+        self._rect_zoom = bool(enabled)
+        views = [self.plot.plotItem.vb, *(vb for _, vb in self._extra_axes),
+                 *(p.vb for p in self._stacked_plots)]
+        for vb in views:
+            vb.show_zoom_cursor()
+
+    def _zoom_to_rect(self, source, rect: QRectF) -> None:
+        """Zoom to *rect*, a box drawn in the plot area *source*, in its pixels:
+        the time range to the box's width, the height to its height.
+
+        In the stacked layout only the box's row changes height. In
+        Multi-Axis every axis does, each to its own values across the box.
+        """
+        if rect.width() < self._MIN_ZOOM_RECT_PX or rect.height() < self._MIN_ZOOM_RECT_PX:
+            return
+        # As in zoom_to_time: a deferred range-restore must not undo the zoom.
+        self._rebuild_seq += 1
+        if self._multi_axis and not self._stacked_mode:
+            self._update_multi_axis_views()  # ensure geometry is current
+        scene_rect = source.mapRectToScene(rect)
+
+        def in_values(vb) -> QRectF:
+            return QRectF(vb.mapSceneToView(scene_rect.topLeft()),
+                          vb.mapSceneToView(scene_rect.bottomRight())).normalized()
+
+        if self._stacked_mode:
+            views = [source]
+        else:
+            views = [self.plot.plotItem.vb, *(vb for _, vb in self._extra_axes)]
+        # Every range is read before any is set, which would move the others.
+        x = in_values(source)
+        y_ranges = [(vb, in_values(vb)) for vb in views]
+        # One time range for every row and axis: set where the others follow.
+        self._driving_vb().setXRange(x.left(), x.right(), padding=0)
+        for vb, y in y_ranges:
+            vb.setYRange(y.top(), y.bottom(), padding=0)
 
     # ── Color / background ────────────────────────────────────────────────
 

@@ -54,8 +54,8 @@ def _pixmap(icon, mode=None, state=None, scale=1.0):
                        state or QIcon.State.Off)
 
 
-@pytest.mark.parametrize('name', ['fit_window', 'fit_vertical', 'cursor1', 'cursor2',
-                                  'points', 'hide_line'])
+@pytest.mark.parametrize('name', ['fit_window', 'fit_vertical', 'zoom_rect', 'cursor1',
+                                  'cursor2', 'points', 'hide_line'])
 def test_every_icon_draws_in_the_button_text_colour(qapp, palette, name):
     from PySide6.QtGui import QPalette
     from gui.plot_icons import plot_icon
