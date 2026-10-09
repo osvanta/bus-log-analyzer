@@ -106,7 +106,7 @@ def _write_blf(path, can_rows):
 @pytest.fixture()
 def load(sample_dbc_path):
     """Run the real Load + Decode worker synchronously; close every trace after."""
-    from core.load_worker import LoadWorker
+    from gui.load_worker import LoadWorker
 
     stores = []
 

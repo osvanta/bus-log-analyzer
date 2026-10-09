@@ -170,7 +170,7 @@ def test_recovery_fallback_decodes_readable_raw_groups_and_keeps_global_time(
     sample_dbc_path,
 ):
     from core.channel_config import ChannelConfig
-    from core.load_worker import LoadWorker
+    from gui.load_worker import LoadWorker
 
     raw = RawFrameStore()
     raw.append_numpy_batch(

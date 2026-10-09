@@ -32,7 +32,7 @@ import sys
 # optimize, or otherwise change this pipeline without explicit permission
 # from the project owner."
 PROTECTED_PIPELINE: tuple[str, ...] = (
-    "core/load_worker.py",
+    "gui/load_worker.py",      # Qt worker; lives in gui/ so core/ imports no Qt
     "core/channel_config.py",
     "core/dbc_decoder.py",
     "core/vectorized_decoder.py",

@@ -87,17 +87,17 @@ from core.debug_inspector import (
 )
 
 if TYPE_CHECKING:
-    from core.load_worker import LoadWorker as _LoadWorker
+    from gui.load_worker import LoadWorker as _LoadWorker
 
 
-# Open File and Load + Decode need core.readers and core.load_worker, which
+# Open File and Load + Decode need core.readers and gui.load_worker, which
 # import cantools, python-can and asammdf: over a second of start-up that the
 # window does not need. These stand-ins import them on first use, and keep the
 # names here, where the tests patch them. Once the window is up,
 # _preload_measurement_support() imports them in the background, so the first
 # Open File does not wait either.
 def LoadWorker(*args, **kwargs) -> _LoadWorker:  # noqa: N802 — stands in for the class
-    from core.load_worker import LoadWorker
+    from gui.load_worker import LoadWorker
     return LoadWorker(*args, **kwargs)
 
 
@@ -130,7 +130,7 @@ _MEASUREMENT_SUFFIXES = ('.asc', '.blf', '.csv', '.mdf', '.mf4')
 def _preload_measurement_support() -> None:
     def load() -> None:
         try:
-            import core.load_worker  # noqa: F401 — imports core.readers too
+            import gui.load_worker  # noqa: F401 — imports core.readers too
         except Exception:
             pass  # raised again, in full, where Open File imports it
         _remove_leftover_trace_files()

@@ -126,7 +126,7 @@ def test_smoke_blf_into_signal_store(blf_path, sample_dbc_path):
 def test_can_raw_worker_publishes_one_bulk_signal_handoff(sample_dbc_path):
     """Large BLF/ASC group sets must not rebuild the Qt tree incrementally."""
     from core.channel_config import ChannelConfig
-    from core.load_worker import LoadWorker
+    from gui.load_worker import LoadWorker
     from core.signal_store import SignalStore
 
     class PackedReader:
@@ -190,7 +190,7 @@ def test_raw_can_csv_bulk_decodes_and_populates_trace(
     raw_can_csv_path, sample_dbc_path,
 ):
     from core.channel_config import ChannelConfig
-    from core.load_worker import LoadWorker
+    from gui.load_worker import LoadWorker
     from core.readers import reader_factory
     from core.signal_store import SignalStore
 

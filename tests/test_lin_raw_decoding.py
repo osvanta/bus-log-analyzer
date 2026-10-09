@@ -61,7 +61,7 @@ def lin_measurement(request):
 
 def _decode(measurement, databases):
     """Run the real load path and return {signal key: values}."""
-    from core.load_worker import LoadWorker
+    from gui.load_worker import LoadWorker
 
     config = ChannelConfig(name="LIN", channels=databases)
     worker = LoadWorker(str(measurement), config)
