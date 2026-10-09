@@ -1,3 +1,9 @@
+Jinja2 3.1.6
+License: BSD-3-Clause
+https://github.com/pallets/jinja/
+
+----- LICENSE.txt -----
+
 Copyright 2007 Pallets
 
 Redistribution and use in source and binary forms, with or without

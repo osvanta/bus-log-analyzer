@@ -1,6 +1,6 @@
 PyYAML 6.0.3
 License: MIT
-https://pyyaml.org/
+https://github.com/yaml/pyyaml
 
 ----- LICENSE -----
 

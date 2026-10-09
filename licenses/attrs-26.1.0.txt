@@ -1,6 +1,6 @@
 attrs 26.1.0
 License: MIT
-https://tidelift.com/subscription/pkg/pypi-attrs?utm_source=pypi-attrs&utm_medium=pypi
+https://github.com/python-attrs/attrs
 
 ----- LICENSE -----
 

@@ -49,7 +49,7 @@ def test_about_text_carries_the_lgpl_notice_and_pointer(dialog):
     text = _ABOUT_HTML.format(name="Osvanta Bus Log Analyzer", version="v00.01.00")
     assert "Lesser General Public License" in text
     assert "GNU GPL" in text
-    for component in ("Qt", "PySide6", "python-can", "asammdf", "chardet"):
+    for component in ("Qt", "PySide6", "python-can", "asammdf"):
         assert component in text, f"{component} missing from the About notice"
     assert "Mozilla Public License" in text
     assert "without any warranty" in text.lower()

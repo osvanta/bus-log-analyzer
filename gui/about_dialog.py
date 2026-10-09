@@ -8,7 +8,7 @@
 About / licence dialog for Osvanta Bus Log Analyzer.
 
 This dialog is not decorative. Osvanta Bus Log Analyzer links against Qt (via PySide6),
-python-can, asammdf and chardet, all of which are used under the LGPL. Section
+python-can and asammdf, all of which are used under the LGPL. Section
 4(c) of the LGPL-3.0 requires that an application which displays copyright
 notices while running also shows the notice for the linked libraries, together
 with a reference pointing the user at the GPL and LGPL texts. Serving those
@@ -62,15 +62,17 @@ and remain available under those terms.</p>
 <b>without any warranty</b>; without even the implied warranty of
 merchantability or fitness for a particular purpose.</p>
 <hr>
-<p>{name} uses Qt (through PySide6), python-can, asammdf and chardet under
-the <b>GNU Lesser General Public License</b>. These components are unmodified
+<p>{name} uses Qt (through PySide6), python-can and asammdf under the
+<b>GNU Lesser General Public License</b>. These components are unmodified
 and remain the copyright of their respective authors.</p>
 <p>Copies of the GNU LGPL and the GNU GPL, together with the licence for every
 other bundled component, are in the <b>Third-Party Licences</b> tab of this
 dialog and in the <code>licenses</code> folder next to the application.</p>
-<p>You are entitled to run {name} against your own build of any LGPL
+<p>You are entitled to run {name} with a modified version of any LGPL
 component. The Qt libraries ship as separate DLLs that you may replace with
-interface-compatible builds of your own.</p>
+interface-compatible builds of your own. python-can and asammdf ship as separate
+Python files in the <code>_internal</code> folder: a <code>.py</code> file you
+place there is used instead of the bundled one.</p>
 """
 
 _MISSING_TEXT = (
