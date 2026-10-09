@@ -11,6 +11,8 @@ import os
 import re
 import shutil
 
+import pefile
+
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # PyInstaller executes spec files without defining __file__.
@@ -126,6 +128,21 @@ _GPL_ONLY_QT = re.compile(
     r"qmldbg_quick3d\w*\.dll)$"
 )
 
+# Qt libraries nothing in this application loads, dropped for size (19 MB), not
+# for licensing: all are LGPL. Quick and the four Qml libraries are there only
+# for the Virtual Keyboard plugin dropped below; Pdf only for the PDF image
+# format plugin (qpdf), and Network only for Pdf, Qml, Quick and the TUIO
+# network touch plugin. The end of this file checks that nothing left needs them.
+_UNUSED_QT = {
+    "qt6quick.dll", "qt6qml.dll", "qt6qmlmodels.dll", "qt6qmlmeta.dll",
+    "qt6qmlworkerscript.dll", "qt6pdf.dll", "qt6network.dll",
+    "qpdf.dll", "qtuiotouchplugin.dll",
+}
+
+
+def _dropped(name):
+    return bool(_GPL_ONLY_QT.match(name)) or name.lower() in _UNUSED_QT
+
 
 a = Analysis(
     [str(project_root / "app.py")],
@@ -151,9 +168,10 @@ a = Analysis(
     noarchive=False,
 )
 # The QtGui hook collects every platform input context plugin, and with it the
-# Virtual Keyboard (GPL-only, unused here). Drop anything GPL-only by name.
-a.binaries = [entry for entry in a.binaries if not _GPL_ONLY_QT.match(Path(entry[0]).name)]
-a.datas = [entry for entry in a.datas if not _GPL_ONLY_QT.match(Path(entry[0]).name)]
+# Virtual Keyboard (GPL-only, unused here). Drop anything GPL-only by name, and
+# the Qt libraries nothing loads.
+a.binaries = [entry for entry in a.binaries if not _dropped(Path(entry[0]).name)]
+a.datas = [entry for entry in a.datas if not _dropped(Path(entry[0]).name)]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -232,4 +250,30 @@ if _gpl_only or _qml:
         + "\n  ".join(_gpl_only + _qml)
         + "\nFind what imports them (build/BusLogAnalyzer/xref-BusLogAnalyzer.html) "
         "and exclude it in BusLogAnalyzer.spec."
+    )
+
+# Refuse a folder in which something still links to a library dropped above:
+# Windows would refuse to load it at run time, so the failure would otherwise
+# reach a user first. pefile comes with PyInstaller on Windows.
+_needs_dropped = []
+for _binary in sorted(_install_dir.rglob("*")):
+    if _binary.suffix.lower() not in (".dll", ".pyd", ".exe"):
+        continue
+    try:
+        _pe = pefile.PE(str(_binary), fast_load=True)
+    except pefile.PEFormatError:
+        continue
+    _pe.parse_data_directories(
+        directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+    for _import in getattr(_pe, "DIRECTORY_ENTRY_IMPORT", []):
+        _needed = _import.dll.decode()
+        if _dropped(_needed):
+            _needs_dropped.append(
+                f"{_binary.relative_to(_install_dir).as_posix()} needs {_needed}")
+    _pe.close()
+if _needs_dropped:
+    raise SystemExit(
+        "Build refused: something in the folder links to a library this spec drops.\n  "
+        + "\n  ".join(_needs_dropped)
+        + "\nTake that library out of _UNUSED_QT in BusLogAnalyzer.spec."
     )
