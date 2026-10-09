@@ -98,7 +98,7 @@ from the project owner. See `AGENTS.md` for the complete protected-file list.
 `gui/load_worker.py` is the central background pipeline and selects exactly
 one accepted path. It sits in `gui/` because it is a Qt worker (a `QObject`
 whose signals cross to the GUI thread); `core/` imports no Qt at all, which
-`tests/test_core_is_qt_free.py` enforces.
+`tests/test_core_imports_no_gui.py` enforces.
 
 - **MF4/MDF bus logging:** `MDFCANReader.iter_decoded_channel_arrays()` calls
   `asammdf.MDF.extract_bus_logging()` once and bulk-imports decoded NumPy

@@ -171,7 +171,7 @@ bus-log-analyzer/
 `core/` holds no Qt: nothing under it may import PySide6, shiboken6 or
 pyqtgraph, directly or through another module, so its logic runs and is
 tested without a GUI. Anything that needs Qt, such as a `QObject` worker or a
-signal, belongs in `gui/`. `tests/test_core_is_qt_free.py` enforces this.
+signal, belongs in `gui/`. `tests/test_core_imports_no_gui.py` enforces this.
 
 Deeper detail lives in [docs/Project_structure.md](docs/Project_structure.md)
 and [docs/AI_diagnostic.md](docs/AI_diagnostic.md).
