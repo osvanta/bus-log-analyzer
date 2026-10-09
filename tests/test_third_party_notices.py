@@ -35,7 +35,7 @@ def _pinned(package: str) -> str:
 def test_the_notices_name_the_qt_version_requirements_pin():
     version = _pinned('PySide6')
     listed = {name: v for name, v, _ in ROWS}
-    for package in ('PySide6', 'PySide6_Essentials', 'PySide6_Addons', 'shiboken6'):
+    for package in ('PySide6', 'PySide6_Essentials', 'shiboken6'):
         assert listed.get(package) == version, f'{package}: notices say {listed.get(package)}, pinned {version}'
 
 

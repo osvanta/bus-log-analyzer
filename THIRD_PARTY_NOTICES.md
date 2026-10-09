@@ -21,13 +21,12 @@ of them — they are redistributed exactly as published by their upstream projec
 |---|---|---|---|
 | `asammdf` | 8.8.27 | LGPL-3.0-or-later | [link](https://github.com/danielhrisca/asammdf) |
 | `PySide6` | 6.11.2 | LGPL-3.0-only | [link](https://pyside.org) |
-| `PySide6_Addons` | 6.11.2 | LGPL-3.0-only | [link](https://pyside.org) |
 | `PySide6_Essentials` | 6.11.2 | LGPL-3.0-only | [link](https://pyside.org) |
 | `python-can` | 4.6.1 | LGPL-3.0-only | [link](https://github.com/hardbyte/python-can) |
 | `shiboken6` | 6.11.2 | LGPL-3.0-only | [link](https://pyside.org) |
 
-`PySide6`, `PySide6_Essentials`, `PySide6_Addons` and `shiboken6` are the Qt for Python
-bindings and the Qt libraries they wrap. Qt is offered under the LGPL-3.0, the GPL-2.0, the
+`PySide6`, `PySide6_Essentials` and `shiboken6` are the Qt for Python bindings and the
+Qt libraries they wrap. Qt is offered under the LGPL-3.0, the GPL-2.0, the
 GPL-3.0 or a commercial licence; **Osvanta Bus Log Analyzer uses Qt under the LGPL-3.0 only.**
 The build contains no Qt module that Qt makes available under the GPL only (such as Qt Charts,
 Qt Data Visualization, Qt Graphs, Qt Quick 3D or Qt Virtual Keyboard): the build refuses to
