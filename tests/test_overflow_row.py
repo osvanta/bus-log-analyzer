@@ -238,13 +238,14 @@ def test_plot_buttons_sit_above_the_plot_not_the_table(window):
 def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons(window):
     row = window.plot_button_row
     modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack]
-    icons = [window.btn_fit, window.btn_fit_v, window.btn_cursor1, window.btn_cursor2,
-             window.btn_points, window.btn_hide_line]
+    icons = [window.btn_fit, window.btn_fit_v, window.btn_zoom_rect, window.btn_cursor1,
+             window.btn_cursor2, window.btn_points, window.btn_hide_line]
 
     assert row._buttons == modes + icons
     assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack']
     assert [b.accessibleName() for b in icons] == [
-        'Fit to Window', 'Fit Vertical', 'Cursor 1', 'Cursor 2', 'Show Data Points', 'Hide Line']
+        'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
+        'Show Data Points', 'Hide Line']
     for button in icons:
         assert button.text() == ''
         assert not button.icon().isNull()
