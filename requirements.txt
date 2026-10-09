@@ -1,12 +1,14 @@
-# Pinned, not floored: THIRD_PARTY_NOTICES.md names the exact Qt/PySide6
-# version shipped under the LGPL, and a release must ship that version.
-# PySide6 pins PySide6_Essentials, PySide6_Addons and shiboken6 to match.
+# Pinned, not floored: THIRD_PARTY_NOTICES.md names the exact version of each
+# LGPL library shipped (Qt/PySide6, python-can, asammdf), and a release must
+# ship those versions. PySide6 pins PySide6_Essentials, PySide6_Addons and
+# shiboken6 to match. Upgrading one means regenerating the notices and its
+# file in licenses/; for asammdf, also rerun tests/test_asammdf_guard.py.
 PySide6==6.11.2
 pyqtgraph==0.14.0
-python-can>=4.6
+python-can==4.6.1
 cantools>=39.4  # includes DBC + ARXML (AUTOSAR 3/4) database support; no [arxml] extras needed
 numpy>=1.26
-asammdf>=7.0
+asammdf==8.8.27
 # Required for asammdf native one-pass CAN bus extraction from MF4/MDF files.
 # Its format handlers are bundled explicitly by BusLogAnalyzer.spec.
 canmatrix>=1.0,<1.3

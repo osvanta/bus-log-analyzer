@@ -39,6 +39,13 @@ def test_the_notices_name_the_qt_version_requirements_pin():
         assert listed.get(package) == version, f'{package}: notices say {listed.get(package)}, pinned {version}'
 
 
+def test_the_notices_name_the_lgpl_library_versions_requirements_pin():
+    listed = {name: v for name, v, _ in ROWS}
+    for package in ('python-can', 'asammdf'):
+        version = _pinned(package)
+        assert listed.get(package) == version, f'{package}: notices say {listed.get(package)}, pinned {version}'
+
+
 def test_every_listed_component_has_its_licence_file():
     assert len(ROWS) > 20  # the tables were parsed
     missing = [f'{name}-{version}.txt' for name, version, _ in ROWS
