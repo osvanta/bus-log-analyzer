@@ -394,20 +394,24 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(center_panel)
 
         self.left_dock = QDockWidget('Decoded Signals', self)
-        self.left_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.left_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self.left_dock.setWidget(self.signal_tree)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.left_dock)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.left_dock)
 
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.addTab(self.log_box, 'Log')
         self.bottom_tabs.addTab(self.diagnostics_box, 'Diagnostics')
         self.bottom_tabs.addTab(self.measurement_box, 'Measurement')
         self.bottom_dock = QDockWidget('Log / Diagnostics / Measurement', self)
-        self.bottom_dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
+        self.bottom_dock.setAllowedAreas(
+            Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
+        )
         self.bottom_dock.setWidget(self.bottom_tabs)
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.bottom_dock)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.bottom_dock)
 
-        self.resizeDocks([self.bottom_dock], [180], Qt.Vertical)
+        self.resizeDocks([self.bottom_dock], [180], Qt.Orientation.Vertical)
 
         left_title = QWidget()
         left_title_layout = QHBoxLayout(left_title)
