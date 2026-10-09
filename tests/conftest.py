@@ -24,6 +24,9 @@ from pathlib import Path
 # Windows (access violation in AxisItem.paint → boundingRect). setdefault
 # keeps a developer's explicit QT_QPA_PLATFORM (xcb / windows / cocoa) intact.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Some test modules import pyqtgraph before anything has imported PySide6 or
+# the gui package; pin its binding for them too (see gui/__init__.py).
+os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
 
 import numpy as np
 import pytest

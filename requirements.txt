@@ -1,5 +1,8 @@
-PySide6>=6.7
-pyqtgraph>=0.13
+# Pinned, not floored: THIRD_PARTY_NOTICES.md names the exact Qt/PySide6
+# version shipped under the LGPL, and a release must ship that version.
+# PySide6 pins PySide6_Essentials, PySide6_Addons and shiboken6 to match.
+PySide6==6.11.2
+pyqtgraph==0.14.0
 python-can>=4.6
 cantools>=39.4  # includes DBC + ARXML (AUTOSAR 3/4) database support; no [arxml] extras needed
 numpy>=1.26
