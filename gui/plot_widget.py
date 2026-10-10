@@ -2887,8 +2887,10 @@ class PlotPanel(QWidget):
         """Zoom to *rect*, a box drawn in the plot area *source*, in its pixels:
         the time range to the box's width, the height to its height.
 
-        With *zoom_out*, what the plot shows now shrinks into the box instead,
-        so the same box zooms in and back out again.
+        With *zoom_out*, the plot zooms out around the box's centre instead:
+        by the square root of how many times the box fits into the plot, so
+        a box half the plot's width shows 1.4 times the time, and one a tenth
+        of it 3.2 times.
 
         In the stacked layout only the box's row changes height. In
         Multi-Axis every axis does, each to its own values across the box.
@@ -2906,12 +2908,13 @@ class PlotPanel(QWidget):
                           vb.mapSceneToView(scene_rect.bottomRight())).normalized()
 
         def target(shown: list[float], low: float, high: float) -> tuple[float, float]:
-            # Zooming out: the range in which the one shown now takes up as
-            # much as the box takes up of it.
             if not zoom_out:
                 return low, high
-            scale = (shown[1] - shown[0]) / (high - low)
-            return shown[0] - (low - shown[0]) * scale, shown[1] + (shown[1] - high) * scale
+            # The full ratio, shrinking the plot into the box, sent a small
+            # box far past the recording; its square root is gentler.
+            scale = ((shown[1] - shown[0]) / (high - low)) ** 0.5
+            centre = (low + high) / 2
+            return centre - (centre - shown[0]) * scale, centre + (shown[1] - centre) * scale
 
         if self._stacked_mode:
             views = [source]

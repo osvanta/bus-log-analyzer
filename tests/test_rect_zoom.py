@@ -7,8 +7,8 @@
 """
 Rectangle Zoom: with its button on, a left drag on the plot draws a box, and
 letting go zooms the plot to the box: the time range to its width, the
-height to its height. With Shift held, what the plot showed shrinks into the
-box instead, and a double-click fits the whole recording. The button sits
+height to its height. With Shift held, the plot zooms out around the box
+instead, and a double-click fits the whole recording. The button sits
 right after Fit Vertical.
 
 The drags and clicks are real mouse events sent through Qt to pyqtgraph's
@@ -373,47 +373,65 @@ def test_two_clicks_too_far_apart_for_a_double_click_both_count(qapp, window):
     assert placed == [pytest.approx(3.0, abs=tx), pytest.approx(6.0, abs=tx)]
 
 
-def test_shift_drag_shrinks_what_the_row_showed_into_the_box(qapp, window):
+def _grown(span, box):
+    """How much a zoom-out with a box of *box* in a view of *span* widens
+    the view: the square root of how many times the box fits into it. The
+    full ratio sent a small box far past the recording."""
+    return span * (span / box) ** 0.5
+
+
+@pytest.mark.parametrize('start, end', [
+    ((2.0, 60.0), (4.0, 20.0)),     # a fifth of the time, about a third of the height
+    ((4.0, 60.0), (5.04, 40.0)),    # a tenth of the time: 3.2 times as much, not 10
+])
+def test_shift_drag_zooms_out_gently_around_the_box(qapp, window, start, end):
     _plot(qapp, window, SPEED, TORQUE)
     panel = window.plot_panel
     row0, row1 = (p.vb for p in panel._stacked_plots)
     (x0, x1), (y0, y1) = _ranges(row0)
     _, row1_y = _ranges(row1)
-    corners = [_at(panel, (2.0, 60.0)), _at(panel, (4.0, 20.0))]
+    centre = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+    on_screen = _at(panel, centre)
     window.btn_zoom_rect.setChecked(True)
 
-    _drag(qapp, panel, (2.0, 60.0), (4.0, 20.0), row=0, modifier=SHIFT)
+    _drag(qapp, panel, start, end, row=0, modifier=SHIFT)
 
-    # The corners of what the row showed are now the corners of the box.
-    for corner, point in zip(corners, ((x0, y1), (x1, y0))):
-        moved = _at(panel, point)
-        assert (moved.x(), moved.y()) == pytest.approx((corner.x(), corner.y()), abs=2)
-    x, _ = _ranges(row0)
-    assert x[1] - x[0] > 4 * (x1 - x0)
+    x, y = _ranges(row0)
+    assert x[1] - x[0] == pytest.approx(_grown(x1 - x0, abs(end[0] - start[0])), rel=0.03)
+    assert y[1] - y[0] == pytest.approx(_grown(y1 - y0, abs(end[1] - start[1])), rel=0.03)
+    # Around the box's centre: what was there stays there.
+    moved = _at(panel, centre)
+    assert (moved.x(), moved.y()) == pytest.approx((on_screen.x(), on_screen.y()), abs=2)
     # The rows share one time range; the other row keeps its height.
     assert _ranges(row1)[0] == pytest.approx(x)
     assert _ranges(row1)[1] == pytest.approx(row1_y)
     assert window.btn_cursor2.isChecked() is False   # a drag, not a Shift+click
 
 
-def test_the_same_box_with_shift_zooms_every_axis_back_out(qapp, window):
+def test_shift_drag_zooms_every_axis_out_around_the_box(qapp, window):
     window.btn_multi_axis.setChecked(True)
     _plot(qapp, window, SPEED, TEMP)
     panel = window.plot_panel
     main = panel.plot.plotItem.vb
     [(_, temp)] = panel._extra_axes
-    before = [(vb, _ranges(vb), _pixels(vb)) for vb in (main, temp)]
-    viewport = panel.plot.viewport()
-    p0, p1 = _at(panel, (2.0, 60.0)), _at(panel, (4.0, 20.0))
+    before = [(vb, _ranges(vb)) for vb in (main, temp)]
+    (x0, x1), (y0, y1) = _ranges(main)
+    centre = main.mapViewToScene(QPointF(3.0, 40.0))
+    temp_centre = temp.mapSceneToView(centre).y()
     window.btn_zoom_rect.setChecked(True)
 
-    _drag_px(qapp, viewport, p0, p1)
-    assert _ranges(main)[0] == pytest.approx([2.0, 4.0], abs=before[0][2][0])
-    _drag_px(qapp, viewport, p0, p1, modifier=SHIFT)
+    _drag(qapp, panel, (2.0, 60.0), (4.0, 20.0), modifier=SHIFT)
 
-    for vb, (x, y), (tx, ty) in before:
-        assert _ranges(vb)[0] == pytest.approx(x, abs=tx)
-        assert _ranges(vb)[1] == pytest.approx(y, abs=ty)
+    # One box on the screen: every axis grows by the same factor as Speed's.
+    grow = _grown(y1 - y0, 40.0) / (y1 - y0)
+    for vb, (x, y) in before:
+        new_x, new_y = _ranges(vb)
+        assert new_x[1] - new_x[0] == pytest.approx(_grown(x1 - x0, 2.0), rel=0.03)
+        assert new_y[1] - new_y[0] == pytest.approx((y[1] - y[0]) * grow, rel=0.03)
+    tx, ty = _pixels(main)
+    assert main.mapSceneToView(centre).x() == pytest.approx(3.0, abs=tx)
+    assert main.mapSceneToView(centre).y() == pytest.approx(40.0, abs=ty)
+    assert temp.mapSceneToView(centre).y() == pytest.approx(temp_centre, abs=_pixels(temp)[1])
 
 
 def test_a_double_click_fits_the_whole_recording_and_moves_no_cursor(qapp, window):

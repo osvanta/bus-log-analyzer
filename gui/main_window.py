@@ -2548,7 +2548,7 @@ class MainWindow(QMainWindow):
         ('F',               'Fit to Window — rescale X and Y to all data'),
         ('V',               'Fit Vertical — rescale Y only (keep current X)'),
         ('Z',               'Rectangle Zoom on/off — drag a box on the plot to zoom into it'),
-        ('Shift + drag on plot', 'In Rectangle Zoom: zoom out, the plot shrinking into the box'),
+        ('Shift + drag on plot', 'In Rectangle Zoom: zoom out around the box; a smaller box zooms out further'),
         ('Double-click on plot', 'In Rectangle Zoom: fit to window, the whole recording'),
         ('Esc',             'Leave Rectangle Zoom'),
         ('Space',           'Plot selected signal(s) from the signal tree'),
