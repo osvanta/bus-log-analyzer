@@ -14,8 +14,8 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -67,7 +67,7 @@ from core.bus_types import (
     sort_key,
 )
 from core.channel_config import ChannelConfig
-from gui import app_log
+from gui import app_log, survey_prompt
 from gui.dbc_manager import DBCManagerDialog
 from gui.edge_tab import EdgeTab
 from core.signal_store import SignalStore
@@ -236,6 +236,13 @@ class MainWindow(QMainWindow):
         self._close_retry.setInterval(100)
         self._close_retry.timeout.connect(self.close)
         self._measurement_support_preloaded = False
+        # Counts this start once the window is up, and asks for the user
+        # survey when it is due: see gui.survey_prompt.
+        self._survey_start_counted = False
+        self._survey_timer = QTimer(self)
+        self._survey_timer.setSingleShot(True)
+        self._survey_timer.setInterval(survey_prompt.REQUEST_DELAY_MS)
+        self._survey_timer.timeout.connect(self._count_start_and_ask_for_survey)
         # Hidden, session-only CAN load forensics (Ctrl+Alt+D).
         self._debug_mode = False
         self._debug_window: LoadDebugWindow | None = None
@@ -516,6 +523,11 @@ class MainWindow(QMainWindow):
         self._act_can_trace.triggered.connect(self.show_raw_frames)
         self._act_can_trace.setEnabled(False)  # enabled after decode
         toolbar.addAction(self._act_can_trace)
+        # Shown once the user has answered the survey request "Remind me later".
+        self.survey_link = survey_prompt.SurveyLink()
+        self.survey_link.hide()
+        self.survey_link.clicked.connect(self._take_survey)
+        self.title_row.add_end_widget(self.survey_link)
 
     def _build_shortcuts(self) -> None:
         QShortcut(QKeySequence(Qt.Key.Key_Delete), self, activated=self.plot_panel.remove_selected_series)
@@ -2585,7 +2597,9 @@ class MainWindow(QMainWindow):
         startup path.
         """
         from gui.about_dialog import AboutDialog
-        AboutDialog(self.app_name, self.version, self).exec()
+        dialog = AboutDialog(self.app_name, self.version, self)
+        dialog.surveyRequested.connect(self._take_survey)
+        dialog.exec()
 
     def _on_worker_progress(self, message: str) -> None:
         self._log(message)
@@ -2756,6 +2770,41 @@ class MainWindow(QMainWindow):
             # Queued, so the window has painted before the import competes
             # with it for the interpreter.
             QTimer.singleShot(0, _preload_measurement_support)
+        if not self._survey_start_counted:
+            self._survey_start_counted = True
+            if survey_prompt.enabled(sys.argv):
+                self._survey_timer.start()
+
+    def _count_start_and_ask_for_survey(self) -> None:
+        try:
+            state = survey_prompt.count_start(self._user_settings_path)
+        except OSError as exc:
+            self._log(f'Survey count warning: {exc}')
+            return
+        self.survey_link.setVisible(state.link_shown)
+        # Never over work in progress: with a dialog open or a load running,
+        # the request waits for the next start.
+        busy = (QApplication.activeModalWidget() is not None
+                or bool(self._running_threads()))
+        if not state.due or busy or self._closing or not self.isVisible():
+            return
+        self._answer_survey(state, survey_prompt.SurveyRequestDialog(self).ask())
+
+    def _take_survey(self) -> None:
+        """Open the survey from the top row's link or the About dialog."""
+        self._answer_survey(survey_prompt.load_survey_state(self._user_settings_path),
+                            survey_prompt.Answer.TAKE)
+
+    def _answer_survey(self, state: survey_prompt.SurveyState,
+                       answer: survey_prompt.Answer) -> None:
+        if answer is survey_prompt.Answer.TAKE:
+            QDesktopServices.openUrl(QUrl(survey_prompt.SURVEY_URL))
+        state = survey_prompt.answered(state, answer)
+        self.survey_link.setVisible(state.link_shown)
+        try:
+            survey_prompt.save_survey_state(self._user_settings_path, state)
+        except OSError as exc:
+            self._log(f'Survey answer warning: {exc}')
 
     def closeEvent(self, event) -> None:
         # Every worker thread is a child of this window, and Qt terminates the

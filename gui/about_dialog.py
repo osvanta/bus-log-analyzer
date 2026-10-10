@@ -26,7 +26,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
@@ -106,6 +106,9 @@ def _read_text(path: Path) -> str:
 class AboutDialog(QDialog):
     """Application details plus the third-party licence texts."""
 
+    # The user clicked the link to the user survey, which the main window opens.
+    surveyRequested = Signal()
+
     def __init__(self, app_name: str, version: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(f'About {app_name}')
@@ -119,7 +122,18 @@ class AboutDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         close_btn.setDefault(True)
 
+        # The way to the user survey that stays, however its request was
+        # answered: see gui.survey_prompt.
+        self.survey_link = QLabel('<a href="survey">Help us improve: take the user survey</a>', self)
+        self.survey_link.setTextFormat(Qt.TextFormat.RichText)
+        self.survey_link.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard)
+        self.survey_link.setToolTip('3–4 minutes, in your web browser')
+        self.survey_link.linkActivated.connect(lambda _link: self.surveyRequested.emit())
+
         button_row = QHBoxLayout()
+        button_row.addWidget(self.survey_link)
         button_row.addStretch(1)
         button_row.addWidget(close_btn)
 

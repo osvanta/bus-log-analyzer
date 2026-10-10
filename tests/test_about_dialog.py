@@ -83,6 +83,18 @@ def test_every_bundled_licence_file_is_readable(dialog):
         assert len(dialog._viewer.toPlainText()) > 100, f"{title} looks empty"
 
 
+def test_the_survey_link_asks_for_the_survey(dialog):
+    """The link stays in the dialog however the survey request was answered;
+    the main window opens the survey."""
+    requested = []
+    dialog.surveyRequested.connect(lambda: requested.append(True))
+
+    assert "user survey" in dialog.survey_link.text()
+    dialog.survey_link.linkActivated.emit("survey")
+
+    assert requested == [True]
+
+
 def test_dialog_survives_missing_licence_files(qapp, monkeypatch, tmp_path):
     """A source checkout without generated licences must still open."""
     monkeypatch.setattr("gui.about_dialog._resource_root", lambda: tmp_path)

@@ -54,6 +54,14 @@ def skip_or_fail(reason: str) -> None:
 def _no_diag_telemetry(monkeypatch):
     monkeypatch.setenv("OSVANTA_DIAG_TELEMETRY", "0")
 
+
+# Keep the survey request out of test runs: every window a test shows would
+# count as a start, in the user settings beside the source tree, and the
+# tenth would open a dialog. tests/test_survey_prompt.py turns it back on.
+@pytest.fixture(autouse=True)
+def _no_survey_request(monkeypatch):
+    monkeypatch.setenv("OSVANTA_SURVEY_PROMPT", "0")
+
 # ── Payload constants (match sample.dbc signal layout) ────────────────────
 # EngineControl 0x100: EngSpeed raw=2400 (0x0960 LE) → 1200.0 rpm; Throttle raw=100 → 50.0 %
 ENG_PAYLOAD  = bytes([0x60, 0x09, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00])
