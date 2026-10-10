@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from core.channel_config import ChannelConfig
-from core.load_worker import LoadWorker
+from gui.load_worker import LoadWorker
 from core.signal_store import SignalStore
 
 

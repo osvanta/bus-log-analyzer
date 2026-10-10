@@ -56,7 +56,7 @@ def test_ci_and_policy_paths_are_protected(path):
 @pytest.mark.parametrize(
     "path,expected",
     [
-        ("core/load_worker.py", "Validated loading/decoding pipeline"),
+        ("gui/load_worker.py", "Validated loading/decoding pipeline"),
         ("core/readers/blf_can_reader.py", "Validated loading/decoding pipeline"),
         ("requirements.txt", "Validated loading/decoding pipeline"),
         ("core/signal_store.py", "Protected core files"),

@@ -22,7 +22,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from core.load_worker import LoadWorker
+from gui.load_worker import LoadWorker
 from gui.main_window import MainWindow
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -148,7 +148,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 measurement = sys.argv[1]
 app = QApplication(sys.argv[:1])
-import core.load_worker as load_worker
+import gui.load_worker as load_worker
 import gui.main_window as main_window
 
 QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (measurement, ""))

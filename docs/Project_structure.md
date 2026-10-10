@@ -8,7 +8,6 @@ bus-log-analyzer/
 │   ├── models.py                 # RawFrame, DecodedSignalSample dataclasses
 │   ├── bus_types.py              # BusType (CAN/LIN), (bus, channel) identity, label/sort/encode helpers
 │   ├── channel_config.py         # ChannelConfig: {(bus, channel) → DBC/ARXML/LDF}, decoder cache, save/load .osvanta_ch (v3)
-│   ├── load_worker.py            # QThread: native MDF arrays + batched CAN-raw vectorized decode paths
 │   ├── signal_store.py           # SignalStore, SignalSeries (array.array storage)
 │   ├── raw_frame_store.py        # Batched CAN+LIN Trace store: compact metadata + 64 B/frame mmap payload
 │   ├── dbc_decoder.py            # DBCDecoder with 3-level cache — .dbc, .arxml, .ldf (via DBC conversion)
@@ -44,6 +43,7 @@ bus-log-analyzer/
 │           └── prompts.py        # Analysis and chat follow-up prompt builders
 ├── gui/
 │   ├── main_window.py            # MainWindow, toolbar, config save/load, plot_finding()
+│   ├── load_worker.py            # LoadWorker (QThread): native MDF arrays + batched CAN-raw vectorized decode paths
 │   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time()
 │   ├── overflow_row.py           # OverflowButtonRow: plot buttons that do not fit move into a "»" menu
 │   ├── plot_icons.py             # Monochrome plot button icons, drawn from SVG in the palette's text colour
@@ -95,8 +95,10 @@ from the project owner. See `AGENTS.md` for the complete protected-file list.
 
 ### LoadWorker dispatch
 
-`core/load_worker.py` is the central background pipeline and selects exactly
-one accepted path:
+`gui/load_worker.py` is the central background pipeline and selects exactly
+one accepted path. It sits in `gui/` because it is a Qt worker (a `QObject`
+whose signals cross to the GUI thread); `core/` imports no Qt at all, which
+`tests/test_core_imports_no_gui.py` enforces.
 
 - **MF4/MDF bus logging:** `MDFCANReader.iter_decoded_channel_arrays()` calls
   `asammdf.MDF.extract_bus_logging()` once and bulk-imports decoded NumPy

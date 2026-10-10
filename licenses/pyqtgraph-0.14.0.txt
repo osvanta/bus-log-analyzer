@@ -1,6 +1,6 @@
 pyqtgraph 0.14.0
 License: MIT
-http://www.pyqtgraph.org
+https://github.com/pyqtgraph/pyqtgraph
 
 ----- LICENSE.txt -----
 

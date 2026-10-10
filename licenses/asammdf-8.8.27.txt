@@ -1,6 +1,8 @@
-asammdf 8.8.6
+asammdf 8.8.27
 License: LGPL-3.0-or-later
 https://github.com/danielhrisca/asammdf
+
+The text of the GNU LGPL version 3 is in GNU-LGPL-3.0.txt, and the GNU GPL version 3 it builds on in GNU-GPL-3.0.txt, both in this folder.
 
 ----- LICENSE -----
 

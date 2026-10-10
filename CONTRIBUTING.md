@@ -62,7 +62,7 @@ performance work, and dependency bumps.
 
 | Path | Why |
 |------|-----|
-| `core/load_worker.py`, `core/channel_config.py` | Load orchestration and channel numbering |
+| `gui/load_worker.py`, `core/channel_config.py` | Load orchestration and channel numbering |
 | `core/dbc_decoder.py`, `core/vectorized_decoder.py` | Signal decoding |
 | `core/blf_reader.py`, `core/raw_frame_store.py` | Raw frame handling |
 | `core/readers/` | Format detection and all reader implementations |
@@ -147,7 +147,6 @@ bus-log-analyzer/
 │   ├── vectorized_decoder.py # Bulk numpy decode path
 │   ├── raw_frame_store.py    # RawFrameStore (CAN Trace)
 │   ├── signal_store.py       # SignalStore + SignalSeries
-│   ├── load_worker.py        # QThread worker
 │   ├── calculated_signals.py # User-defined derived signals
 │   ├── export.py             # CSV export
 │   └── diagnostics/          # AI diagnostics engine
@@ -158,6 +157,7 @@ bus-log-analyzer/
 │       └── llm/              # GitHub Models client + token store
 ├── gui/
 │   ├── main_window.py        # MainWindow (QMainWindow)
+│   ├── load_worker.py        # LoadWorker: QThread worker that runs the readers
 │   ├── plot_widget.py        # PlotPanel (pyqtgraph)
 │   ├── signal_tree.py        # SignalTreeWidget
 │   ├── dbc_manager.py        # DBC/ARXML database management
@@ -167,6 +167,11 @@ bus-log-analyzer/
 ├── tools/                    # Repo tooling (protected-path check)
 └── tests/                    # pytest suite + fixtures
 ```
+
+`core/` holds no Qt: nothing under it may import PySide6, shiboken6 or
+pyqtgraph, directly or through another module, so its logic runs and is
+tested without a GUI. Anything that needs Qt, such as a `QObject` worker or a
+signal, belongs in `gui/`. `tests/test_core_imports_no_gui.py` enforces this.
 
 Deeper detail lives in [docs/Project_structure.md](docs/Project_structure.md)
 and [docs/AI_diagnostic.md](docs/AI_diagnostic.md).

@@ -1,4 +1,4 @@
-packaging 26.0
+packaging 26.3
 License: Apache-2.0 OR BSD-2-Clause
 https://github.com/pypa/packaging
 
@@ -7,7 +7,6 @@ https://github.com/pypa/packaging
 This software is made available under the terms of *either* of the licenses
 found in LICENSE.APACHE or LICENSE.BSD. Contributions to this software is made
 under the terms of *both* these licenses.
-
 
 ----- LICENSE.APACHE -----
 
@@ -188,7 +187,6 @@ under the terms of *both* these licenses.
       of your accepting any such warranty or additional liability.
 
    END OF TERMS AND CONDITIONS
-
 
 ----- LICENSE.BSD -----
 

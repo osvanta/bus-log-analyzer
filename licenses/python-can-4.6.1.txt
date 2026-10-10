@@ -2,6 +2,8 @@ python-can 4.6.1
 License: LGPL-3.0-only
 https://github.com/hardbyte/python-can
 
+The text of the GNU LGPL version 3 is in GNU-LGPL-3.0.txt, and the GNU GPL version 3 it builds on in GNU-GPL-3.0.txt, both in this folder.
+
 ----- LICENSE.txt -----
 
                    GNU LESSER GENERAL PUBLIC LICENSE

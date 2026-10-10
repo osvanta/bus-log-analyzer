@@ -1,4 +1,4 @@
-typing_extensions 4.15.0
+typing_extensions 4.16.0
 License: PSF-2.0
 https://github.com/python/typing_extensions
 

@@ -1,6 +1,6 @@
-charset-normalizer 3.4.4
-License: see bundled text
-
+charset-normalizer 3.5.2
+License: MIT
+https://charset-normalizer.readthedocs.io/
 
 ----- LICENSE -----
 

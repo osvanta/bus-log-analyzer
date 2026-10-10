@@ -1,6 +1,6 @@
 wrapt 1.17.3
 License: BSD-2-Clause
-https://github.com/GrahamDumpleton/wrapt
+https://wrapt.readthedocs.io/
 
 ----- LICENSE -----
 

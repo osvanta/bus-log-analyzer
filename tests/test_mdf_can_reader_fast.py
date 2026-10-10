@@ -12,7 +12,7 @@ import numpy as np
 
 from core.readers.mdf_can_reader import MDFCANReader
 from core.readers.mdf_reader import LazyTextValues, MDFReader
-from core.load_worker import LoadWorker
+from gui.load_worker import LoadWorker
 from core.bus_types import BusType
 from core.signal_store import SignalStore
 

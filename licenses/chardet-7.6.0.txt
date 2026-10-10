@@ -1,5 +1,5 @@
-chardet 7.4.3
-License: LGPL-2.1-or-later
+chardet 7.6.0
+License: 0BSD
 https://github.com/chardet/chardet
 
 ----- LICENSE -----

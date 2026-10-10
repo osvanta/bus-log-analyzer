@@ -10,7 +10,7 @@
 *                           @dinacaran
 
 # Validated loading/decoding pipeline — see docs/PR_Policy.md
-/core/load_worker.py        @dinacaran
+/gui/load_worker.py         @dinacaran
 /core/channel_config.py     @dinacaran
 /core/dbc_decoder.py        @dinacaran
 /core/vectorized_decoder.py @dinacaran

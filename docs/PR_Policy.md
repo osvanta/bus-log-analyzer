@@ -4,7 +4,7 @@
 ## What NOT to Modify Without permission:
 Protected loading/decoding files and areas:
 
-- `core/load_worker.py`
+- `gui/load_worker.py`
 - `core/channel_config.py`
 - `core/dbc_decoder.py`
 - `core/vectorized_decoder.py`

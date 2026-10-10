@@ -33,7 +33,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 measurement, scenario, held_for = sys.argv[1], sys.argv[2], float(sys.argv[3])
 app = QApplication(sys.argv[:1])
-import core.load_worker as load_worker
+import gui.load_worker as load_worker
 import gui.main_window as main_window
 
 QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (measurement, ""))

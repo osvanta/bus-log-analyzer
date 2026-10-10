@@ -35,7 +35,7 @@ import threading
 def preload():
     return next((t for t in threading.enumerate() if t.name == 'Measurement support preload'), None)
 deadline = time.monotonic() + 60
-while preload() is None and 'core.load_worker' not in sys.modules and time.monotonic() < deadline:
+while preload() is None and 'gui.load_worker' not in sys.modules and time.monotonic() < deadline:
     app.processEvents()
     time.sleep(0.01)
 thread = preload()
