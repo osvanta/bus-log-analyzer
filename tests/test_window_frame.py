@@ -78,6 +78,26 @@ def test_a_narrow_row_keeps_its_window_buttons_and_room_to_move_the_window(qapp,
     assert row.hit_test(_free_room(row)) == HTCAPTION
 
 
+def test_a_widget_at_the_end_sits_before_the_window_buttons(qapp, row):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QToolButton
+    from gui.window_frame import HTCAPTION, HTCLIENT
+
+    link = QToolButton()
+    link.setText('Help us improve')
+    row.add_end_widget(link)
+    row.resize(700, row.height())
+    qapp.processEvents()
+
+    assert row.toolbar.geometry().right() + 48 < link.x()
+    assert link.geometry().right() < row.minimize_button.x()
+    assert row.close_button.geometry().right() == row.width() - 1
+    assert row.hit_test(_center(row, link)) == HTCLIENT
+    # The room between the toolbar and the widget still moves the window.
+    room = QPoint((row.toolbar.geometry().right() + link.x()) // 2, row.height() // 2)
+    assert row.hit_test(room) == HTCAPTION
+
+
 def test_the_maximize_button_offers_restore_once_maximized(row):
     row.show_maximized_state(True)
     assert row.maximize_button.accessibleName() == 'Restore'

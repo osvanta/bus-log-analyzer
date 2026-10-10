@@ -158,6 +158,14 @@ class TitleRow(QWidget):
             layout.addWidget(button)
         self.show_window_buttons(False)
 
+    def add_end_widget(self, widget: QWidget) -> None:
+        """Put widget at the row's right end, before the window buttons and
+        after the room kept free to move the window by."""
+        layout = self.layout()
+        index = layout.indexOf(self.minimize_button)
+        layout.insertWidget(index, widget)
+        layout.insertSpacing(index + 1, 8)
+
     def window_buttons(self) -> tuple[QAbstractButton, ...]:
         return (self.minimize_button, self.maximize_button, self.close_button)
 

@@ -52,6 +52,7 @@ bus-log-analyzer/
 │   ├── dbc_manager.py            # Database Manager dialog: per-bus-channel DBC/ARXML/LDF, match quality bars
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
 │   ├── crash_log.py              # BLA_crash.log: Qt fatal errors, native crashes, freezes, uncaught exceptions
+│   ├── survey_prompt.py          # User survey request on the 10th start, and the top row's link after "Remind me later"; state in osvanta_user_settings.json
 │   ├── release_test/             # Hidden --release-test: drives the built app through real measurements; --known-good adds timing against fixed limits (timing.py)
 │   │   ├── plan.py               # Folder layout → measurements, databases, scenarios
 │   │   ├── driver.py             # Works one scenario's toolbar steps inside the running app
