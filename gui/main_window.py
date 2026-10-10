@@ -325,7 +325,8 @@ class MainWindow(QMainWindow):
         self.btn_fit_v = icon_button('fit_vertical', 'Fit Vertical',
                                      'Fit Vertical (V): fit the height, keep the time range')
         self.btn_zoom_rect = icon_button('zoom_rect', 'Rectangle Zoom',
-                                         'Rectangle Zoom (Z): drag a box on the plot to zoom into it')
+                                         'Rectangle Zoom (Z): drag a box on the plot to zoom into it,\n'
+                                         'Shift+drag to zoom out, double-click to see the whole recording')
         self.btn_zoom_rect.setCheckable(True)
         self.btn_multi_axis = QPushButton('Multi-Axis')
         self.btn_multi_axis.setCheckable(True)
@@ -1305,8 +1306,11 @@ class MainWindow(QMainWindow):
         self.plot_panel.set_rect_zoom(checked)
         self._esc_rect_zoom.setEnabled(checked)
         if checked:
+            # No longer than the other hints: the status bar widens the window
+            # to show the whole text.
             self._update_status('Rectangle Zoom on',
-                                'Drag a box on the plot to zoom into it; Esc to leave')
+                                'Drag to zoom in, Shift+drag to zoom out, double-click for all; '
+                                'Esc to leave')
         else:
             self._update_status('Rectangle Zoom off',
                                 'Drag the plot to pan; F fits the whole recording')
@@ -2548,6 +2552,8 @@ class MainWindow(QMainWindow):
         ('F',               'Fit to Window — rescale X and Y to all data'),
         ('V',               'Fit Vertical — rescale Y only (keep current X)'),
         ('Z',               'Rectangle Zoom on/off — drag a box on the plot to zoom into it'),
+        ('Shift + drag on plot', 'In Rectangle Zoom: zoom out around the box; a smaller box zooms out further'),
+        ('Double-click on plot', 'In Rectangle Zoom: fit to window, the whole recording'),
         ('Esc',             'Leave Rectangle Zoom'),
         ('Space',           'Plot selected signal(s) from the signal tree'),
         ('C',               'Change color of the selected signal'),

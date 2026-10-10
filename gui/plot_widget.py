@@ -185,7 +185,8 @@ class _LeftAxis(pg.AxisItem):
 
 class _ZoomViewBox(pg.ViewBox):
     """A plot area that, while Rectangle Zoom is on, turns a left drag into a
-    box and zooms the plot to the box when the button is let go.
+    box and zooms the plot to the box when the button is let go. With Shift
+    held as it is let go, it zooms out instead.
 
     The box stays inside the area, so in the stacked layout it stays in the
     row it started in. The middle button still pans and the right button
@@ -227,7 +228,8 @@ class _ZoomViewBox(pg.ViewBox):
         if ev.isFinish():
             self._zooming = False
             self._zoom_box.hide()
-            self._panel._zoom_to_rect(self, box)
+            zoom_out = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._panel._zoom_to_rect(self, box, zoom_out=zoom_out)
         else:
             self._zoom_box.setRect(box)
             self._zoom_box.show()
@@ -694,6 +696,13 @@ class PlotPanel(QWidget):
         self._collapsed_groups: dict[str, bool] = {}
         self._cursor2_enabled: bool = False
         self._rect_zoom: bool = False           # Rectangle Zoom: a left drag zooms to a box
+        # In Rectangle Zoom a click on the plot waits to see whether it is the
+        # first half of a double-click, which fits the whole recording and
+        # must not move a cursor on the way.
+        self._pending_click: tuple[bool, float] | None = None   # (Shift held, time)
+        self._pending_click_timer = QTimer(self)
+        self._pending_click_timer.setSingleShot(True)
+        self._pending_click_timer.timeout.connect(self._on_pending_click_timeout)
         self._checkbox_target_keys: list[str] = []  # pre-click multi-row snapshot
         self._batch_mode: bool = False          # True while batch-adding signals; suppresses per-add rebuilds
         self._rebuild_seq: int = 0              # bumped each rebuild and by fit_to_window(); lets deferred restores detect staleness
@@ -2866,16 +2875,22 @@ class PlotPanel(QWidget):
 
     def set_rect_zoom(self, enabled: bool) -> None:
         """Rectangle Zoom: while on, a left drag on the plot draws a box and
-        zooms to it. A click still places Cursor 1."""
+        zooms to it, or out of it with Shift, and a double-click fits the
+        whole recording. A click still places Cursor 1."""
         self._rect_zoom = bool(enabled)
         views = [self.plot.plotItem.vb, *(vb for _, vb in self._extra_axes),
                  *(p.vb for p in self._stacked_plots)]
         for vb in views:
             vb.show_zoom_cursor()
 
-    def _zoom_to_rect(self, source, rect: QRectF) -> None:
+    def _zoom_to_rect(self, source, rect: QRectF, zoom_out: bool = False) -> None:
         """Zoom to *rect*, a box drawn in the plot area *source*, in its pixels:
         the time range to the box's width, the height to its height.
+
+        With *zoom_out*, the plot zooms out around the box's centre instead:
+        by the square root of how many times the box fits into the plot, so
+        a box half the plot's width shows 1.4 times the time, and one a tenth
+        of it 3.2 times.
 
         In the stacked layout only the box's row changes height. In
         Multi-Axis every axis does, each to its own values across the box.
@@ -2892,17 +2907,28 @@ class PlotPanel(QWidget):
             return QRectF(vb.mapSceneToView(scene_rect.topLeft()),
                           vb.mapSceneToView(scene_rect.bottomRight())).normalized()
 
+        def target(shown: list[float], low: float, high: float) -> tuple[float, float]:
+            if not zoom_out:
+                return low, high
+            # The full ratio, shrinking the plot into the box, sent a small
+            # box far past the recording; its square root is gentler.
+            scale = ((shown[1] - shown[0]) / (high - low)) ** 0.5
+            centre = (low + high) / 2
+            return centre - (centre - shown[0]) * scale, centre + (shown[1] - centre) * scale
+
         if self._stacked_mode:
             views = [source]
         else:
             views = [self.plot.plotItem.vb, *(vb for _, vb in self._extra_axes)]
         # Every range is read before any is set, which would move the others.
         x = in_values(source)
-        y_ranges = [(vb, in_values(vb)) for vb in views]
+        x_range = target(source.viewRange()[0], x.left(), x.right())
+        y_ranges = [(vb, target(vb.viewRange()[1], y.top(), y.bottom()))
+                    for vb in views for y in (in_values(vb),)]
         # One time range for every row and axis: set where the others follow.
-        self._driving_vb().setXRange(x.left(), x.right(), padding=0)
-        for vb, y in y_ranges:
-            vb.setYRange(y.top(), y.bottom(), padding=0)
+        self._driving_vb().setXRange(*x_range, padding=0)
+        for vb, y_range in y_ranges:
+            vb.setYRange(*y_range, padding=0)
 
     # ── Color / background ────────────────────────────────────────────────
 
@@ -4147,24 +4173,58 @@ class PlotPanel(QWidget):
         """Emit plotAreaClicked, or plotAreaShiftClicked with Shift held, with
         the time under a left click in one of view_boxes. A click on a cursor
         line is left alone, since it is the start of a drag that never moved;
-        one cursor would otherwise jump onto the other."""
+        one cursor would otherwise jump onto the other.
+
+        In Rectangle Zoom a double-click fits the whole recording, and a click
+        is emitted once it is clear that it was not the first half of one."""
         if not self._items:
             return
         pos = event.scenePos()
         for vb in view_boxes:
             if not vb.sceneBoundingRect().contains(pos):
                 continue
+            if self._rect_zoom and event.double():
+                self._pending_click = None
+                self._pending_click_timer.stop()
+                self.fit_to_window()
+                return
             for item in vb.scene().items(pos):
                 while item is not None:   # a line's label is its child
                     if isinstance(item, pg.InfiniteLine) and item.movable:
                         return
                     item = item.parentItem()
             x = vb.mapSceneToView(pos).x()
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if self._rect_zoom:
+                self._flush_pending_click()   # one too long ago to pair with this
+                self._pending_click = (shift, x)
+                self._pending_click_timer.start(QApplication.doubleClickInterval())
+            elif shift:
                 self.plotAreaShiftClicked.emit(x)
             else:
                 self.plotAreaClicked.emit(x)
             return
+
+    def _on_pending_click_timeout(self) -> None:
+        # The wait starts when the first click is let go, but a double-click
+        # is timed from its press, so a second press can still be down now.
+        # Its release decides: a double-click takes the waiting click away.
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self._pending_click_timer.start(50)
+            return
+        self._flush_pending_click()
+
+    def _flush_pending_click(self) -> None:
+        """Emit the click waiting in Rectangle Zoom, if there is one."""
+        self._pending_click_timer.stop()
+        pending, self._pending_click = self._pending_click, None
+        if pending is None:
+            return
+        shift, x = pending
+        if shift:
+            self.plotAreaShiftClicked.emit(x)
+        else:
+            self.plotAreaClicked.emit(x)
 
     def _install_plot_background_menu(self) -> None:
         pi   = getattr(self.plot, 'plotItem', None)
