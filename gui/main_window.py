@@ -68,6 +68,7 @@ from core.bus_types import (
 )
 from core.channel_config import ChannelConfig
 from gui import app_log, survey_prompt
+from gui.brand_logo import BrandLogo, leave_logo_unframed
 from gui.dbc_manager import DBCManagerDialog
 from gui.edge_tab import EdgeTab
 from core.signal_store import SignalStore
@@ -79,7 +80,7 @@ from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
 from gui.raw_frame_dialog import RawFrameDialog
 from gui.load_debug_window import LoadDebugWindow, LoadDebugWorker
-from gui.window_frame import CaptionlessWindow, TitleRow
+from gui.window_frame import CaptionlessWindow, TitleRow, captionless_frame_supported
 from core.debug_inspector import (
     format_runtime_failure,
     inspect_databases,
@@ -126,6 +127,10 @@ def prescan_measurement(*args, **kwargs):
 # keeps the two equal.
 _MEASUREMENT_SUFFIXES = ('.asc', '.blf', '.csv', '.mdf', '.mf4')
 
+# The logo's height in the status bar: the smallest at which OSVANTA, under
+# the name, can still be read. The bar grows by a few pixels to hold it.
+BRAND_LOGO_HEIGHT = 28
+
 
 def _preload_measurement_support() -> None:
     def load() -> None:
@@ -168,7 +173,17 @@ class MainWindow(QMainWindow):
         self.app_name = app_name
         self.version = version
         self.setWindowTitle(f'{app_name} {version}')
-        self.resize(1700, 950)
+        room = self.screen().availableGeometry()
+        if captionless_frame_supported() and (room.width() < 1700 or room.height() < 950):
+            # Less room above the taskbar than 1700 x 950, as on a laptop at
+            # 225 %: Qt fits the window with its caption, the top row takes
+            # the caption off, and the window overhung the screen, the status
+            # bar behind the taskbar. Maximized, it fits; restored, it takes
+            # nine tenths of the room.
+            self.resize(room.width() * 9 // 10, room.height() * 9 // 10)
+            self.setWindowState(Qt.WindowState.WindowMaximized)
+        else:
+            self.resize(1700, 950)
 
         self._splash = splash
         self.measurement_path: str | None = None
@@ -475,6 +490,16 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_state_label)
         self.statusBar().addPermanentWidget(self.debug_mode_label)
         self.statusBar().addPermanentWidget(self.status_next_step_label, 1)
+        # A long message is cut short rather than holding the window wider
+        # than the user made it, which moved the plot under the mouse.
+        for label in (self.status_state_label, self.status_next_step_label):
+            label.setMinimumWidth(1)
+        # The brand at the right end: the top row shows no name since it took
+        # the title bar's place. See gui.brand_logo.
+        self.brand_logo = BrandLogo(BRAND_LOGO_HEIGHT)
+        self.brand_logo.setToolTip(f'{self.app_name} {self.version}')
+        self.statusBar().addPermanentWidget(self.brand_logo)
+        leave_logo_unframed(self.statusBar())
         self._sync_panel_toggle_buttons()
 
     def _level_plot_buttons_with_table_header(self) -> None:
