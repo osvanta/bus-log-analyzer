@@ -132,3 +132,43 @@ def test_the_main_window_toolbar_sits_in_the_top_row(qapp):
     finally:
         window.deleteLater()
         qapp.processEvents()
+
+
+@pytest.mark.parametrize('room, maximized, size', [
+    ((1280, 805), True, (1152, 724)),      # a laptop at 225 %: nine tenths once restored
+    ((2560, 900), True, (2304, 810)),      # wide enough, but too short
+    ((1920, 1040), False, (1700, 950)),
+])
+def test_a_screen_with_less_room_than_the_window_opens_it_maximized(qapp, monkeypatch,
+                                                                    room, maximized, size):
+    # Qt fits the window with its caption, which the top row then takes off,
+    # and the window overhung the screen, the status bar behind the taskbar.
+    from PySide6.QtCore import QRect, Qt
+    from PySide6.QtGui import QScreen
+    from gui import main_window
+    from gui.main_window import MainWindow
+
+    monkeypatch.setattr(main_window, 'captionless_frame_supported', lambda: True)
+    monkeypatch.setattr(QScreen, 'availableGeometry', lambda screen: QRect(0, 0, *room))
+    window = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
+    try:
+        assert bool(window.windowState() & Qt.WindowState.WindowMaximized) is maximized
+        assert window.size().toTuple() == size
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_off_windows_own_platform_the_window_keeps_its_size(qapp, monkeypatch):
+    from PySide6.QtCore import QRect, Qt
+    from PySide6.QtGui import QScreen
+    from gui.main_window import MainWindow
+
+    monkeypatch.setattr(QScreen, 'availableGeometry', lambda screen: QRect(0, 0, 800, 600))
+    window = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
+    try:
+        assert not window.windowState() & Qt.WindowState.WindowMaximized
+        assert window.size().toTuple() == (1700, 950)
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
