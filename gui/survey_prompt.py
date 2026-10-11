@@ -12,7 +12,7 @@ browser.
 "Remind me later" puts a "Help us improve" link at the right end of the
 window's top row, where it stays until the user opens the survey with it.
 Taking the survey or "Don't ask again" ends it: nothing more is shown. The
-About dialog keeps a link to the survey whatever the answer.
+Help menu and the About dialog keep a link to the survey whatever the answer.
 
 Only the number of starts and the answer are kept, in the user settings beside
 the application. Nothing is sent anywhere: the browser opens the survey only

@@ -90,9 +90,45 @@ def test_the_survey_link_asks_for_the_survey(dialog):
     dialog.surveyRequested.connect(lambda: requested.append(True))
 
     assert "user survey" in dialog.survey_link.text()
-    dialog.survey_link.linkActivated.emit("survey")
+    dialog.survey_link.linkActivated.emit("#")
 
     assert requested == [True]
+
+
+@pytest.mark.parametrize("link, text, url", [
+    ("ask_link", "Ask a question", "https://github.com/osvanta/bus-log-analyzer/discussions"),
+    ("report_link", "Report a problem", "https://github.com/osvanta/bus-log-analyzer/issues"),
+])
+def test_the_project_links_open_their_pages(dialog, monkeypatch, link, text, url):
+    """The same ways to reach the project as the Help menu."""
+    from unittest.mock import Mock
+
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+
+    opened = Mock(return_value=True)
+    monkeypatch.setattr(QDesktopServices, "openUrl", opened)
+    requested = []
+    dialog.surveyRequested.connect(lambda: requested.append(True))
+
+    label = getattr(dialog, link)
+    assert text in label.text()
+    assert "GitHub" in label.toolTip()
+    label.linkActivated.emit("#")
+
+    opened.assert_called_once_with(QUrl(url))
+    assert requested == []
+
+
+def test_the_links_sit_left_of_close_in_the_help_menus_order(dialog):
+    from PySide6.QtWidgets import QPushButton
+
+    dialog.show()
+    close = next(b for b in dialog.findChildren(QPushButton) if b.text() == "Close")
+    links = [dialog.ask_link, dialog.report_link, dialog.survey_link]
+
+    assert [link.x() for link in links] == sorted(link.x() for link in links)
+    assert dialog.survey_link.geometry().right() < close.x()
 
 
 def test_dialog_survives_missing_licence_files(qapp, monkeypatch, tmp_path):

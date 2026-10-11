@@ -71,6 +71,7 @@ from gui import app_log, survey_prompt
 from gui.brand_logo import BrandLogo, leave_logo_unframed
 from gui.dbc_manager import DBCManagerDialog
 from gui.edge_tab import EdgeTab
+from gui.help_menu import HelpMenu
 from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button
@@ -543,16 +544,19 @@ class MainWindow(QMainWindow):
             if text in {'Load + Decode', 'Load Config'}:
                 toolbar.addSeparator()
         toolbar.addSeparator()
-        shortcuts_act = QAction('Shortcuts', self)
-        shortcuts_act.triggered.connect(self.show_shortcuts)
-        toolbar.addAction(shortcuts_act)
-        about_act = QAction('About', self)
-        about_act.triggered.connect(self.show_about)
-        toolbar.addAction(about_act)
         self._act_can_trace = QAction('CAN Trace', self)
         self._act_can_trace.triggered.connect(self.show_raw_frames)
         self._act_can_trace.setEnabled(False)  # enabled after decode
         toolbar.addAction(self._act_can_trace)
+        toolbar.addSeparator()
+        # Last, where a menu bar has its Help menu. It opens at a click.
+        self.help_menu = HelpMenu(self.app_name, self)
+        self.help_menu.shortcutsRequested.connect(self.show_shortcuts)
+        self.help_menu.surveyRequested.connect(self._take_survey)
+        self.help_menu.aboutRequested.connect(self.show_about)
+        toolbar.addAction(self.help_menu.menuAction())
+        toolbar.widgetForAction(self.help_menu.menuAction()).setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
         # Shown once the user has answered the survey request "Remind me later".
         self.survey_link = survey_prompt.SurveyLink()
         self.survey_link.hide()
@@ -2826,7 +2830,7 @@ class MainWindow(QMainWindow):
         self._answer_survey(state, survey_prompt.SurveyRequestDialog(self).ask())
 
     def _take_survey(self) -> None:
-        """Open the survey from the top row's link or the About dialog."""
+        """Open the survey from the top row's link, the Help menu or About."""
         self._answer_survey(survey_prompt.load_survey_state(self._user_settings_path),
                             survey_prompt.Answer.TAKE)
 

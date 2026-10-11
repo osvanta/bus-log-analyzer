@@ -371,6 +371,26 @@ def test_the_about_dialog_opens_the_survey_whatever_was_answered(
     assert load_survey_state(settings_path).answer == 'taken'
 
 
+@pytest.mark.parametrize('saved', [
+    SurveyState(starts=3),
+    SurveyState(starts=12, answer='later'),
+    SurveyState(starts=12, answer='taken'),
+    SurveyState(starts=12, answer='declined'),
+])
+def test_the_help_menu_opens_the_survey_whatever_was_answered(
+        qapp, window, settings_path, opened, saved):
+    from PySide6.QtCore import QUrl
+
+    save_survey_state(settings_path, saved)
+    window._count_start_and_ask_for_survey()
+
+    window.help_menu.survey_action.trigger()
+
+    opened.assert_called_once_with(QUrl(survey_prompt.SURVEY_URL))
+    assert window.survey_link.isHidden()
+    assert load_survey_state(settings_path).answer == 'taken'
+
+
 def test_a_busy_window_leaves_the_request_for_the_next_start(
         qapp, window, settings_path, asked, monkeypatch):
     monkeypatch.setattr(window, '_running_threads', lambda: [object()])
