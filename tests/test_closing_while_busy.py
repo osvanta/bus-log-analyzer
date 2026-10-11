@@ -77,7 +77,7 @@ def start():
     if scenario == "inspection":
         window.toggle_debug_mode()  # inspects the open measurement
     else:
-        window._toolbar_actions["Load + Decode"].trigger()
+        window._toolbar_actions["Decode"].trigger()
     close_when_busy()
 
 def close_when_busy():

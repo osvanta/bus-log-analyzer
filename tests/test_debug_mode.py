@@ -228,7 +228,7 @@ def test_load_failure_auto_opens_the_debug_window_with_debug_mode_off(
     report = window._debug_window.report.toPlainText()
     # Both the failure banner and the measurement inspection are present.
     assert "LOAD + DECODE RESULT: FAIL" in report
-    assert "Load + Decode failed" in report
+    assert "Decode failed" in report
     assert "File: issue.csv" in report
     assert not list(tmp_path.glob("*.json"))
     assert not list(tmp_path.glob("debug*.txt"))
@@ -329,7 +329,7 @@ def test_a_failing_inspector_does_not_re_enter_the_auto_launcher(
     window._on_worker_failed("decode blew up")
     _wait_for_debug_worker(window, qapp)
 
-    assert launches == ["Load + Decode failed"]
+    assert launches == ["Decode failed"]
     report = window._debug_window.report.toPlainText()
     assert "DEBUG INSPECTOR INTERNAL FAILURE" in report
     assert "inspector exploded" in report

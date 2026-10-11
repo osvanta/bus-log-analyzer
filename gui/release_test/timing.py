@@ -13,7 +13,7 @@ Each starts the application afresh and times:
   answers: stamped by the application, less the runner's launch time;
 - Open File, clicked as soon as the window is up: start to file opened,
   less the time any dialog waited on screen for its answer;
-- Load + Decode, from the click until the signal tree lists the signals;
+- Decode, from the click until the signal tree lists the signals;
 - five signals plotted in Stacked, until they are drawn.
 
 Each plot is split into its phases: adding the signals, the queued events
@@ -99,7 +99,7 @@ def items_for(references: list[str]) -> list[Item]:
     found = [Item(item_id, title, measure) for item_id, measure, title in _STARTUP]
     titles = {
         'opened': 'opened, from start-up',
-        'listed': 'Load + Decode until the signal tree lists it',
+        'listed': 'Decode until the signal tree lists it',
         'drawn': 'five signals plotted in Stacked',
         'decoded': 'decode result',
     }

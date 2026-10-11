@@ -235,24 +235,30 @@ def test_plot_buttons_sit_above_the_plot_not_the_table(window):
         assert button.parentWidget() is window.plot_button_row
 
 
-def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons(window):
+def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(window):
     row = window.plot_button_row
     modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack]
     icons = [window.btn_fit, window.btn_fit_v, window.btn_zoom_rect, window.btn_cursor1,
              window.btn_cursor2, window.btn_points, window.btn_hide_line]
 
-    assert row._buttons == modes + icons
+    clear = window.btn_clear_plot
+
+    assert row._buttons == modes + icons + [clear]
     assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack']
-    assert [b.accessibleName() for b in icons] == [
+    assert [b.accessibleName() for b in icons + [clear]] == [
         'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
-        'Show Data Points', 'Hide Line']
-    for button in icons:
+        'Show Data Points', 'Hide Line', 'Clear Plot']
+    for button in icons + [clear]:
         assert button.text() == ''
         assert not button.icon().isNull()
         assert button.toolTip().startswith(button.accessibleName())
         assert button.height() == window.btn_stacked.height()
     multistack, fit = window.btn_multistack, window.btn_fit
     assert fit.x() - (multistack.x() + multistack.width()) > 2 * row.SPACING
+    # Clear Plot, which empties the plot, stands apart from the view buttons.
+    hide_line = window.btn_hide_line
+    assert not row.overflowed_buttons()
+    assert clear.x() - (hide_line.x() + hide_line.width()) > 2 * row.SPACING
 
 
 def test_plot_buttons_are_level_with_the_table_header(window):

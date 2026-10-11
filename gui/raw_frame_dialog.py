@@ -62,7 +62,7 @@ class RawFrameDialog(QDialog):
 
     def __init__(self, raw_store: RawFrameStore, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle('Raw CAN Frame Table')
+        self.setWindowTitle('Trace — Raw CAN and LIN Frames')
         self.resize(1260, 750)
 
         self._raw_store = raw_store

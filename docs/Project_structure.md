@@ -42,7 +42,7 @@ bus-log-analyzer/
 │           ├── client.py         # GitHubModelsClient — streaming OpenAI-compatible REST
 │           └── prompts.py        # Analysis and chat follow-up prompt builders
 ├── gui/
-│   ├── main_window.py            # MainWindow, toolbar, config save/load, plot_finding()
+│   ├── main_window.py            # MainWindow, top row, config save/load, plot_finding()
 │   ├── load_worker.py            # LoadWorker (QThread): native MDF arrays + batched CAN-raw vectorized decode paths
 │   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time()
 │   ├── overflow_row.py           # OverflowButtonRow: plot buttons that do not fit move into a "»" menu
@@ -54,6 +54,7 @@ bus-log-analyzer/
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
 │   ├── crash_log.py              # BLA_crash.log: Qt fatal errors, native crashes, freezes, uncaught exceptions
 │   ├── survey_prompt.py          # User survey request on the 10th start, and the top row's link after "Remind me later"; state in osvanta_user_settings.json
+│   ├── top_row.py                # The top row's File menu and its accent-filled Decode button
 │   ├── help_menu.py              # The top row's Help menu: keyboard shortcuts, GitHub Discussions and issues, the survey, About
 │   ├── release_test/             # Hidden --release-test: drives the built app through real measurements; --known-good adds timing against fixed limits (timing.py)
 │   │   ├── plan.py               # Folder layout → measurements, databases, scenarios
@@ -86,7 +87,7 @@ from the project owner. See `AGENTS.md` for the complete protected-file list.
 ### Entry and format selection
 
 1. `gui/main_window.py` owns file selection, lightweight channel/ID pre-scan,
-   database configuration, and the **Load + Decode** worker lifecycle.
+   database configuration, and the **Decode** worker lifecycle.
 2. `core/readers/__init__.py` detects the measurement format, distinguishes
    pre-decoded MDF from MDF bus logging, enforces DBC/ARXML requirements, and
    constructs the correct reader.

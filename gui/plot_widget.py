@@ -628,6 +628,9 @@ class PlotPanel(QWidget):
     plotAreaShiftClicked = Signal(float)
     # The user changed or removed the tag under the signal table (a PlotTag).
     tagChanged = Signal(object)
+    # "Remove all signals" in the signal table's menu: the main window clears
+    # the plot, as its Clear Plot button does.
+    clearRequested = Signal()
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -4045,6 +4048,7 @@ class PlotPanel(QWidget):
         rm.triggered.connect(self.remove_selected_series)
         rm.setEnabled(has_sel)
         menu.addAction(rm)
+        self._add_remove_all_action(menu)
         menu.addSeparator()
         grp_act = QAction('Group selected…', menu)
         grp_act.triggered.connect(self.group_selected)
@@ -4086,6 +4090,14 @@ class PlotPanel(QWidget):
         bg_act.triggered.connect(self._choose_plot_background_color)
         menu.addAction(bg_act)
         menu.exec(global_pos)
+
+    def _add_remove_all_action(self, menu: QMenu) -> QAction:
+        """Add "Remove all signals", as the Clear Plot button, and return it for UI tests."""
+        action = QAction('Remove all signals', menu)
+        action.setEnabled(bool(self._items))
+        action.triggered.connect(self.clearRequested.emit)
+        menu.addAction(action)
+        return action
 
     def _add_move_to_new_stack_action(
         self, menu: QMenu, selected_keys: list

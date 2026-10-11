@@ -155,9 +155,9 @@ def _formula_help_text() -> str:
         "it rather than everything after it.\n"
         "Every Time function takes a plain signal reference as its first "
         "argument, never an expression, so integral(`V` * `I`) is rejected. "
-        "Build the expression as its own generated signal first, for example a "
+        "Build the expression as its own calculated signal first, for example a "
         "signal Power with formula `V` * `I`, then reference that: "
-        "integral(`Power`). Generated signals can be referenced by other "
+        "integral(`Power`). Calculated signals can be referenced by other "
         "formulas, so this two-step chain is the supported route rather than a "
         "workaround.\n"
         "diag(event, increment, decrement) starts at zero and updates once per "
@@ -269,7 +269,7 @@ class CalculatedSignalDialog(QDialog):
         self._import_definitions = import_definitions
         self._help_dialog: FormulaHelpDialog | None = None
         self._library_picker: FormulaLibraryPickerDialog | None = None
-        self.setWindowTitle("Edit Generated Signal" if existing else "New Signal")
+        self.setWindowTitle("Edit Calculated Signal" if existing else "New Calculated Signal")
         self.resize(760, 560)
 
         self.name_edit = QLineEdit(existing.name if existing else "")
@@ -318,7 +318,7 @@ class CalculatedSignalDialog(QDialog):
         self.signal_list = QListWidget()
         self._section_headers: list[tuple[QListWidgetItem, list[QListWidgetItem]]] = []
         self._add_signal_section("Measurement signals", self._signal_keys)
-        self._add_signal_section("Generated signals", self._generated_keys)
+        self._add_signal_section("Calculated signals", self._generated_keys)
 
         self.insert_button = QPushButton("Insert Signal")
         self.insert_button.setEnabled(bool(self._available_keys))

@@ -121,7 +121,7 @@ dist\BusLogAnalyzer\BusLogAnalyzer.exe --release-test <folder> --heavy
 ```
 
 It restarts the application once per scenario (every file once, A → B → A,
-closing the window during Load + Decode, broken files, one file five times, a
+closing the window during Decode, broken files, one file five times, a
 run with memory checks) and writes a report into the folder. See
 `gui/release_test/__init__.py` for the options and `gui/release_test/plan.py`
 for how to lay out the folder.

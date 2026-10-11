@@ -25,7 +25,7 @@ def row(qapp):
     host = QWidget()
     host.resize(1200, 100)
     toolbar = QToolBar('Main')
-    for text in ('Open File', 'Open Database', 'Load + Decode'):
+    for text in ('Open Measurement', 'Databases', 'Decode'):
         toolbar.addAction(QAction(text, toolbar))
     toolbar.addSeparator()
     toolbar.addAction(QAction('About', toolbar))
@@ -121,7 +121,7 @@ def test_the_main_window_toolbar_sits_in_the_top_row(qapp):
     window = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
     try:
         assert window.menuWidget() is window.title_row
-        assert window.title_row.toolbar.actions()[0].text() == 'Open File'
+        assert window.title_row.toolbar.actions()[0].text() == 'File'
         # The only toolbar is the row's, none in the main window's own areas.
         assert window.findChildren(QToolBar) == [window.title_row.toolbar]
         assert window.title_row.toolbar.parentWidget() is window.title_row

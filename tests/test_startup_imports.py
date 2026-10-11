@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
-"""Start-up must not wait for what only Open File and Load + Decode need.
+"""Start-up must not wait for what only Open Measurement and Decode need.
 
 cantools, python-can and asammdf (with pandas and canmatrix behind it) took
 over a second to import, all before the main window could appear. They are
@@ -70,12 +70,12 @@ def dialog(*args, **kwargs):
     print('core.readers loaded when the dialog opened:', 'core.readers' in sys.modules)
     return '', ''
 QFileDialog.getOpenFileName = staticmethod(dialog)
-window._toolbar_actions['Open File'].trigger()
+window._toolbar_actions['Open Measurement'].trigger()
 """
 
 
 def test_open_file_shows_its_dialog_before_loading_the_readers():
-    # Clicked while the background preload still ran, Open File first waited
+    # Clicked while the background preload still ran, Open Measurement first waited
     # for it to finish: the dialog took two to three seconds to appear.
     completed = subprocess.run(
         [sys.executable, '-c', _OPEN_FILE_SCRIPT],

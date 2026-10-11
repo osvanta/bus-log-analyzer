@@ -976,7 +976,7 @@ class CalculatedSignalManager:
         cleaned = validate_name(name)
         for key, definition in self._definitions.items():
             if key != except_key and definition.name.casefold() == cleaned.casefold():
-                raise CalculatedSignalError(f"A generated signal named '{cleaned}' already exists")
+                raise CalculatedSignalError(f"A calculated signal named '{cleaned}' already exists")
 
     def _generated_references(
         self,
@@ -1089,7 +1089,7 @@ class CalculatedSignalManager:
         """Rename a definition and atomically rewrite every dependent formula."""
         existing = self._definitions.get(key)
         if existing is None:
-            raise CalculatedSignalError(f"Generated signal not found: {key}")
+            raise CalculatedSignalError(f"Calculated signal not found: {key}")
         cleaned = validate_name(new_name)
         self.assert_unique_name(cleaned, except_key=key)
         renamed = CalculatedSignalDefinition(

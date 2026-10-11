@@ -81,8 +81,8 @@ class LoadDebugWindow(QMainWindow):
         controls.addStretch(1)
 
         open_measurement = QPushButton("Open Measurement")
-        open_database = QPushButton("Open Database")
-        load_decode = QPushButton("Load + Decode")
+        open_database = QPushButton("Databases")
+        load_decode = QPushButton("Decode")
         copy_text = QPushButton("Copy Text")
         save_report = QPushButton("Save Report...")
         clear_text = QPushButton("Clear")

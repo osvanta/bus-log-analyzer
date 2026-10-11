@@ -8,7 +8,7 @@
 
 Every release is tested as a user gets it: the packaged build, real
 measurements, the sequences that crashed before (A → B → A, one file five
-times, closing the window during Load + Decode) and a run with Python's
+times, closing the window during Decode) and a run with Python's
 memory checks, since damaged memory usually goes unnoticed until a later load.
 
 It is hidden, and needs nothing but the release zip::

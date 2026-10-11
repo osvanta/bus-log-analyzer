@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -74,13 +75,14 @@ from gui.edge_tab import EdgeTab
 from gui.help_menu import HelpMenu
 from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
-from gui.plot_icons import icon_button
+from gui.plot_icons import icon_button, plot_icon
 from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
 from gui.plot_widget import PlotPanel
 from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
 from gui.raw_frame_dialog import RawFrameDialog
 from gui.load_debug_window import LoadDebugWindow, LoadDebugWorker
+from gui.top_row import FileMenu, MainStepButton
 from gui.window_frame import CaptionlessWindow, TitleRow, captionless_frame_supported
 from core.debug_inspector import (
     format_runtime_failure,
@@ -92,12 +94,12 @@ if TYPE_CHECKING:
     from gui.load_worker import LoadWorker as _LoadWorker
 
 
-# Open File and Load + Decode need core.readers and gui.load_worker, which
+# Open Measurement and Decode need core.readers and gui.load_worker, which
 # import cantools, python-can and asammdf: over a second of start-up that the
 # window does not need. These stand-ins import them on first use, and keep the
 # names here, where the tests patch them. Once the window is up,
 # _preload_measurement_support() imports them in the background, so the first
-# Open File does not wait either.
+# Open Measurement does not wait either.
 def LoadWorker(*args, **kwargs) -> _LoadWorker:  # noqa: N802 — stands in for the class
     from gui.load_worker import LoadWorker
     return LoadWorker(*args, **kwargs)
@@ -123,7 +125,7 @@ def prescan_measurement(*args, **kwargs):
     return prescan_measurement(*args, **kwargs)
 
 
-# core.readers.ALL_SUFFIXES, for the Open File dialog. A copy, so the dialog
+# core.readers.ALL_SUFFIXES, for the Open Measurement dialog. A copy, so the dialog
 # opens at once rather than after core.readers has finished loading; a test
 # keeps the two equal.
 _MEASUREMENT_SUFFIXES = ('.asc', '.blf', '.csv', '.mdf', '.mf4')
@@ -138,13 +140,13 @@ def _preload_measurement_support() -> None:
         try:
             import gui.load_worker  # noqa: F401 — imports core.readers too
         except Exception:
-            pass  # raised again, in full, where Open File imports it
+            pass  # raised again, in full, where Open Measurement imports it
         _remove_leftover_trace_files()
     threading.Thread(target=load, name='Measurement support preload', daemon=True).start()
 
 
 def _remove_leftover_trace_files() -> None:
-    """Free the CAN Trace files earlier versions left in the temp folder.
+    """Free the Trace files earlier versions left in the temp folder.
 
     Each of those sessions left the trace of its last bus log behind, up to
     hundreds of MB each; see core.raw_frame_store._create_data_file().
@@ -156,7 +158,7 @@ def _remove_leftover_trace_files() -> None:
         return
     if removed:
         app_log.record(
-            f'Removed {removed} CAN Trace file(s) left in the temp folder, '
+            f'Removed {removed} Trace file(s) left in the temp folder, '
             f'{freed / 1_000_000:,.1f} MB.'
         )
 
@@ -371,12 +373,21 @@ class MainWindow(QMainWindow):
                                          'Hide Line: the data points only, once they are shown')
         self.btn_hide_line.setCheckable(True)
         self.btn_hide_line.setEnabled(False)
-        # The plot modes, which keep their text, then the icon buttons.
+        self.btn_clear_plot = icon_button('clear_plot', 'Clear Plot',
+                                          'Clear Plot: remove every signal from the plot.\n'
+                                          'Undo (Ctrl+Z) brings them back.')
+        self.btn_clear_plot.setEnabled(False)  # enabled after decode
+        # The plot modes, which keep their text, then the icon buttons, and
+        # Clear Plot apart from them.
         for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack):
             self.plot_button_row.add_button(btn)
         self.plot_button_row.add_gap(18)
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
-                    self.btn_cursor2, self.btn_points, self.btn_hide_line):
+                    self.btn_cursor2, self.btn_points, self.btn_hide_line, None,
+                    self.btn_clear_plot):
+            if btn is None:
+                self.plot_button_row.add_gap(18)
+                continue
             # As tall as the text buttons; the icon alone would make it taller.
             btn.setFixedHeight(self.btn_stacked.sizeHint().height())
             self.plot_button_row.add_button(btn)
@@ -391,6 +402,8 @@ class MainWindow(QMainWindow):
         self.btn_cursor2.toggled.connect(self._toggle_cursor2)
         self.btn_points.toggled.connect(self._toggle_points)
         self.btn_hide_line.toggled.connect(self._toggle_line)
+        self.btn_clear_plot.clicked.connect(self.clear_plot)
+        self.plot_panel.clearRequested.connect(self.clear_plot)
         self.plot_panel.set_stacked(self.btn_stacked.isChecked())
         # The buttons were set before their toggled signals were connected.
         self.plot_panel.set_cursor1_enabled(self.btn_cursor1.isChecked())
@@ -482,7 +495,7 @@ class MainWindow(QMainWindow):
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
         self.status_state_label = QLabel('State: Ready')
-        self.status_next_step_label = QLabel('Next: Open BLF, then Open Database, then Load + Decode')
+        self.status_next_step_label = QLabel('Next: Open Measurement, then Databases, then Decode')
         self.debug_mode_label = QLabel('DEBUG MODE: ON')
         self.debug_mode_label.setStyleSheet(
             'color: #ff6060; font-weight: bold; padding-right: 10px;'
@@ -523,49 +536,79 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         toolbar = QToolBar('Main')
         # The toolbar's row is the top of the window, in place of a title bar.
+        # It reads in the order of the work: see gui.top_row.
         self.title_row = TitleRow(toolbar)
         self.setMenuWidget(self.title_row)
         self._window_frame = CaptionlessWindow(self, self.title_row)
+        # The row's actions by their text, those in its File menu included.
         self._toolbar_actions: dict[str, QAction] = {}
-        for text, slot in [
-            ('Open File',    self.choose_blf),
-            ('Open Database', self.choose_dbc),
-            ('Load + Decode',self.load_data),
-            ('Save Config',  self.save_configuration),
-            ('Load Config',  self.load_configuration),
-            ('New Signal',   self.new_generated_signal),
-            ('Export',       self.export_selected),
-            ('Clear Plots',  self.clear_plot),
+
+        self.file_menu = FileMenu(self)
+        for act, slot in [
+            (self.file_menu.open_configuration_action, self.load_configuration),
+            (self.file_menu.save_configuration_action, self.save_configuration),
+            (self.file_menu.export_action, self.export_selected),
+        ]:
+            act.triggered.connect(slot)
+            # Also the window's, so that its shortcut works with the menu closed.
+            self.addAction(act)
+            self._toolbar_actions[act.text()] = act
+        self._add_menu_button(toolbar, self.file_menu)
+        toolbar.addSeparator()
+
+        for text, slot, keys, tip in [
+            ('Open Measurement', self.choose_blf, 'Ctrl+O',
+             'Open a BLF, ASC, MF4, MDF or CSV measurement (Ctrl+O)'),
+            ('Databases', self.choose_dbc, '',
+             'Assign DBC, ARXML and LDF databases to the bus channels'),
+            ('Decode', self.load_data, 'F9',
+             'Read the measurement and decode it into signals (F9)'),
+            ('Calculated Signal', self.new_generated_signal, '',
+             'Create a signal calculated from others by a formula'),
         ]:
             act = QAction(text, self)
             act.triggered.connect(slot)
-            toolbar.addAction(act)
+            if keys:
+                act.setShortcut(QKeySequence(keys))
+            act.setToolTip(tip)
             self._toolbar_actions[text] = act
-            if text in {'Load + Decode', 'Load Config'}:
+            if text == 'Decode':
+                # The main step: an icon, right beside its bold text.
+                act.setIcon(plot_icon('decode'))
+                self.decode_button = MainStepButton(act, beside=toolbar.widgetForAction(
+                    self._toolbar_actions['Databases']))
+                toolbar.addWidget(self.decode_button)
                 toolbar.addSeparator()
-        toolbar.addSeparator()
-        self._act_can_trace = QAction('CAN Trace', self)
+            else:
+                toolbar.addAction(act)
+        self._act_can_trace = QAction('Trace', self)
         self._act_can_trace.triggered.connect(self.show_raw_frames)
         self._act_can_trace.setEnabled(False)  # enabled after decode
         toolbar.addAction(self._act_can_trace)
         toolbar.addSeparator()
-        # Last, where a menu bar has its Help menu. It opens at a click.
+
+        # Last, where a menu bar has its Help menu.
         self.help_menu = HelpMenu(self.app_name, self)
         self.help_menu.shortcutsRequested.connect(self.show_shortcuts)
         self.help_menu.surveyRequested.connect(self._take_survey)
         self.help_menu.aboutRequested.connect(self.show_about)
-        toolbar.addAction(self.help_menu.menuAction())
-        toolbar.widgetForAction(self.help_menu.menuAction()).setPopupMode(
-            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._add_menu_button(toolbar, self.help_menu)
         # Shown once the user has answered the survey request "Remind me later".
         self.survey_link = survey_prompt.SurveyLink()
         self.survey_link.hide()
         self.survey_link.clicked.connect(self._take_survey)
         self.title_row.add_end_widget(self.survey_link)
 
+    @staticmethod
+    def _add_menu_button(toolbar: QToolBar, menu: QMenu) -> None:
+        """A button in the top row that opens menu at a click."""
+        toolbar.addAction(menu.menuAction())
+        toolbar.widgetForAction(menu.menuAction()).setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+
     def _build_shortcuts(self) -> None:
+        # Ctrl+O, Ctrl+S, Ctrl+E and F9 belong to the top row's actions.
         QShortcut(QKeySequence(Qt.Key.Key_Delete), self, activated=self.plot_panel.remove_selected_series)
-        QShortcut(QKeySequence('Ctrl+S'), self, activated=self.save_configuration)
         QShortcut(QKeySequence('F'), self, activated=self.plot_panel.fit_to_window)
         QShortcut(QKeySequence('V'), self, activated=self.plot_panel.fit_vertical)
         QShortcut(QKeySequence('Z'), self, activated=self.btn_zoom_rect.toggle)
@@ -887,7 +930,7 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        # Refused here rather than at Load + Decode: a BLF with no CAN traffic
+        # Refused here rather than at Decode: a BLF with no CAN traffic
         # cannot be decoded by any database, so letting it through would send
         # the user through channel scanning and database assignment before
         # telling them the file was never usable. Nothing has been mutated yet,
@@ -910,7 +953,7 @@ class MainWindow(QMainWindow):
         self._show_mixed_mdf_notice(path, mixed_mdf=mixed_mdf)
 
         # Lightweight pre-scan: extract channel numbers + arb IDs
-        # so the DBC Manager can show real channels before Load+Decode
+        # so the DBC Manager can show real channels before Decode
         self._prescan_cache = None
         self._channel_data_cache = None
         if needs_dbc or mixed_mdf:
@@ -984,14 +1027,14 @@ class MainWindow(QMainWindow):
         message = (
             'This MDF file contains both existing decoded signals and raw CAN frames.\n\n'
             'Osvanta Bus Log Analyzer will always list the existing decoded signals first.\n\n'
-            'To additionally decode the embedded CAN frames, open Database Manager and '
-            'assign a DBC, ARXML or LDF file. On the next load, the analyzer will list both the '
-            'existing decoded signals and the database-decoded CAN signals, and CAN Trace '
+            'To additionally decode the embedded CAN frames, click Databases and assign '
+            'a DBC, ARXML or LDF file. On the next Decode, the analyzer will list both the '
+            'existing decoded signals and the database-decoded CAN signals, and the Trace '
             'will show the raw frames.'
         )
         self._log(
             'Mixed MDF detected: existing decoded signals have priority; configure a '
-            'DBC/ARXML to append decoded raw-CAN signals and enable CAN Trace.'
+            'DBC/ARXML to append decoded raw-CAN signals and enable the Trace.'
         )
         QMessageBox.information(self, 'Mixed MDF content detected', message)
 
@@ -1404,7 +1447,7 @@ class MainWindow(QMainWindow):
                 'raw_trace_unavailable_reason',
                 'This measurement does not contain raw CAN frame records.',
             ) if self.store else 'Load a measurement file first.'
-            QMessageBox.information(self, 'CAN Trace unavailable', reason)
+            QMessageBox.information(self, 'Trace unavailable', reason)
             return
         self._raw_frame_dialog = RawFrameDialog(rfs, self)
         self._raw_frame_dialog.show()
@@ -1471,7 +1514,7 @@ class MainWindow(QMainWindow):
         """Show what the queued calculations produced, with one plot rebuild."""
         keys = [
             key for key in dict.fromkeys(self._calc_plot_keys)
-            # Deleted, or dropped by a new Load + Decode, while others ran.
+            # Deleted, or dropped by a new Decode, while others ran.
             if self.calculated_signals.cached_series(key) is not None
         ]
         self._calc_plot_keys = []
@@ -1535,12 +1578,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Calculation in progress",
-                "Wait for generated-signal calculations to finish before renaming.",
+                "Wait for the signal calculations to finish before renaming.",
             )
             return
         new_name, accepted = QInputDialog.getText(
             self,
-            "Rename generated signal",
+            "Rename calculated signal",
             "New signal name:",
             text=definition.name,
         )
@@ -1549,7 +1592,7 @@ class MainWindow(QMainWindow):
         try:
             new_key = self.calculated_signals.rename(key, new_name)
         except CalculatedSignalError as exc:
-            QMessageBox.warning(self, "Cannot rename generated signal", str(exc))
+            QMessageBox.warning(self, "Cannot rename calculated signal", str(exc))
             return
         if new_key == key:
             return
@@ -1571,9 +1614,9 @@ class MainWindow(QMainWindow):
                 state[new_key] = state.pop(key)
 
         self._refresh_generated_signal_tree()
-        self._log(f"Renamed generated signal: {definition.name} -> {new_name.strip()}")
+        self._log(f"Renamed calculated signal: {definition.name} -> {new_name.strip()}")
         self._update_status(
-            f"Renamed generated signal to {new_name.strip()}",
+            f"Renamed calculated signal to {new_name.strip()}",
             "Dependent formulas and saved configuration use the new name.",
         )
 
@@ -1585,7 +1628,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Calculation in progress",
-                "Wait for this generated-signal calculation to finish before deleting it.",
+                "Wait for this signal's calculation to finish before deleting it.",
             )
             return
         dependents = self.calculated_signals.dependents_of(key)
@@ -1593,15 +1636,15 @@ class MainWindow(QMainWindow):
             names = ", ".join(sorted(self._generated_signal_name(k) for k in dependents))
             QMessageBox.information(
                 self,
-                "Generated signal is in use",
-                f"'{definition.name}' cannot be deleted because these generated signals "
+                "Calculated signal is in use",
+                f"'{definition.name}' cannot be deleted because these calculated signals "
                 f"depend on it: {names}.\n\nDelete or edit those first.",
             )
             return
         answer = QMessageBox.question(
             self,
-            "Delete generated signal",
-            f"Delete generated signal '{definition.name}'?",
+            "Delete calculated signal",
+            f"Delete calculated signal '{definition.name}'?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -1610,7 +1653,7 @@ class MainWindow(QMainWindow):
         self.plot_panel.forget_series(key)
         self.calculated_signals.delete(key)
         self._refresh_generated_signal_tree()
-        self._log(f"Deleted generated signal: {definition.name}")
+        self._log(f"Deleted calculated signal: {definition.name}")
 
     def _calculation_is_pending(self, key: str) -> bool:
         if self._calc_active_request and self._calc_active_request[0].key == key:
@@ -1714,13 +1757,13 @@ class MainWindow(QMainWindow):
                     if (series := self.store.get_series(key)) is not None
                 )
         except CalculatedSignalError as exc:
-            QMessageBox.warning(self, "Invalid generated signal", str(exc))
+            QMessageBox.warning(self, "Invalid calculated signal", str(exc))
             return
 
         if estimated_points > LARGE_OUTPUT_WARNING_POINTS:
             answer = QMessageBox.warning(
                 self,
-                "Large generated signal",
+                "Large calculated signal",
                 f"This calculation may produce up to {estimated_points:,} samples and "
                 "may require substantial RAM.\n\nContinue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
@@ -1747,7 +1790,7 @@ class MainWindow(QMainWindow):
                     source_series = self._resolve_source_series(parsed.references)
                 except CalculatedSignalError as exc:
                     self._log(
-                        f"Generated signal calculation skipped ({definition.name}): {exc}"
+                        f"Signal calculation skipped ({definition.name}): {exc}"
                     )
                     self._abandon_dependent_calculations(definition.key)
                     continue
@@ -1767,7 +1810,7 @@ class MainWindow(QMainWindow):
                 remaining.append(entry)
         self._calc_queue = remaining
         if abandoned:
-            self._log(f"Abandoned dependent generated signals: {', '.join(abandoned)}")
+            self._log(f"Abandoned dependent calculated signals: {', '.join(abandoned)}")
         return abandoned
 
     def _start_calculation(
@@ -1802,7 +1845,7 @@ class MainWindow(QMainWindow):
             return
         definition, operation, plot_after = request
         if self.store is not self._calc_source_store:
-            self._log(f"Discarded stale generated signal result: {definition.name}")
+            self._log(f"Discarded stale calculated signal result: {definition.name}")
             return
         self.calculated_signals.commit(definition, series)
         self._refresh_generated_signal_tree()
@@ -1816,10 +1859,10 @@ class MainWindow(QMainWindow):
         action = "Updated" if operation == "edit" else "Created"
         if operation == "lazy":
             action = "Calculated"
-        self._log(f"{action} generated signal: {definition.name}")
+        self._log(f"{action} calculated signal: {definition.name}")
         self._update_status(
-            f"{action} generated signal {definition.name}",
-            "Plot it from Generate Signals or save the configuration.",
+            f"{action} calculated signal {definition.name}",
+            "Plot it from Calculated Signals or save the configuration.",
         )
 
     def _refresh_dependents_after_edit(self, key: str) -> None:
@@ -1830,7 +1873,7 @@ class MainWindow(QMainWindow):
         for dependent in dependents:
             self.calculated_signals.invalidate_series(dependent)
         names = ", ".join(self._generated_signal_name(k) for k in dependents)
-        self._log(f"Invalidated dependent generated signals: {names}")
+        self._log(f"Invalidated dependent calculated signals: {names}")
         # Only on-screen curves are recalculated now; the rest wait until plotted.
         plotted = set(self.plot_panel.plotted_keys())
         for dependent in dependents:
@@ -1845,17 +1888,17 @@ class MainWindow(QMainWindow):
             return
         definition = self._calc_active_request[0] if self._calc_active_request else None
         name = definition.name if definition else "signal"
-        self._log(f"Generated signal calculation failed ({name}): {error_message}")
+        self._log(f"Signal calculation failed ({name}): {error_message}")
         message = error_message
         if definition is not None:
             abandoned = self._abandon_dependent_calculations(definition.key)
             if abandoned:
                 message += (
-                    "\n\nThese generated signals depend on it and were not calculated: "
+                    "\n\nThese calculated signals depend on it and were not calculated: "
                     f"{', '.join(abandoned)}"
                 )
-        QMessageBox.warning(self, "Generated signal calculation failed", message)
-        self._update_status("Generated signal failed", "Correct the formula and try again.")
+        QMessageBox.warning(self, "Signal calculation failed", message)
+        self._update_status("Calculated signal failed", "Correct the formula and try again.")
 
     def _cleanup_calculation(self) -> None:
         if self._calc_thread is not None:
@@ -1933,7 +1976,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 'Calculation in progress',
-                'Wait for the generated-signal calculation to finish before loading a configuration.',
+                'Wait for the signal calculation to finish before loading a configuration.',
             )
             return
         path, _ = QFileDialog.getOpenFileName(self, 'Load configuration', '', 'JSON Files (*.json)')
@@ -2004,7 +2047,7 @@ class MainWindow(QMainWindow):
             data.get('generated_signals') or []
         )
         for error in generated_errors:
-            self._log(f'Generated signal configuration skipped: {error}')
+            self._log(f'Calculated signal configuration skipped: {error}')
         self._refresh_generated_signal_tree()
         generated_pending = {
             key for key in pending_keys if self.calculated_signals.contains_key(key)
@@ -2130,7 +2173,7 @@ class MainWindow(QMainWindow):
                 self, 'Measurement file not found',
                 f'The measurement file referenced by this configuration could not be found:\n\n'
                 f'{cfg_mpath}\n\n'
-                'Use "Open File" to locate it, then try again.'
+                'Use "Open Measurement" to locate it, then try again.'
             )
             return
         if dbc_required_for(cfg_mpath) and self.channel_config.is_empty():
@@ -2160,7 +2203,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 'Calculation in progress',
-                'Wait for the generated-signal calculation to finish before loading another measurement.',
+                'Wait for the signal calculation to finish before loading another measurement.',
             )
             return
         mpath = self.measurement_path or self.blf_path
@@ -2242,7 +2285,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             'Load in progress',
-            f'Wait for Load + Decode to finish before {action}.',
+            f'Wait for Decode to finish before {action}.',
         )
         return True
 
@@ -2590,6 +2633,10 @@ class MainWindow(QMainWindow):
 
     # Single source-of-truth for all keyboard shortcuts
     _SHORTCUTS: list[tuple[str, str]] = [
+        ('Ctrl + O',        'Open Measurement'),
+        ('F9',              'Decode — read the measurement and decode it into signals'),
+        ('Ctrl + S',        'Save configuration'),
+        ('Ctrl + E',        'Export plotted signals'),
         ('F',               'Fit to Window — rescale X and Y to all data'),
         ('V',               'Fit Vertical — rescale Y only (keep current X)'),
         ('Z',               'Rectangle Zoom on/off — drag a box on the plot to zoom into it'),
@@ -2603,8 +2650,7 @@ class MainWindow(QMainWindow):
         ('Shift + click on plot', 'Place Cursor 2 there, switching it on if it is off'),
         ('Delete',          'Remove selected signal from plot'),
         ('Ctrl + Z',        'Undo last plot action (up to 3 levels)'),
-        ('Ctrl + S',        'Save current configuration to JSON'),
-        ('Ctrl + Shift + R','Open Raw CAN Frame viewer (BLF / ASC only)'),
+        ('Ctrl + Shift + R','Open the Trace — the raw CAN and LIN frames'),
     ]
 
     def show_shortcuts(self) -> None:
@@ -2780,7 +2826,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             return  # no dialog, and no debug report to keep the app alive
         # Before the modal, so collection is already running behind it.
-        self._auto_launch_debug('Load + Decode failed', error_message)
+        self._auto_launch_debug('Decode failed', error_message)
         QMessageBox.critical(
             self,
             'Load failed',
@@ -2793,7 +2839,7 @@ class MainWindow(QMainWindow):
         # No deleteLater on the worker: it lives on the thread that has just
         # stopped, so the deferred delete was never delivered and every
         # finished worker survived with its _live_store — the whole decoded
-        # measurement, kept once per Load + Decode until memory ran out.
+        # measurement, kept once per Decode until memory ran out.
         # The worker has no parent, so dropping this last reference deletes
         # it here, on the GUI thread, after its thread has stopped.
         self._worker = None
@@ -2848,7 +2894,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         # Every worker thread is a child of this window, and Qt terminates the
         # application when one is destroyed while it runs. None can be
-        # stopped part-way, so a close during Load + Decode, a calculation or
+        # stopped part-way, so a close during Decode, a calculation or
         # an inspection hides the window at once, drops what the work still
         # produces, and completes once the last thread has stopped.
         if self._running_threads():
@@ -2963,7 +3009,7 @@ class MainWindow(QMainWindow):
         self._log(f'Signal line style changed: {key} -> {style}')
 
     def _set_ready_status(self) -> None:
-        self._update_status('Ready', "Click 'Open File' to load BLF / ASC / MF4 / MDF / CSV.")
+        self._update_status('Ready', self._OPEN_MEASUREMENT_STEP)
 
     def _update_status(self, state: str, next_step: str) -> None:
         self.status_state_label.setText(f'State: {state}')
@@ -2973,9 +3019,9 @@ class MainWindow(QMainWindow):
     # Actions enabled/disabled per app state
     # needs_file  = requires measurement file to be selected
     # needs_store = requires decode to have completed
-    _ACTS_ALWAYS_ENABLED = {'Open File', 'Load Config'}
-    _ACTS_NEEDS_FILE  = {'Load + Decode'}
-    _ACTS_NEEDS_STORE = {'Save Config', 'New Signal', 'Export', 'Clear Plots'}
+    _ACTS_ALWAYS_ENABLED = {'Open Measurement', 'Open configuration'}
+    _ACTS_NEEDS_FILE  = {'Decode'}
+    _ACTS_NEEDS_STORE = {'Save configuration', 'Calculated Signal', 'Export plotted signals'}
 
     def _update_action_states(self) -> None:
         """Grey out toolbar actions that are not yet usable."""
@@ -2988,45 +3034,49 @@ class MainWindow(QMainWindow):
                 act.setEnabled(has_store)
             elif name in self._ACTS_NEEDS_FILE:
                 act.setEnabled(has_file)
-        if self._calc_thread is not None and 'New Signal' in self._toolbar_actions:
+        if hasattr(self, 'btn_clear_plot'):
+            self.btn_clear_plot.setEnabled(has_store and self._calc_thread is None)
+        if self._calc_thread is not None and 'Calculated Signal' in self._toolbar_actions:
             for name in (
-                'New Signal', 'Load + Decode',
-                'Save Config', 'Export', 'Clear Plots',
+                'Calculated Signal', 'Decode',
+                'Save configuration', 'Export plotted signals',
             ):
                 self._toolbar_actions[name].setEnabled(False)
-            # Open File and Load Config remain available while calculating.
+            # Open Measurement and Open configuration remain available while calculating.
         if self._thread is not None:
             # Refused anyway while loading (see load_data); greyed out so a
             # click made while the window looks stuck does nothing at all.
-            for name in ('Open File', 'Load + Decode', 'Load Config'):
+            for name in ('Open Measurement', 'Decode', 'Open configuration'):
                 self._toolbar_actions[name].setEnabled(False)
-        # Keep CAN Trace discoverable after every load. For decoded-only MDF or
+        # Keep the Trace discoverable after every load. For decoded-only MDF or
         # CSV data the action explains why an authentic raw trace is unavailable.
         _rfs = getattr(self.store, 'raw_frame_store', None) if self.store else None
         has_trace = has_store and _rfs is not None and len(_rfs) > 0
         if hasattr(self, '_act_can_trace'):
             self._act_can_trace.setEnabled(has_store)
             self._act_can_trace.setToolTip(
-                'Open raw CAN Trace'
+                'Open the Trace: the raw CAN and LIN frames (Ctrl+Shift+R)'
                 if has_trace
-                else 'Show CAN Trace availability information'
+                else 'Show why this measurement has no Trace'
             )
+
+    _OPEN_MEASUREMENT_STEP = "Click 'Open Measurement' to open a BLF, ASC, MF4, MDF or CSV file."
 
     def _next_step_message(self) -> str:
         mpath = self.measurement_path or self.blf_path
         if not mpath:
-            return "Click 'Open File' to load BLF / ASC / MF4 / MDF / CSV."
+            return self._OPEN_MEASUREMENT_STEP
         if dbc_required_for(mpath) and self.channel_config.is_empty():
             suffix = Path(mpath).suffix.lower()
             if suffix in ('.mf4', '.mdf'):
-                return "MDF bus log detected — database required. Click 'Open Database' to configure."
-            return "Database required — click 'Open Database' to configure channel mapping."
+                return "MDF bus log detected — database required. Click 'Databases' to configure."
+            return "Database required — click 'Databases' to configure channel mapping."
         if has_mixed_mdf_content(mpath) and self.channel_config.is_empty():
             return (
-                "Decoded MDF signals are ready; add a database and reload to use "
+                "Decoded MDF signals are ready; add a database and decode again to use "
                 "embedded CAN frames."
             )
-        return "Click 'Load + Decode', then select signal(s) to plot."
+        return "Click 'Decode', then select signal(s) to plot."
 
     def _update_measurement_tab(self, channels: str = '', frames: str = '', decoded: str = '', samples: str = '') -> None:
         mpath = self.measurement_path or self.blf_path

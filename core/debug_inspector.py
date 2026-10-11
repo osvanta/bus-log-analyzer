@@ -1216,7 +1216,7 @@ def inspect_measurement(
                 "",
                 "FORMAT",
                 f"  Deep binary inspection currently targets MDF/MF4; selected {suffix or '(none)'}.",
-                "  The normal Load + Decode runtime will still be captured below.",
+                "  The normal Decode runtime will still be captured below.",
             ]
         )
         inspection.probe("Deep MDF probe", "WARN", f"not applicable to {suffix}")
@@ -1737,7 +1737,7 @@ def inspect_databases(
             "",
             f"DATABASE STATUS: {overall}",
             (
-                "DLC-to-message-length validation is appended by Load + Decode "
+                "DLC-to-message-length validation is appended by Decode "
                 "when raw frame lengths become available."
             ),
         ]

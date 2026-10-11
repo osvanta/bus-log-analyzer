@@ -161,7 +161,7 @@ def build_scenarios(measurements: list[Measurement], heavy: bool) -> list[Scenar
                  tuple(step for index in good for step in load(index))),
         Scenario('a_b_a', f'A → A → B → A  (A = {measurements[a].alias}, B = {measurements[b].alias})',
                  a_b_a),
-        Scenario('close_during_load', f'Close during Load + Decode of {measurements[a].alias}',
+        Scenario('close_during_load', f'Close during Decode of {measurements[a].alias}',
                  (Step('open', a), Step('close_during_load'))),
     ]
     if broken:

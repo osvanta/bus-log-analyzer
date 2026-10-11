@@ -9,7 +9,7 @@ The cursor line under the plot names the measurement file after the cursor
 readout, on the same line and in the same text, so the user sees which file
 the plotted signals come from.
 
-Load + Decode runs on a stand-in thread and worker; the decoded store is
+Decode runs on a stand-in thread and worker; the decoded store is
 handed to the window as the worker would hand it.
 """
 from __future__ import annotations
@@ -105,7 +105,7 @@ def _open(window, monkeypatch, path):
 
 
 def _load_and_plot(qapp, window):
-    window._toolbar_actions['Load + Decode'].trigger()
+    window._toolbar_actions['Decode'].trigger()
     store = _store()
     window._on_worker_finished(store)
     window._cleanup_worker()   # as the finished thread would
@@ -142,7 +142,7 @@ def test_file_name_follows_the_cursor_readout_on_its_line(qapp, window, monkeypa
 
 def test_no_file_name_without_plotted_signals(qapp, window, monkeypatch, tmp_path):
     _open(window, monkeypatch, tmp_path / 'first.csv')
-    window._toolbar_actions['Load + Decode'].trigger()
+    window._toolbar_actions['Decode'].trigger()
     window._on_worker_finished(_store())
     window._cleanup_worker()
     qapp.processEvents()
