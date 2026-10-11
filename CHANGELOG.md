@@ -4,6 +4,23 @@
 > repository moved to `github.com/osvanta/bus-log-analyzer`. Releases up to and
 > including v00.00.60 were published as **CAN Scope / CANScope**; the entries below
 > use the names in force at the time of each release.
+## [v00.02.00] — 2026-10-11: a major revamp of the interface, menus, logo and branding
+
+- **Changed:** the top row follows the order of the work: a File menu, Open Measurement, Databases, Decode (F9, formerly Load + Decode), Calculated Signal, Trace and a Help menu.
+- **Added:** a Help menu with the keyboard shortcuts, GitHub Discussions for questions and ideas, GitHub issues for problems and feature requests, the user survey and About.
+- **Changed:** the top row takes the place of the title bar, with the window buttons drawn as Windows 11 draws them.
+- **Changed:** new Osvanta branding: the application icon, the splash screen, and the logo in the status bar.
+- **Changed:** Clear Plot sits beside the plot, and the signal table's menu can remove all signals; Undo brings them back.
+- **Changed:** "generated signals" are now "calculated signals"; saved configurations open as before.
+- **Added:** Rectangle Zoom: drag a box to zoom in, Shift+drag to zoom out, double-click to fit the whole recording.
+- **Added:** `*` and `?` wildcards find their text anywhere in a signal name.
+- **Added:** a one-time invitation to a short user survey, with a link kept in About.
+- **Fixed:** clicks on a group's arrow or box in the signal table do what they show, and group rows follow the light or dark theme.
+- **Fixed:** Trace files no longer pile up in the temp folder; files left by earlier versions are removed.
+- **Fixed:** on a small laptop screen the window opens maximized, with the status bar above the taskbar.
+- **Changed:** Qt is used under the LGPL: no GPL-only Qt in the build, and the LGPL libraries can be replaced.
+- **Changed:** the memory-checked copy is `appdebugger.exe`, with a README beside the executables; the logs are `busloganalyzer_applog.log` and `BLA_crash.log`.
+
 ## [v00.01.04] — 2026-10-04: new plot toolbar, faster start-up and an application log
 
 ### Changed — the plot buttons sit above the plot, as icons.
