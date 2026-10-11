@@ -153,7 +153,7 @@ class SignalTreeWidget(QWidget):
         self.rebuild_tree()
 
     def set_generated_signals(self, signals: list[tuple[str, str, str]]) -> None:
-        """Set ``(key, name, tooltip)`` rows shown under Generate Signals."""
+        """Set ``(key, name, tooltip)`` rows shown under Calculated Signals."""
         self._generated_signals = list(signals)
         self.rebuild_tree()
 
@@ -161,7 +161,7 @@ class SignalTreeWidget(QWidget):
         self.tree.clear()
         pattern = search_pattern(self.search_edit.text())
 
-        generated_root = QTreeWidgetItem(["Generate Signals"])
+        generated_root = QTreeWidgetItem(["Calculated Signals"])
         generated_root.setData(0, self._GENERATED_ROLE, True)
         for key, name, tooltip in self._generated_signals:
             if pattern and not pattern.search(f"{name} {tooltip}"):
@@ -280,17 +280,17 @@ class SignalTreeWidget(QWidget):
         menu.addAction(plot_action)
         if key and item is not None and item.data(0, self._GENERATED_ROLE):
             menu.addSeparator()
-            rename_action = QAction("Rename generated signal", self.tree)
+            rename_action = QAction("Rename calculated signal", self.tree)
             rename_action.triggered.connect(
                 lambda _checked=False, generated_key=key: self.generatedRenameRequested.emit(generated_key)
             )
             menu.addAction(rename_action)
-            edit_action = QAction("Edit generated signal", self.tree)
+            edit_action = QAction("Edit calculated signal", self.tree)
             edit_action.triggered.connect(
                 lambda _checked=False, generated_key=key: self.generatedEditRequested.emit(generated_key)
             )
             menu.addAction(edit_action)
-            delete_action = QAction("Delete generated signal", self.tree)
+            delete_action = QAction("Delete calculated signal", self.tree)
             delete_action.triggered.connect(
                 lambda _checked=False, generated_key=key: self.generatedDeleteRequested.emit(generated_key)
             )

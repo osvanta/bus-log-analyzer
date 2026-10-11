@@ -42,6 +42,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui import help_menu
+
 _NOTICES_FILE = 'THIRD_PARTY_NOTICES.md'
 _LICENCE_DIR = 'licenses'
 
@@ -108,7 +110,8 @@ def _read_text(path: Path) -> str:
 class AboutDialog(QDialog):
     """Application details plus the third-party licence texts."""
 
-    # The user clicked the link to the user survey, which the main window opens.
+    # The user clicked the link to the user survey, which the main window
+    # opens. The dialog opens the project's other pages itself.
     surveyRequested = Signal()
 
     def __init__(self, app_name: str, version: str, parent: QWidget | None = None) -> None:
@@ -124,24 +127,37 @@ class AboutDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         close_btn.setDefault(True)
 
-        # The way to the user survey that stays, however its request was
-        # answered: see gui.survey_prompt.
-        self.survey_link = QLabel('<a href="survey">Help us improve: take the user survey</a>', self)
-        self.survey_link.setTextFormat(Qt.TextFormat.RichText)
-        self.survey_link.setTextInteractionFlags(
-            Qt.TextInteractionFlag.LinksAccessibleByMouse
-            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard)
-        self.survey_link.setToolTip('3–4 minutes, in your web browser')
+        # The ways to reach the project, as in the Help menu. The survey link
+        # stays however its request was answered: see gui.survey_prompt.
+        self.ask_link = self._link(help_menu.ASK_TEXT, help_menu.ASK_TIP)
+        self.ask_link.linkActivated.connect(
+            lambda _link: help_menu.open_page(help_menu.DISCUSSIONS_URL))
+        self.report_link = self._link(help_menu.REPORT_TEXT, help_menu.REPORT_TIP)
+        self.report_link.linkActivated.connect(
+            lambda _link: help_menu.open_page(help_menu.ISSUES_URL))
+        self.survey_link = self._link(help_menu.SURVEY_TEXT, help_menu.SURVEY_TIP)
         self.survey_link.linkActivated.connect(lambda _link: self.surveyRequested.emit())
 
         button_row = QHBoxLayout()
-        button_row.addWidget(self.survey_link)
+        for link in (self.ask_link, self.report_link, self.survey_link):
+            if link is not self.ask_link:
+                button_row.addWidget(QLabel('·', self))
+            button_row.addWidget(link)
         button_row.addStretch(1)
         button_row.addWidget(close_btn)
 
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
         layout.addLayout(button_row)
+
+    def _link(self, text: str, tip: str) -> QLabel:
+        label = QLabel(f'<a href="#">{text}</a>', self)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard)
+        label.setToolTip(tip)
+        return label
 
     def _build_about_tab(self, app_name: str, version: str) -> QWidget:
         label = QLabel(_ABOUT_HTML.format(name=app_name, version=version))

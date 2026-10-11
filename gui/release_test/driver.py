@@ -8,7 +8,7 @@
 
 The runner starts the application with ``--release-test-scenario <file>``.
 Once the main window is up, the driver works it the way a user does: Open
-File, Open Database, Load + Decode, the plot buttons, closing the window.
+Measurement, Databases, Decode, the plot buttons, closing the window.
 
 Only the file dialog is answered directly, because it is the operating
 system's window, not the application's. Every dialog the application opens
@@ -210,7 +210,7 @@ class ScenarioDriver(QObject):
         self._current_file = file
         self._pending_paths.append(file['path'])
         self._dialog_ms = 0.0
-        self._actions['Open File'].trigger()
+        self._actions['Open Measurement'].trigger()
         record['opened_at'] = time.perf_counter()
         record['open_dialog_ms'] = round(self._dialog_ms, 1)
         record['opened'] = window.measurement_path == file['path']
@@ -226,15 +226,15 @@ class ScenarioDriver(QObject):
             return
         # As if loaded through the Database Manager's Load Channel Config.
         window.channel_config = planned
-        self._actions['Open Database'].trigger()
+        self._actions['Databases'].trigger()
         record['databases_assigned'] = window.channel_config.channels == planned.channels
 
     def _load(self, record: dict):
         window = self._window
         record['file'] = self._current_file['alias'] if self._current_file else None
-        action = self._actions['Load + Decode']
+        action = self._actions['Decode']
         if not action.isEnabled():
-            record['outcome'] = 'Load + Decode was greyed out'
+            record['outcome'] = 'Decode was greyed out'
             return
         self._listed_at = 0.0
         clicked = time.perf_counter()
@@ -261,7 +261,7 @@ class ScenarioDriver(QObject):
             decoded=store.decoded_frames, samples=store.total_samples,
             warnings=len(getattr(store, 'load_warnings', ()) or ()),
         )
-        # Each Load + Decode must free the measurement it replaces.
+        # Each Decode must free the measurement it replaces.
         gc.collect()
         self._stores.append(weakref.ref(store))
         record['stores_alive'] = sum(ref() is not None for ref in self._stores)
@@ -328,14 +328,14 @@ class ScenarioDriver(QObject):
             for _ in range(2):  # on, then off
                 button.click()
                 yield from self._wait(0.2)
-        self._actions['Clear Plots'].trigger()
+        window.btn_clear_plot.click()
         record['outcome'] = 'plotted'
 
     def _close_during_load(self, record: dict):
         window = self._window
         record['file'] = self._current_file['alias'] if self._current_file else None
         started = time.monotonic()
-        self._actions['Load + Decode'].trigger()
+        self._actions['Decode'].trigger()
         # Timed from the thread's start, not the click: a file the system
         # has cached loads in under two seconds.
         while window._thread is not None and not window._thread.isRunning():

@@ -13,7 +13,7 @@ end of the record is padded with zeros. A channel that *starts* past the end
 gets ``byte_offset - record_size`` more zeros per record than the buffer
 allocated for it holds, and they land on whatever memory follows.
 
-Some measurements declare such a channel. Each Load + Decode of one corrupted
+Some measurements declare such a channel. Each Decode of one corrupted
 the heap: usually nothing showed, and a later load crashed on the load thread
 inside the memory allocator. asammdf 8.8.25 and 8.8.27, and its master
 branch as of September 2026, still overrun.

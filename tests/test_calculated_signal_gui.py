@@ -138,19 +138,19 @@ def test_background_create_is_cached_but_not_auto_plotted(window, qapp):
 
     window._queue_calculation(definition, "create", plot_after=False)
     assert window._calc_thread is not None
-    assert not window._toolbar_actions["New Signal"].isEnabled()
-    assert window._toolbar_actions["Load Config"].isEnabled()
+    assert not window._toolbar_actions["Calculated Signal"].isEnabled()
+    assert window._toolbar_actions["Open configuration"].isEnabled()
     _wait_for_calculation(window, qapp)
 
     assert window.calculated_signals.definition(definition.key) == definition
     assert list(window.calculated_signals.cached_series(definition.key).values) == [10.0, 20.0, 30.0]
     assert definition.key not in window.plot_panel.plotted_keys()
-    assert window._toolbar_actions["New Signal"].isEnabled()
-    assert window._toolbar_actions["Load Config"].isEnabled()
+    assert window._toolbar_actions["Calculated Signal"].isEnabled()
+    assert window._toolbar_actions["Open configuration"].isEnabled()
 
 
 def test_load_config_action_is_always_enabled(window):
-    action = window._toolbar_actions["Load Config"]
+    action = window._toolbar_actions["Open configuration"]
 
     assert window.store is not None
     assert action.isEnabled()
@@ -388,7 +388,7 @@ def test_picker_lists_measurement_and_generated_sections(qapp):
             ("Measurement signals", True, False),
             (TIME_SIGNAL_KEY, False, False),
             (measurement_key, False, False),
-            ("Generated signals", True, False),
+            ("Calculated signals", True, False),
             (generated_key, False, False),
         ]
         headers = [
@@ -404,7 +404,7 @@ def test_picker_lists_measurement_and_generated_sections(qapp):
 def test_picker_hides_the_generated_header_when_there_are_none(qapp):
     dialog = CalculatedSignalDialog(["CH1::Message::A"])
     try:
-        assert ("Generated signals", True, True) in _picker_rows(dialog)
+        assert ("Calculated signals", True, True) in _picker_rows(dialog)
     finally:
         dialog.close()
 
@@ -487,7 +487,7 @@ def test_search_filters_both_sections_and_hides_empty_headers(qapp):
             ("Measurement signals", True, False),
             (TIME_SIGNAL_KEY, False, True),
             (measurement_key, False, False),
-            ("Generated signals", True, False),
+            ("Calculated signals", True, False),
             (generated_key, False, False),
         ]
 
@@ -495,7 +495,7 @@ def test_search_filters_both_sections_and_hides_empty_headers(qapp):
         rows = dict((text, hidden) for text, _is_header, hidden in _picker_rows(dialog))
         assert rows["Measurement signals"] is True
         assert rows[measurement_key] is True
-        assert rows["Generated signals"] is False
+        assert rows["Calculated signals"] is False
         assert rows[generated_key] is False
     finally:
         dialog.close()
@@ -551,7 +551,7 @@ def _count_rebuilds(window: MainWindow, monkeypatch) -> list[None]:
 
 
 def test_restoring_generated_signals_rebuilds_the_plot_once(window, qapp, monkeypatch):
-    # Load + Decode restores each plotted generated signal and recalculates
+    # Decode restores each plotted calculated signal and recalculates
     # them one after another. A plot rebuild recreates every row, and each
     # signal used to cost two of them as it finished: with every signal
     # added, restoring the plot took longer than the time before.

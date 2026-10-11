@@ -5,7 +5,8 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-Monochrome icons for the plot buttons, drawn from small SVG drawings.
+Monochrome icons for the plot buttons and the top row's Decode button, drawn
+from small SVG drawings.
 
 An icon is drawn whenever Qt asks for it, in the colour of button text in the
 current palette: white in dark mode, black in light mode, following a switch
@@ -58,6 +59,11 @@ DRAWINGS: dict[str, str] = {
     'points': '<path d="M4 17l5-6 5 4 6-8"/>' + _SAMPLES,
     # The samples alone: the line is hidden.
     'hide_line': _SAMPLES,
+    # A waste bin: every signal leaves the plot.
+    'clear_plot': '<path d="M4 6.5h16M9.5 6.5V4h5v2.5M6 6.5l1 14h10l1-14M10 10.5v6M14 10.5v6"/>',
+    # For the top row's Decode: square bus pulses that become a smooth signal,
+    # drawn heavier to stand beside its bold text.
+    'decode': '<path stroke-width="2.3" d="M2 16h2.5V8H7.5v8H10c1.8 0 2.4-8 5-8s3.2 8 5 8h2"/>',
 }
 
 

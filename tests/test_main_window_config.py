@@ -204,7 +204,7 @@ def test_decoded_mdf_keeps_can_trace_action_discoverable(window):
     window.show_raw_frames()
     QMessageBox.information.assert_called_once_with(
         window,
-        'CAN Trace unavailable',
+        'Trace unavailable',
         reason,
     )
 

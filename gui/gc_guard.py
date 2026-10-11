@@ -7,7 +7,7 @@
 """Run Python's cyclic garbage collector on the GUI thread only.
 
 CPython runs an automatic collection on whichever thread happens to cross the
-allocation threshold. In this application that is usually the Load + Decode
+allocation threshold. In this application that is usually the Decode
 worker: reading an MF4 with hundreds of channel groups allocates far more than
 the GUI thread does while it waits. A collection frees every unreachable
 cycle, and pyqtgraph items are cycles. The plot's cursor lines are replaced on

@@ -35,7 +35,7 @@ def _wait_for_load(window: MainWindow, qapp: QApplication) -> None:
         qapp.processEvents()
         time.sleep(0.005)
     qapp.processEvents()
-    assert window._thread is None, "Load + Decode did not finish"
+    assert window._thread is None, "Decode did not finish"
 
 
 @pytest.fixture()
@@ -66,7 +66,7 @@ def _open_and_load(window: MainWindow, qapp: QApplication) -> None:
 
 def test_reloading_releases_the_previous_measurement(window, qapp):
     # Each finished LoadWorker used to survive, holding the whole decoded
-    # store of its load in _live_store, so every Load + Decode added another
+    # store of its load in _live_store, so every Decode added another
     # copy of the measurement to memory until the application crashed.
     _open_and_load(window, qapp)
     first_store = weakref.ref(window.store)
@@ -118,7 +118,7 @@ def test_a_second_load_is_refused_while_one_runs(window, qapp, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getOpenFileName", open_dialog)
     load_actions = [
         window._toolbar_actions[name]
-        for name in ("Open File", "Load + Decode", "Load Config")
+        for name in ("Open Measurement", "Decode", "Open configuration")
     ]
 
     window.choose_blf()
@@ -171,7 +171,7 @@ load_worker.reader_factory = gated_reader_factory
 window = main_window.MainWindow("Osvanta Bus Log Analyzer", "00.00.99")
 window.show()
 window.choose_blf()
-load = window._toolbar_actions["Load + Decode"]
+load = window._toolbar_actions["Decode"]
 
 def start_load():
     load.trigger()

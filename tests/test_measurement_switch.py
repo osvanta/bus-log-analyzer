@@ -143,7 +143,7 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
     assert window.plot_panel.table.rowCount() == 0
     assert not hasattr(window.plot_panel, "table_alert_label")
     assert "Measurement file selected" in window.plot_panel.overlay_label.text()
-    assert "Load + Decode" in window.plot_panel.overlay_label.text()
+    assert "Click 'Decode'" in window.plot_panel.overlay_label.text()
 
     window.close()
     qapp.processEvents()
@@ -187,7 +187,7 @@ def test_load_decode_restores_plot_handoff_and_skips_missing_signals(
     window.btn_multi_axis.setChecked(True)
 
     window.choose_blf()
-    window._toolbar_actions["Load + Decode"].trigger()
+    window._toolbar_actions["Decode"].trigger()
     assert window._thread.was_started
     window._on_worker_finished(_store("OldSignal"))
 

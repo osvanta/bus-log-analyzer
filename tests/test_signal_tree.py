@@ -137,7 +137,7 @@ def test_generated_signals_have_separate_top_level_group(signal_tree):
     ])
 
     generated = signal_tree.tree.topLevelItem(0)
-    assert generated.text(0) == "Generate Signals"
+    assert generated.text(0) == "Calculated Signals"
     assert generated.isExpanded()
     assert generated.child(0).text(0) == "ScaledSpeed"
     assert signal_tree._item_key(generated.child(0)) == "CH?::Generate Signals::ScaledSpeed"
@@ -154,11 +154,11 @@ def test_generated_signals_participate_in_search(signal_tree):
     ])
 
     signal_tree.search_edit.setText("Scaled")
-    assert signal_tree.tree.topLevelItem(0).text(0) == "Generate Signals"
+    assert signal_tree.tree.topLevelItem(0).text(0) == "Calculated Signals"
     assert signal_tree.tree.topLevelItem(0).childCount() == 1
 
     signal_tree.search_edit.setText("NoSuchSignal")
-    assert all(item.text(0) != "Generate Signals" for item in _channels(signal_tree))
+    assert all(item.text(0) != "Calculated Signals" for item in _channels(signal_tree))
 
 
 def test_generated_signal_context_menu_offers_rename(signal_tree):
@@ -178,7 +178,7 @@ def test_generated_signal_context_menu_offers_rename(signal_tree):
     rename_action = next(
         action
         for action in menu.actions()
-        if action.text() == "Rename generated signal"
+        if action.text() == "Rename calculated signal"
     )
 
     rename_action.trigger()

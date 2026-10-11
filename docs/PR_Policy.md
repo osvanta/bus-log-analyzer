@@ -17,7 +17,7 @@ Protected loading/decoding files and areas:
 - `core/readers/asc_can_reader.py`
 - `core/readers/mdf_reader.py`
 - `core/readers/mdf_can_reader.py`
-- The **Load + Decode**, pre-scan, reader selection, worker wiring, progress,
+- The **Decode** (formerly Load + Decode), pre-scan, reader selection, worker wiring, progress,
   partial-update, completion, signal-tree handoff, and CAN Trace behavior in
   `gui/main_window.py`
 - Loading/decoding dependency versions in `requirements.txt`

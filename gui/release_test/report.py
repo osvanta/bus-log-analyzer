@@ -134,7 +134,7 @@ def _judge_step(number: int, step: dict, broken: bool, failures: list, warnings:
     if step['op'] == 'load':
         outcome = step.get('outcome')
         if outcome == 'timed out':
-            failures.append(f'{where}: Load + Decode did not finish')
+            failures.append(f'{where}: Decode did not finish')
         elif broken:
             pass  # any outcome but a crash or a hang
         elif outcome != 'loaded':

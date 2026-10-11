@@ -20,7 +20,7 @@ Stacked plot:
 Multiple Axis plot:
 <img width="2214" height="1590" alt="multi-axis plot" src="https://github.com/user-attachments/assets/7d3ef351-1b02-45e0-85f5-4dfd1217ad6e" />
 
-CAN Trace / Raw Frame viewer:
+Trace, the raw CAN and LIN frames:
 <img width="1543" height="1019" alt="CANScope_RawCAN Frame" src="https://github.com/user-attachments/assets/69ad9749-ecec-445d-a31f-4b47901855cf" />
 
 ## Supported formats
@@ -39,10 +39,10 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 
 - Fast bulk loading and decoding for BLF, ASC, MDF/MF4, and CSV measurements.
 - Searchable channel/message/signal tree with multi-select plotting and drag-and-drop.
-- Indexed **CAN Trace** viewer for raw frames, filtering, and on-demand signal decode.
-- Formula-based **New Signal** generation with arithmetic, comparisons, logical expressions, temporal operations, and a stateful diagnostic counter; generated definitions are saved in configurations.
+- Indexed **Trace** of the raw CAN and LIN frames, with filtering and on-demand signal decode.
+- Formula-based **Calculated Signal** with arithmetic, comparisons, logical expressions, temporal operations, and a stateful diagnostic counter; the definitions are saved in configurations.
 - CSV and Excel (`.xlsx`) export using a selected signal's timestamps or a manually entered recurrence time.
-- JSON configuration save/load for measurement paths, database mapping, generated signals, plotted order, groups, colors, visibility, axes, cursors, and display settings.
+- JSON configuration save/load for measurement paths, database mapping, calculated signals, plotted order, groups, colors, visibility, axes, cursors, and display settings.
 - YAML rule-based diagnostics for expressions, ranges, fault flags, and message loss; optional GitHub Models analysis is available through `Ctrl+Shift+A`.
 
 ### Plotting
@@ -78,18 +78,22 @@ The portable build and CI release build use Python 3.12.
 
 ## Basic workflow
 
-1. Select **Open File** and choose a supported measurement.
-2. If the file contains raw CAN frames, select **Open Database** and configure DBC/ARXML mapping.
-3. Select **Load + Decode**.
+1. Select **Open Measurement** and choose a supported measurement.
+2. If the file contains raw CAN frames, select **Databases** and configure DBC/ARXML mapping.
+3. Select **Decode** (`F9`).
 4. Search the signal tree, then double-click, drag, press `Space`, or use the context menu to plot signals.
 5. Use cursors, plot modes, data points, grouping, and fit controls as needed.
-6. Select **Save Config** to preserve the session or **Export** to choose CSV/Excel and its timestamp source.
-7. Open **CAN Trace** when the source contains raw CAN frames.
+6. In the **File** menu, select **Save configuration** to preserve the session, or **Export plotted signals** to choose CSV/Excel and its timestamp source.
+7. Open the **Trace** when the source contains raw CAN frames.
+8. The **Help** menu has the keyboard shortcuts, GitHub Discussions for questions and ideas, GitHub issues for problems and feature requests, and About.
 
 ## Keyboard shortcuts
 
 | Key | Action |
 |---|---|
+| `Ctrl+O` | Open Measurement |
+| `F9` | Decode |
+| `Ctrl+E` | Export plotted signals |
 | `F` | Fit X and Y to all visible data |
 | `V` | Fit Y to the current X range |
 | `Space` | Plot selected signal-tree entries |
@@ -98,7 +102,7 @@ The portable build and CI release build use Python 3.12.
 | `Delete` | Remove selected plotted signals |
 | `Ctrl+Z` | Undo the last plot action |
 | `Ctrl+S` | Save configuration |
-| `Ctrl+Shift+R` | Open CAN Trace |
+| `Ctrl+Shift+R` | Open the Trace |
 | `Ctrl+Shift+-` / `Ctrl+Shift++` | Collapse / expand signal-tree messages |
 
 
