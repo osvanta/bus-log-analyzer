@@ -1,0 +1,73 @@
+name: Guide
+
+# Builds the user guide (mkdocs.yml, guide/) and publishes it to GitHub Pages.
+# A pull request that changes the guide only builds it, so a broken link or a
+# missing image fails there, before it reaches main. Only a push to main
+# publishes, and the github-pages environment accepts deployments from main
+# alone.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'guide/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/guide.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'guide/**'
+      - 'mkdocs.yml'
+      - '.github/workflows/guide.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the guide
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the guide's tools
+        run: python -m pip install -r guide/requirements.txt
+
+      # --strict: a broken link or a missing image fails the build.
+      - name: Build
+        run: mkdocs build --strict
+
+      - name: Upload the site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: Publish to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    # Only this job may publish, and it can do nothing else.
+    permissions:
+      pages: write
+      id-token: write
+      actions: read     # deploy-pages fetches the uploaded site by its id
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Publish
+        id: deployment
+        uses: actions/deploy-pages@v5

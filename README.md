@@ -2,6 +2,9 @@
 
 > A portable Windows application for loading automotive measurements, decoding CAN signals, inspecting raw frames, and plotting signal data interactively.
 
+> **User guide:** [osvanta.github.io/bus-log-analyzer](https://osvanta.github.io/bus-log-analyzer/),
+> or **Help ▸ Getting started** (`F1`) in the application.
+
 > Formerly released as **CANScope**. The repository moved to
 > [github.com/osvanta/bus-log-analyzer](https://github.com/osvanta/bus-log-analyzer)
 > in August 2026.
@@ -85,12 +88,13 @@ The portable build and CI release build use Python 3.12.
 5. Use cursors, plot modes, data points, grouping, and fit controls as needed.
 6. In the **File** menu, select **Save configuration** to preserve the session, or **Export plotted signals** to choose CSV/Excel and its timestamp source.
 7. Open the **Trace** when the source contains raw CAN frames.
-8. The **Help** menu has the keyboard shortcuts, GitHub Discussions for questions and ideas, GitHub issues for problems and feature requests, and About.
+8. The **Help** menu has Getting started (`F1`), the keyboard shortcuts, GitHub Discussions for questions and ideas, GitHub issues for problems and feature requests, and About.
 
 ## Keyboard shortcuts
 
 | Key | Action |
 |---|---|
+| `F1` | Getting started, in the user guide |
 | `Ctrl+O` | Open Measurement |
 | `F9` | Decode |
 | `Ctrl+E` | Export plotted signals |
@@ -131,6 +135,7 @@ core/diagnostics/      Rule engine and optional AI-assisted diagnostics
 gui/                   Main window, plots, database manager, CAN Trace, diagnostics
 config/diagnostics/    User-editable diagnostic rules and documentation
 resources/             Application icon and splash assets
+guide/, mkdocs.yml     User guide, published to GitHub Pages
 tests/                 Pytest regression suite
 ```
 

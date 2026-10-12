@@ -1,0 +1,70 @@
+# The user guide, published by .github/workflows/guide.yml to GitHub Pages.
+# Preview it locally:
+#   pip install -r guide/requirements.txt
+#   mkdocs serve
+#
+# The application's Help menu links to the guide's front page and to
+# /getting-started/ (gui/help_menu.py). Installed copies keep those links, so
+# never rename or move those two pages.
+
+site_name: Osvanta Bus Log Analyzer
+site_description: >-
+  User guide for Osvanta Bus Log Analyzer, a portable Windows tool that loads
+  automotive measurements, decodes CAN and LIN signals and plots them.
+site_url: https://osvanta.github.io/bus-log-analyzer/
+repo_url: https://github.com/osvanta/bus-log-analyzer
+repo_name: osvanta/bus-log-analyzer
+edit_uri: edit/main/guide/
+docs_dir: guide
+exclude_docs: |
+  requirements.txt
+copyright: Copyright &copy; 2025&ndash;2026 Dinakaran Ganesan &middot; MPL-2.0
+
+theme:
+  name: material
+  logo: assets/app_icon.png
+  favicon: assets/app_icon.png
+  # The system font, as in the application, and no request to a font service.
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: blue
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: light blue
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.footer
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.follow
+    - content.action.edit
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.keys
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Keyboard shortcuts: keyboard-shortcuts.md
+  - Help and troubleshooting: help.md
