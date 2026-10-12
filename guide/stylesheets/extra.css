@@ -1,0 +1,8 @@
+/* A Windows application: its keys read Ctrl, Shift and Alt, without the
+   macOS symbols the theme puts before them. */
+.md-typeset .keys .key-control::before,
+.md-typeset .keys .key-shift::before,
+.md-typeset .keys .key-alt::before {
+  content: none;
+  padding-right: 0;
+}

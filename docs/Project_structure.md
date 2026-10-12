@@ -54,8 +54,8 @@ bus-log-analyzer/
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
 │   ├── crash_log.py              # BLA_crash.log: Qt fatal errors, native crashes, freezes, uncaught exceptions
 │   ├── survey_prompt.py          # User survey request on the 10th start, and the top row's link after "Remind me later"; state in osvanta_user_settings.json
-│   ├── top_row.py                # The top row's File menu and its accent-filled Decode button
-│   ├── help_menu.py              # The top row's Help menu: keyboard shortcuts, GitHub Discussions and issues, the survey, About
+│   ├── top_row.py                # The top row's File menu and its Decode button: bold, its icon beside the word
+│   ├── help_menu.py              # The top row's Help menu: Getting started (F1), keyboard shortcuts, GitHub Discussions and issues, the survey, About
 │   ├── release_test/             # Hidden --release-test: drives the built app through real measurements; --known-good adds timing against fixed limits (timing.py)
 │   │   ├── plan.py               # Folder layout → measurements, databases, scenarios
 │   │   ├── driver.py             # Works one scenario's toolbar steps inside the running app
@@ -72,10 +72,17 @@ bus-log-analyzer/
 │   ├── app_icon.png              # 1024 × 1024 app icon source
 │   ├── app_icon.ico              # Multi-resolution ICO (256/128/64/48/32/16 px)
 │   └── release_readme.txt        # README.txt beside the built executables
+├── guide/                        # User guide (Markdown), published to GitHub Pages
+│   ├── index.md                  # Front page; the Help menu links to it and to getting-started/:
+│   ├── getting-started.md        #   never rename or move these two pages
+│   ├── images/                   # Screenshots, light and dark, from a demo measurement
+│   └── requirements.txt          # The guide's build tools, apart from the application's
+├── mkdocs.yml                    # The guide's site: theme, navigation, address
 ├── requirements.txt
 ├── BusLogAnalyzer.spec           # PyInstaller spec, bundles resources/, config/ and ldfparser grammars;
 │                                 #   builds BusLogAnalyzer.exe and appdebugger.exe (-X dev)
-└── .github/workflows/build.yml  # Auto-build on v*.*.* tag push
+├── .github/workflows/build.yml  # Auto-build on v*.*.* tag push
+└── .github/workflows/guide.yml  # Builds the guide on a PR; publishes it to GitHub Pages from main
 
 
 ## Validated loading and decoding architecture — protected

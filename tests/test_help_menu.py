@@ -7,11 +7,16 @@
 """Tests for gui/help_menu.py: the top row's Help menu."""
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from gui.help_menu import DISCUSSIONS_URL, ISSUES_URL, HelpMenu
+from gui.help_menu import (
+    DISCUSSIONS_URL, GETTING_STARTED_URL, GUIDE_URL, ISSUES_URL, HelpMenu,
+)
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture()
@@ -46,8 +51,9 @@ def _items(menu):
     return ['---' if action.isSeparator() else action.text() for action in menu.actions()]
 
 
-def test_the_menu_holds_the_shortcuts_the_ways_to_reach_us_and_about(menu):
+def test_the_menu_holds_the_guide_the_ways_to_reach_us_and_about(menu):
     assert _items(menu) == [
+        'Getting started',
         'Keyboard shortcuts',
         '---',
         'Ask a question or share an idea',
@@ -59,6 +65,7 @@ def test_the_menu_holds_the_shortcuts_the_ways_to_reach_us_and_about(menu):
 
 
 @pytest.mark.parametrize('action, url', [
+    ('guide_action', GETTING_STARTED_URL),
     ('ask_action', DISCUSSIONS_URL),
     ('report_action', ISSUES_URL),
 ])
@@ -73,8 +80,20 @@ def test_the_project_pages_open_in_the_browser(menu, opened, action, url):
 def test_the_links_lead_to_pages_that_last():
     # A copy of the application keeps its links for as long as it is used:
     # the Discussions front page rather than one discussion, and the issue list.
+    assert GETTING_STARTED_URL == 'https://osvanta.github.io/bus-log-analyzer/getting-started/'
     assert DISCUSSIONS_URL == 'https://github.com/osvanta/bus-log-analyzer/discussions'
     assert ISSUES_URL == 'https://github.com/osvanta/bus-log-analyzer/issues'
+
+
+def test_the_guide_publishes_the_page_the_menu_opens():
+    # mkdocs.yml builds guide/ into the site at GUIDE_URL; a page named
+    # getting-started.md is published at GUIDE_URL + 'getting-started/'.
+    config = (REPO / 'mkdocs.yml').read_text(encoding='utf-8')
+    assert f'site_url: {GUIDE_URL}' in config
+    assert 'docs_dir: guide' in config
+    assert 'getting-started.md' in config
+    assert (REPO / 'guide' / 'getting-started.md').is_file()
+    assert GETTING_STARTED_URL == GUIDE_URL + 'getting-started/'
 
 
 @pytest.mark.parametrize('action, signal', [
@@ -94,6 +113,7 @@ def test_the_window_shows_the_rest(menu, opened, action, signal):
 
 def test_the_links_say_where_they_lead(menu):
     assert menu.toolTipsVisible()
+    assert 'web browser' in menu.guide_action.toolTip()
     assert 'GitHub Discussions' in menu.ask_action.toolTip()
     assert 'GitHub' in menu.report_action.toolTip()
     assert 'minutes' in menu.survey_action.toolTip()
@@ -135,3 +155,28 @@ def test_the_help_menu_shows_about(window, monkeypatch):
     window.help_menu.about_action.trigger()
 
     assert shown == ['About Osvanta Bus Log Analyzer']
+
+
+def test_f1_belongs_to_getting_started_and_works_with_the_menu_closed(window):
+    from PySide6.QtGui import QKeySequence, QShortcut
+
+    action = window.help_menu.guide_action
+    assert action.shortcut() == QKeySequence('F1')
+    assert action in window.actions()
+    # A second shortcut on the same key would make Qt fire neither.
+    assert all(s.key() != QKeySequence('F1') for s in window.findChildren(QShortcut))
+    assert 'F1' in dict(window._SHORTCUTS)
+
+
+def test_f1_opens_getting_started(window, opened):
+    from PySide6.QtCore import Qt, QUrl
+    from PySide6.QtTest import QTest
+
+    window.show()
+    window.activateWindow()
+    QTest.qWaitForWindowActive(window, 2000)
+
+    QTest.keyClick(window, Qt.Key.Key_F1)
+
+    opened.assert_called_once_with(QUrl(GETTING_STARTED_URL))
+    window.close()

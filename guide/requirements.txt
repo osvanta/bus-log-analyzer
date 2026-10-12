@@ -1,0 +1,3 @@
+# What builds the user guide (mkdocs.yml); not part of the application.
+mkdocs==1.6.1
+mkdocs-material==9.7.7

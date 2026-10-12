@@ -165,6 +165,7 @@ bus-log-analyzer/
 │   └── diagnostics/          # Diagnostics window, panels, worker
 ├── config/diagnostics/       # YAML fault rules (no Python needed)
 ├── tools/                    # Repo tooling (protected-path check)
+├── guide/                    # User guide, published to GitHub Pages (mkdocs.yml)
 └── tests/                    # pytest suite + fixtures
 ```
 
@@ -233,6 +234,27 @@ Use the conventional prefix style:
 | `chore:` | Dependency bumps, version bumps |
 
 Example: `fix: hide C1/C2 stacked labels when cursor is disabled`
+
+---
+
+## The User Guide
+
+The guide at [osvanta.github.io/bus-log-analyzer](https://osvanta.github.io/bus-log-analyzer/)
+is built from the Markdown in `guide/` by MkDocs, as `mkdocs.yml` sets out. A
+pull request that changes it builds it with `--strict`, so a broken link or a
+missing image fails the check; a merge into `main` publishes it.
+
+Preview it while you write:
+
+```bash
+python -m pip install -r guide/requirements.txt
+mkdocs serve
+```
+
+Keep each screenshot in a light and a dark version (`name-light.webp` and
+`name-dark.webp`, shown with `#only-light` and `#only-dark`), and take them from
+a measurement you may publish. Never rename or move `index.md` or
+`getting-started.md`: installed copies of the application link to them.
 
 ---
 

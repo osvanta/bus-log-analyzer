@@ -592,6 +592,8 @@ class MainWindow(QMainWindow):
         self.help_menu.shortcutsRequested.connect(self.show_shortcuts)
         self.help_menu.surveyRequested.connect(self._take_survey)
         self.help_menu.aboutRequested.connect(self.show_about)
+        # Also the window's, so that F1 works with the menu closed.
+        self.addAction(self.help_menu.guide_action)
         self._add_menu_button(toolbar, self.help_menu)
         # Shown once the user has answered the survey request "Remind me later".
         self.survey_link = survey_prompt.SurveyLink()
@@ -2633,6 +2635,7 @@ class MainWindow(QMainWindow):
 
     # Single source-of-truth for all keyboard shortcuts
     _SHORTCUTS: list[tuple[str, str]] = [
+        ('F1',              'Getting started — the user guide, in your web browser'),
         ('Ctrl + O',        'Open Measurement'),
         ('F9',              'Decode — read the measurement and decode it into signals'),
         ('Ctrl + S',        'Save configuration'),
