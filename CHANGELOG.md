@@ -4,6 +4,13 @@
 > repository moved to `github.com/osvanta/bus-log-analyzer`. Releases up to and
 > including v00.00.60 were published as **CAN Scope / CANScope**; the entries below
 > use the names in force at the time of each release.
+## [v00.02.01] — 2026-10-14: BLF files load six times faster, and a user guide
+
+- **Faster:** a BLF file loads about six times faster: a 13-million-frame CAN FD recording goes from Decode to the signal tree in under 5 seconds instead of 29, with less memory.
+- **Faster:** a BLF or ASC load reads its database once instead of twice.
+- **Added:** a user guide at osvanta.github.io/bus-log-analyzer, opened from Help ▸ Getting started or F1.
+- **Fixed:** in Debug mode, the database check no longer fails every database with "LOAD FAIL UnboundLocalError" when each database is mapped to a channel and none to All channels.
+
 ## [v00.02.00] — 2026-10-11: a major revamp of the interface, menus, logo and branding
 
 - **Changed:** the top row follows the order of the work: a File menu, Open Measurement, Databases, Decode (F9, formerly Load + Decode), Calculated Signal, Trace and a Help menu.
