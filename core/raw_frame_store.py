@@ -187,6 +187,12 @@ class RawFrameStore:
         self._mmap:      mmap.mmap | None = None   # read phase (after seal)
         self._sealed = False
 
+        # NumPy batches from append_raw_batch(), held until seal(). Growing an
+        # array.array one batch at a time reallocates and copies the whole
+        # column every few batches: seconds for a 13-million-frame BLF.
+        self._pending: list[list] = []
+        self._pending_rows = 0
+
         # Pre-allocated 64-byte buffer for zero-copy disk writes (Bottleneck 2).
         # Re-used on every append_raw() call — no per-frame bytes() allocation.
         self._write_buf: bytearray = bytearray(_DATA_BYTES)
@@ -202,6 +208,7 @@ class RawFrameStore:
                data: bytes, frame_name: str, decoded: bool,
                bus: BusType = BusType.CAN) -> None:
         """Append one frame.  O(1) amortised — no per-frame Python objects."""
+        self._materialize()
         self.timestamps.append(timestamp)
         self.channels.append(channel if channel is not None else 255)
         self.arb_ids.append(arb_id & 0xFFFF_FFFF)
@@ -249,6 +256,7 @@ class RawFrameStore:
           C-level memcopy calls instead of three temporary ``bytes`` objects
           (Bottleneck 2).
         """
+        self._materialize()
         self.timestamps.append(timestamp)
         self.channels.append(channel_byte)
         self.arb_ids.append(arb_id & 0xFFFF_FFFF)
@@ -282,7 +290,9 @@ class RawFrameStore:
         Converting Python lists to ``array.array`` is performed by C loops and
         the complete payload block is written with one buffered file call.
         This replaces seven ``array.append`` calls plus one ``write`` call per
-        CAN frame.
+        CAN frame. Columns may also be NumPy arrays (the BLF reader's): those
+        are held, not copied, until :meth:`seal` joins them into the columns
+        in one copy each, so the caller must not modify them afterwards.
         """
         count = len(timestamps)
         if count == 0:
@@ -293,20 +303,46 @@ class RawFrameStore:
         ):
             raise ValueError("Raw frame batch columns have different lengths")
 
-        def extend_column(target, values) -> None:
-            if isinstance(values, (bytes, bytearray, memoryview)):
-                target.frombytes(values)
-            else:
-                target.fromlist(values)
+        columns = [timestamps, channels, arb_ids, dlcs, directions, flags]
+        if all(isinstance(values, np.ndarray) for values in columns):
+            self._pending.append(columns)
+            self._pending_rows += count
+        else:
+            self._materialize()
 
-        extend_column(self.timestamps, timestamps)
-        extend_column(self.channels, channels)
-        extend_column(self.arb_ids, arb_ids)
-        extend_column(self.dlcs, dlcs)
-        extend_column(self.directions, directions)
-        extend_column(self.flags, flags)
-        self.name_ids.frombytes(bytes(count * self.name_ids.itemsize))
+            def extend_column(target, values) -> None:
+                if isinstance(values, (bytes, bytearray, memoryview)):
+                    target.frombytes(values)
+                else:
+                    target.fromlist(list(values))
+
+            extend_column(self.timestamps, timestamps)
+            extend_column(self.channels, channels)
+            extend_column(self.arb_ids, arb_ids)
+            extend_column(self.dlcs, dlcs)
+            extend_column(self.directions, directions)
+            extend_column(self.flags, flags)
+            self.name_ids.frombytes(bytes(count * self.name_ids.itemsize))
         self._data_file.write(memoryview(data_block)[:count * _DATA_BYTES])
+
+    def _materialize(self) -> None:
+        """Join the NumPy batches held by append_raw_batch() into the columns."""
+        if not self._pending:
+            return
+        pending, self._pending = self._pending, []
+        rows, self._pending_rows = self._pending_rows, 0
+        targets = (self.timestamps, self.channels, self.arb_ids, self.dlcs,
+                   self.directions, self.flags)
+        for index, target in enumerate(targets):
+            parts = [batch[index] for batch in pending]
+            for batch in pending:
+                batch[index] = None     # each batch's part goes with its column
+            joined = np.concatenate(parts).astype(target.typecode, copy=False)
+            del parts
+            # frombytes() takes byte-format buffers only.
+            target.frombytes(joined.view(np.uint8))
+            del joined
+        self.name_ids.frombytes(bytes(rows * self.name_ids.itemsize))
 
     def append_numpy_batch(
         self,
@@ -329,6 +365,7 @@ class RawFrameStore:
         fixed 64-byte records on disk, so narrower classic-CAN rows are padded
         in bounded chunks rather than allocating one large expanded array.
         """
+        self._materialize()
         count = len(timestamps)
         if count == 0:
             return
@@ -387,6 +424,7 @@ class RawFrameStore:
         """
         if self._sealed:
             raise RuntimeError("sort_by_time() must be called before seal()")
+        self._materialize()
         count = len(self.timestamps)
         timestamps = np.frombuffer(self.timestamps, dtype=np.float64)
         if count < 2 or not (timestamps[1:] < timestamps[:-1]).any():
@@ -436,6 +474,7 @@ class RawFrameStore:
         """
         if self._sealed:
             return
+        self._materialize()
         self._sealed = True
         if self._data_file:
             self._data_file.flush()
@@ -453,7 +492,7 @@ class RawFrameStore:
             self._mmap = None   # fallback: read via file.seek/read
 
     def __len__(self) -> int:
-        return len(self.timestamps)
+        return len(self.timestamps) + self._pending_rows
 
     def close(self) -> None:
         """Release mmap and delete temp file.

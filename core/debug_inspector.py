@@ -1657,7 +1657,7 @@ def inspect_databases(
             relevant_ids: set[int] = set()
             for channel in assigned:
                 relevant_ids.update(observed.get(channel, set()))
-            if raw_path == fallback_path and not assigned:
+            if raw_path in fallback_by_path and not assigned:
                 for frame_ids in observed.values():
                     relevant_ids.update(frame_ids)
 

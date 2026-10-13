@@ -53,26 +53,21 @@ def _bulk_compute_store_stats(store, rfs) -> None:
     dirs_np     = np.frombuffer(rfs.directions,  dtype=np.uint8)
     flags_np    = np.frombuffer(rfs.flags,        dtype=np.uint8)
 
-    # Channel set + per-channel frame counts (single numpy unique pass)
-    unique_chs, counts = np.unique(channels_np, return_counts=True)
+    # Channel set + per-channel frame counts in one counting pass. A channel
+    # number can appear on both buses; the bus bit splits the count so
+    # "CAN 1" and "LIN 1" are reported separately rather than merged.
     is_lin_np = (flags_np & np.uint8(FLAG_LIN)) != 0
-    for ch_byte, cnt in zip(unique_chs.tolist(), counts.tolist()):
-        if ch_byte == 255:
-            store.channels.add(None)
-            store.channel_frame_counts[None] = cnt
-            continue
-        # A channel number can appear on both buses; split the count so
-        # "CAN 1" and "LIN 1" are reported separately rather than merged.
-        selected = channels_np == ch_byte
-        for bus, bus_mask in (
-            (BusType.CAN, selected & ~is_lin_np),
-            (BusType.LIN, selected & is_lin_np),
-        ):
-            bus_count = int(bus_mask.sum())
-            if bus_count:
-                key = (bus, int(ch_byte))
-                store.channels.add(key)
-                store.channel_frame_counts[key] = bus_count
+    codes = (channels_np.astype(np.uint16) << 1) | is_lin_np
+    counts = np.bincount(codes, minlength=512)
+    unknown = int(counts[255 << 1] + counts[(255 << 1) | 1])
+    if unknown:
+        store.channels.add(None)
+        store.channel_frame_counts[None] = unknown
+    for code in np.flatnonzero(counts[:255 << 1]).tolist():
+        bus = BusType.LIN if code & 1 else BusType.CAN
+        key = (bus, code >> 1)
+        store.channels.add(key)
+        store.channel_frame_counts[key] = int(counts[code])
 
     store.total_frames    = n
     store.unmatched_frames = n  # corrected to n - decoded_total by Pass 2
@@ -97,6 +92,35 @@ def _bulk_compute_store_stats(store, rfs) -> None:
         store.first_frame_ids.append(
             f"{label} | {id_hex} | DLC={dlc} | {direction}"
         )
+
+
+def _group_frames(combined):
+    """
+    Stable-sort frame indices by key; return them with each group's bounds.
+
+    The same result as ``np.argsort(combined, kind='stable')``, which takes
+    seconds for a 13-million-frame BLF. A log holds only a few hundred
+    distinct keys, so each frame's key is replaced by its rank among them
+    first: ranks fit in 16 bits, and NumPy sorts 16-bit keys stably with a
+    radix sort in one linear pass.
+    """
+    import numpy as np
+    n = len(combined)
+    # Distinct keys from a sample spread over the whole log, then any key
+    # the sample missed (a rare frame) from the frames that are not in it.
+    sample = np.unique(combined[::max(1, n // 131_072)])
+    ranks = np.searchsorted(sample, combined)
+    missing = sample[np.minimum(ranks, len(sample) - 1)] != combined
+    if missing.any():
+        sample = np.union1d(sample, combined[missing])
+        ranks = np.searchsorted(sample, combined)
+    if len(sample) <= 65_536:
+        ranks = ranks.astype(np.uint16)
+    sort_idx = np.argsort(ranks, kind='stable')
+    counts = np.bincount(ranks, minlength=len(sample))
+    boundaries = np.zeros(len(sample) + 1, dtype=np.int64)
+    np.cumsum(counts, out=boundaries[1:])
+    return sort_idx, boundaries
 
 
 class LoadWorker(QObject):
@@ -152,6 +176,7 @@ class LoadWorker(QObject):
             self.progress.emit(f"Source: {reader.source_description}")
             for msg in getattr(reader, "load_messages", []):
                 self.progress.emit(msg)
+            self._share_reader_decoder(reader)
 
             if self._channel_config:
                 self.progress.emit(self._channel_config.summary())
@@ -208,6 +233,23 @@ class LoadWorker(QObject):
             self.failed.emit(
                 f"{exc}\n\n{traceback.format_exc()}\n\nFailed after {elapsed:.1f} s"
             )
+
+    def _share_reader_decoder(self, reader) -> None:
+        """
+        Give the channel config the database the BLF/ASC reader already parsed.
+
+        Both used to parse the first database: once for the reader, once for
+        the channel map, a second or more each for a large DBC.
+        """
+        from core.dbc_decoder import DBCDecoder
+        decoder = getattr(reader, "decoder", None)
+        if (
+            self._channel_config is not None
+            and self._dbc_path
+            and isinstance(decoder, DBCDecoder)
+            and Path(decoder.dbc_path) == Path(self._dbc_path)
+        ):
+            self._channel_config._decoder_cache.setdefault(self._dbc_path, decoder)
 
     # ── CAN-raw path: packed read + bulk vectorised decode (preferred) ───
 
@@ -416,13 +458,7 @@ class LoadWorker(QObject):
             | (channels_np.astype(np.uint64) << np.uint64(32))
             | arb_ids_np.astype(np.uint64)
         )
-        sort_idx = np.argsort(combined, kind='stable')
-        sorted_combined = combined[sort_idx]
-        boundaries = np.concatenate((
-            [0],
-            np.where(np.diff(sorted_combined) != 0)[0] + 1,
-            [n],
-        ))
+        sort_idx, boundaries = _group_frames(combined)
 
         vec_dbcs: dict[int, VectorizedDBC] = {}
         decoded_total    = 0

@@ -290,6 +290,24 @@ def test_database_report_matches_observed_ids_and_redacts_path(
     assert str(sample_dbc_path.parent) not in report
 
 
+def test_database_report_with_only_channel_mappings(sample_dbc_path):
+    """No "All channels" database: the report used to fail every database.
+
+    The fallback check read a loop variable that is only bound when a
+    fallback exists, so each database showed "LOAD FAIL UnboundLocalError".
+    """
+    from core.bus_types import BusType
+
+    report = inspect_databases(
+        {(BusType.CAN, 4): str(sample_dbc_path)},
+        {(BusType.CAN, 4): {0x100, 0x999}, (BusType.CAN, 1): {0x200}},
+    )
+
+    assert "LOAD FAIL" not in report
+    assert "Assignment: CAN 4" in report
+    assert "Observed IDs: 2 | Matched: 1 | Unmatched: 1" in report
+
+
 def test_runtime_failure_classifies_vlsd_and_redacts_full_path(tmp_path):
     path = tmp_path / "private" / "issue.mf4"
     error = (
