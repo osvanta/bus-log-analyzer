@@ -158,6 +158,42 @@ def test_append_raw_batch_preserves_metadata_and_payload():
     assert second.is_fd is True
 
 
+def test_append_raw_batch_holds_numpy_columns_in_order_until_seal():
+    """NumPy batches are joined at seal(), in order with list batches between."""
+    store = RawFrameStore()
+    try:
+        def numpy_batch(first):
+            ids = np.arange(first, first + 3, dtype=np.uint32)
+            data = np.zeros((3, 64), dtype=np.uint8)
+            data[:, 0] = ids
+            store.append_raw_batch(
+                ids.astype(np.float64), np.full(3, 4, np.uint8), ids,
+                np.full(3, 8, np.uint8), np.ones(3, np.uint8),
+                np.full(3, 2, np.uint8), data.reshape(-1),
+            )
+
+        numpy_batch(7)
+        numpy_batch(10)
+        assert len(store) == 6
+        store.append_raw_batch([13.0], [5], [13], [1], [0], [0],
+                               bytes([13]) + bytes(63))
+        numpy_batch(14)
+        assert len(store) == 10
+        store.seal()
+
+        assert list(store.arb_ids) == list(range(7, 17))
+        assert list(store.timestamps) == [float(value) for value in range(7, 17)]
+        assert list(store.channels) == [4] * 6 + [5] + [4] * 3
+        assert list(store.flags) == [2] * 6 + [0] + [2] * 3
+        assert list(store.name_ids) == [0] * 10
+        records = store.get_window(range(10))
+        assert [record.data[:1] for record in records] == [
+            bytes([value]) for value in range(7, 17)
+        ]
+    finally:
+        store.close()
+
+
 def test_append_numpy_batch_preserves_columns_and_pads_payload():
     store = RawFrameStore()
     try:
