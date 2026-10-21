@@ -615,6 +615,79 @@ class _ElidedLabel(QLabel):
         self.setText(self._prefix + text if text else '')
 
 
+#: Samples a windowed range looks at per step, bounding its temporary arrays.
+_RANGE_CHUNK = 1 << 20
+
+
+def _value_range(values) -> tuple[float, float] | None:
+    """
+    Smallest and largest of *values*, NaN ignored; None when there are none.
+
+    The same answer as ``min``/``max`` over ``[v for v in values if v == v]``,
+    in C and without a Python float per sample: for a signal of millions of
+    samples that list took seconds and gigabytes.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    if not arr.size:
+        return None
+    low = np.fmin.reduce(arr)       # fmin/fmax skip NaN unless all are NaN
+    if low != low:
+        return None
+    return float(low), float(np.fmax.reduce(arr))
+
+
+def _window_range(timestamps, values, x_min: float, x_max: float):
+    """
+    :func:`_value_range` of the samples with ``x_min <= t <= x_max``.
+
+    Read a chunk at a time: the series need not be in time order, and no
+    temporary array is longer than one chunk.
+    """
+    ts = np.asarray(timestamps, dtype=np.float64)
+    vs = np.asarray(values, dtype=np.float64)
+    spans = []
+    for start in range(0, min(len(ts), len(vs)), _RANGE_CHUNK):
+        t = ts[start:start + _RANGE_CHUNK]
+        inside = (t >= x_min) & (t <= x_max)
+        if inside.any():
+            spans.append(_value_range(vs[start:start + _RANGE_CHUNK][inside]))
+    return _union_range(spans)
+
+
+def _curve_connection(ts: np.ndarray, vs: np.ndarray, connect_mask):
+    """
+    The ``connect`` argument for a curve, and whether every sample is finite.
+
+    A curve with no break (every sample finite, time never going back) is
+    ``'all'``: pyqtgraph then needs no mask the length of the signal, and
+    its own finiteness scan can be skipped. Otherwise *connect_mask* (the
+    panel's ``_curve_connect_mask``) gives the exact breaks. Checked a chunk
+    at a time, so no temporary array is longer than one chunk.
+    """
+    n = min(ts.size, vs.size)
+    for start in range(0, n, _RANGE_CHUNK):
+        stop = min(n, start + _RANGE_CHUNK + 1)   # one sample of overlap
+        t, v = ts[start:stop], vs[start:stop]
+        if not (
+            np.isfinite(t).all()
+            and np.isfinite(v).all()
+            and (t[1:] >= t[:-1]).all()
+        ):
+            return connect_mask(ts, vs), False
+    return 'all', True
+
+
+def _union_range(spans) -> tuple[float, float] | None:
+    """The range covering every (low, high) in *spans*; None entries skipped."""
+    low = high = None
+    for span in spans:
+        if span is None:
+            continue
+        low = span[0] if low is None else min(low, span[0])
+        high = span[1] if high is None else max(high, span[1])
+    return None if low is None else (low, high)
+
+
 class PlotPanel(QWidget):
     selectionChanged = Signal(str)
     signalDropped = Signal(list)
@@ -2307,8 +2380,9 @@ class PlotPanel(QWidget):
             # protocol and returns a writable view — required by pyqtgraph.
             ts = np.asarray(plotted.series.timestamps, dtype=np.float64)
             vs = np.asarray(plotted.series.values,     dtype=np.float64)
-            connect = self._curve_connect_mask(ts, vs)
-            plotted.curve.setData(ts, vs, pen=pen, connect=connect)
+            connect, all_finite = _curve_connection(ts, vs, self._curve_connect_mask)
+            plotted.curve.setData(ts, vs, pen=pen, connect=connect,
+                                  skipFiniteCheck=all_finite)
         else:
             plotted.curve.setPen(pen)
 
@@ -2659,10 +2733,12 @@ class PlotPanel(QWidget):
             return
 
         vis = [p for p in self._items.values() if p.visible]
-        all_ts = [ts for p in (vis or self._items.values()) for ts in p.series.timestamps]
-        if not all_ts:
+        x_span = _union_range(
+            _value_range(p.series.timestamps) for p in (vis or self._items.values())
+        )
+        if x_span is None:
             return
-        x_min, x_max = min(all_ts), max(all_ts)
+        x_min, x_max = x_span
         if x_min == x_max:
             x_max += 1.0
         self._bring_cursors_into(x_min, x_max)
@@ -2678,14 +2754,11 @@ class PlotPanel(QWidget):
                 if i >= len(self._stacked_plots):
                     break
                 p = self._stacked_plots[i]
-                vals = [
-                    value
-                    for key in row_keys
-                    for value in self._items[key].series.values
-                    if value == value
-                ]
-                if vals:
-                    y_min, y_max = min(vals), max(vals)
+                y_span = _union_range(
+                    _value_range(self._items[key].series.values) for key in row_keys
+                )
+                if y_span is not None:
+                    y_min, y_max = y_span
                     pad = (y_max - y_min) * 0.05 if y_min != y_max else (1.0 if y_min == 0 else abs(y_min) * 0.05)
                     p.setYRange(y_min - pad, y_max + pad, padding=0)
         elif self._multi_axis:
@@ -2698,10 +2771,10 @@ class PlotPanel(QWidget):
             for key, plotted in self._items.items():
                 if not plotted.visible:
                     continue
-                vals = [v for v in plotted.series.values if v == v]
-                if not vals:
+                y_span = _value_range(plotted.series.values)
+                if y_span is None:
                     continue
-                y_min, y_max = min(vals), max(vals)
+                y_min, y_max = y_span
                 vb    = self.plot.plotItem.vb if plotted.view_box is None else plotted.view_box
                 vb_id = id(vb)
                 _vb_obj[vb_id] = vb
@@ -2717,9 +2790,11 @@ class PlotPanel(QWidget):
                 _vb_obj[vb_id].setYRange(y_min - pad, y_max + pad, padding=0)
         else:
             self.plot.setXRange(x_min, x_max, padding=0.02)
-            numeric = [v for it in self._items.values() for v in it.series.values if v == v]
-            if numeric:
-                y_min, y_max = min(numeric), max(numeric)
+            y_span = _union_range(
+                _value_range(it.series.values) for it in self._items.values()
+            )
+            if y_span is not None:
+                y_min, y_max = y_span
                 pad = (y_max - y_min) * 0.05 if y_min != y_max else (1.0 if y_min == 0 else abs(y_min) * 0.05)
                 self.plot.setYRange(y_min - pad, y_max + pad, padding=0)
 
@@ -2761,8 +2836,10 @@ class PlotPanel(QWidget):
         are not supplied.
         """
         if data_min is None or data_max is None:
-            all_ts = [ts for p in self._items.values() for ts in p.series.timestamps]
-            data_min, data_max = (min(all_ts), max(all_ts)) if all_ts else (None, None)
+            x_span = _union_range(
+                _value_range(p.series.timestamps) for p in self._items.values()
+            )
+            data_min, data_max = x_span if x_span is not None else (None, None)
 
         x0, x1 = center - half_width, center + half_width
         if data_min is not None and data_max is not None and data_max > data_min:
@@ -2787,15 +2864,10 @@ class PlotPanel(QWidget):
 
         def _y_range_for_visible(series, x_min: float, x_max: float):
             """Return (y_min, y_max, pad) for samples within [x_min, x_max]."""
-            ts = series.timestamps
-            vs = series.values
-            vals = [
-                float(v) for t, v in zip(ts, vs)
-                if x_min <= float(t) <= x_max and v == v
-            ]
-            if not vals:
+            y_span = _window_range(series.timestamps, series.values, x_min, x_max)
+            if y_span is None:
                 return None
-            y_min, y_max = min(vals), max(vals)
+            y_min, y_max = y_span
             pad = (y_max - y_min) * 0.05 if y_min != y_max else (
                 1.0 if y_min == 0 else abs(y_min) * 0.05
             )
@@ -2857,16 +2929,13 @@ class PlotPanel(QWidget):
                 xr = self.plot.plotItem.vb.viewRange()[0]
             except Exception:
                 return
-            all_vals = []
-            for plotted in self._items.values():
-                ts = plotted.series.timestamps
-                vs = plotted.series.values
-                all_vals += [
-                    float(v) for t, v in zip(ts, vs)
-                    if xr[0] <= float(t) <= xr[1] and v == v
-                ]
-            if all_vals:
-                y_min, y_max = min(all_vals), max(all_vals)
+            y_span = _union_range(
+                _window_range(plotted.series.timestamps, plotted.series.values,
+                              xr[0], xr[1])
+                for plotted in self._items.values()
+            )
+            if y_span is not None:
+                y_min, y_max = y_span
                 pad = (y_max - y_min) * 0.05 if y_min != y_max else (
                     1.0 if y_min == 0 else abs(y_min) * 0.05
                 )
@@ -3368,11 +3437,11 @@ class PlotPanel(QWidget):
                 self._apply_curve_style(plotted)
         # Auto-fit x range as data grows
         try:
-            all_ts = [ts for it in self._items.values()
-                      for ts in it.series.timestamps]
-            if all_ts:
-                x_max = max(all_ts)
-                x_min = min(all_ts)
+            x_span = _union_range(
+                _value_range(it.series.timestamps) for it in self._items.values()
+            )
+            if x_span is not None:
+                x_min, x_max = x_span
                 if self._stacked_mode:
                     for p in self._stacked_plots:
                         p.setXRange(x_min, x_max, padding=0.02)
