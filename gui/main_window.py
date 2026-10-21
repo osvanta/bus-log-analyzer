@@ -1171,6 +1171,13 @@ class MainWindow(QMainWindow):
             self.btn_multi_axis.setChecked(False)
         self._pending_plot_type = None
 
+    def _release_store(self) -> None:
+        """Drop the decoded measurement and close the file its signals read."""
+        store, self.store = self.store, None
+        close = getattr(store, 'close', None)
+        if close is not None:
+            close()
+
     def _reset_for_new_measurement(self) -> None:
         """Remove decoded and plotted state belonging to the previous file."""
         self.plot_panel.clear_all()
@@ -1189,7 +1196,7 @@ class MainWindow(QMainWindow):
         self._pending_plot_own_axis = {}
         self._pending_plot_multistack = {}
         self._pending_plot_type = None
-        self.store = None
+        self._release_store()
         self.diagnostics_box.clear()
         self._update_measurement_tab(
             frames='0', decoded='0', samples='0', channels='0'
@@ -1688,11 +1695,9 @@ class MainWindow(QMainWindow):
             # useful time grid. A time-only formula spans the full measurement.
             time_bases = resolved.values()
             if not resolved and self.store is not None:
-                time_bases = (
-                    series
-                    for key in self.store.all_keys()
-                    if (series := self.store.get_series(key)) is not None
-                )
+                # One array per distinct time axis; a signal not yet read
+                # gives its group's time channel, not its samples.
+                time_bases = self.store.time_axes()
             resolved[TIME_SIGNAL_KEY] = build_time_signal(time_bases)
         return resolved
 
@@ -1749,12 +1754,12 @@ class MainWindow(QMainWindow):
                 else:
                     series = self.store.get_series(key)
                 if series is not None:
-                    estimated_points += len(series.timestamps)
+                    estimated_points += series.sample_count
             if parsed.references == (TIME_SIGNAL_KEY,):
                 # A time-only formula uses the union of every decoded time
                 # base. The sum is a conservative preflight estimate.
                 estimated_points = sum(
-                    len(series.timestamps)
+                    series.sample_count
                     for key in self.store.all_keys()
                     if (series := self.store.get_series(key)) is not None
                 )
@@ -2245,7 +2250,7 @@ class MainWindow(QMainWindow):
         self._finding_plot_keys = set()
         self.signal_tree.set_payload({})
         self.diagnostics_box.clear()
-        self.store = None
+        self._release_store()
         self._update_measurement_tab(frames='0', decoded='0', samples='0', channels='0')
         self._log(f'Loading: {mpath}')
         databases = ', '.join(
@@ -2399,15 +2404,7 @@ class MainWindow(QMainWindow):
         zoom window."""
         if not self.store:
             return None, None
-        lo = hi = None
-        for key in self.store.all_keys():
-            series = self.store.get_series(key)
-            if series is None or len(series.timestamps) == 0:
-                continue
-            ts_min, ts_max = float(min(series.timestamps)), float(max(series.timestamps))
-            lo = ts_min if lo is None else min(lo, ts_min)
-            hi = ts_max if hi is None else max(hi, ts_max)
-        return lo, hi
+        return self.store.time_bounds()
 
     def clear_plot(self) -> None:
         self.plot_panel.clear_all()
@@ -2529,7 +2526,7 @@ class MainWindow(QMainWindow):
                 ExportService.typical_recurrence_seconds(series)
             )
             reference_combo.addItem(
-                f'{series.key} — {len(series.timestamps):,} samples, {recurrence}',
+                f'{series.key} — {series.sample_count:,} samples, {recurrence}',
                 series.key,
             )
         reference_combo.setSizePolicy(
@@ -2912,6 +2909,7 @@ class MainWindow(QMainWindow):
             self._close_retry.start()
             return
         self._close_retry.stop()
+        self._release_store()
         super().closeEvent(event)
         if self._closing and QApplication.quitOnLastWindowClosed():
             # Qt quits when the last visible window closes, and this one was

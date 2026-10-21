@@ -289,6 +289,42 @@ class MDFReader:
         LoadWorker requests one global ``mdf.select()`` across all channel
         groups. Other callers default to the bounded per-group path.
         """
+        mdf, recovery_path = self._open()
+        try:
+            if metadata_ready is not None:
+                metadata_ready(self._channel_metadata(mdf))
+            yield from self._iter_arrays(
+                mdf,
+                batch_all_groups=batch_all_groups,
+                channel_error=self._record_channel_error,
+            )
+        finally:
+            try:
+                mdf.close()
+            except Exception:
+                pass
+            remove_recovery_copy(recovery_path)
+
+    def open_sample_source(self) -> "MDFSampleSource":
+        """
+        Open the file for lazy reading: channel list now, samples on request.
+
+        The returned source keeps the file open until it is closed. LoadWorker
+        hands it to a SampleCache, so Decode reads no samples at all and a
+        signal's channel group is read the first time the signal is used.
+        """
+        mdf, recovery_path = self._open()
+        try:
+            return MDFSampleSource(mdf, recovery_path, self._record_channel_error)
+        except Exception:
+            try:
+                mdf.close()
+            finally:
+                remove_recovery_copy(recovery_path)
+            raise
+
+    def _open(self):
+        """Open the file, or a bounded copy of a damaged one; see asammdf_guard."""
         try:
             import asammdf
         except ImportError as exc:
@@ -309,21 +345,7 @@ class MDFReader:
             raise MDFReadError(
                 f"Failed to open MDF file '{self._path}': {exc}"
             ) from exc
-
-        try:
-            if metadata_ready is not None:
-                metadata_ready(self._channel_metadata(mdf))
-            yield from self._iter_arrays(
-                mdf,
-                batch_all_groups=batch_all_groups,
-                channel_error=self._record_channel_error,
-            )
-        finally:
-            try:
-                mdf.close()
-            except Exception:
-                pass
-            remove_recovery_copy(recovery_path)
+        return mdf, recovery_path
 
     def _record_channel_error(
         self,
@@ -826,3 +848,124 @@ class MDFReader:
         except Exception:
             pass
         return f"Group_{group_idx}"
+
+
+class MDFSampleSource:
+    """
+    An open MDF that reads channel groups on request, for a SampleCache.
+
+    ``groups`` lists the readable groups as ``(group_idx, group_name,
+    [(ch_idx, ch_name, unit), ...], cycles)`` — the same channels the eager
+    path reads, found from metadata alone. The file stays open, and a
+    recovery copy stays on disk, until :meth:`close`.
+    """
+
+    def __init__(self, mdf, recovery_path, channel_error=None) -> None:
+        self._mdf = mdf
+        self._recovery_path = recovery_path
+        self._channel_error = channel_error
+        self.groups: list[tuple[int, str, list[tuple[int, str, str]], int]] = []
+        for group_idx, group in enumerate(mdf.groups):
+            if MDFReader._is_raw_can_group(group):
+                continue
+            channels = []
+            for ch_idx, channel in enumerate(group.channels):
+                ch_name = getattr(channel, "name", None) or f"Ch{ch_idx}"
+                if getattr(channel, "channel_type", -1) == 1:
+                    continue
+                if ch_name.lower() in ("time", "t", "timestamps"):
+                    continue
+                channels.append(
+                    (ch_idx, ch_name, str(getattr(channel, "unit", "") or ""))
+                )
+            if channels:
+                cycles = int(
+                    getattr(getattr(group, "channel_group", None), "cycles_nr", 0)
+                    or 0
+                )
+                self.groups.append(
+                    (group_idx, MDFReader._group_name(mdf, group_idx), channels, cycles)
+                )
+        self._channels = {g[0]: g[2] for g in self.groups}
+
+    def metadata_rows(self) -> list[tuple[str, str, str]]:
+        """``(group_name, channel_name, unit)`` per channel, for the signal tree."""
+        return [
+            (group_name, ch_name, unit)
+            for _idx, group_name, channels, _cycles in self.groups
+            for _ch_idx, ch_name, unit in channels
+        ]
+
+    def group_bytes(self, group_idx: int) -> int:
+        """Memory one group takes once read: a float64 per channel and time."""
+        for idx, _name, channels, cycles in self.groups:
+            if idx == group_idx:
+                return cycles * (len(channels) + 1) * 8
+        return 0
+
+    def master(self, group_idx: int, record_offset: int = 0, record_count=None):
+        """A group's time stamps, raw; *record_count* None reads to the end."""
+        return np.asarray(
+            self._mdf.get_master(
+                group_idx, record_offset=record_offset, record_count=record_count
+            ),
+            dtype=np.float64,
+        )
+
+    def cycles(self, group_idx: int) -> int:
+        for idx, _name, _channels, cycles in self.groups:
+            if idx == group_idx:
+                return cycles
+        return 0
+
+    def first_timestamp(self) -> float | None:
+        """The first time stamp of the first group with samples."""
+        for group_idx, _name, _channels, cycles in self.groups:
+            if cycles <= 0:
+                continue
+            try:
+                master = self._mdf.get_master(group_idx, record_offset=0, record_count=1)
+            except Exception:
+                continue
+            if master is not None and len(master):
+                return float(master[0])
+        return None
+
+    def read_groups(self, group_indices, channel_names=None):
+        """
+        Read *group_indices* in one pass.
+
+        Returns ``{(group_idx, channel_name): [(timestamps, values,
+        display_values, unit), ...]}``; a list, because one group can hold two
+        channels of the same name. *channel_names* limits the read to those
+        channels, for a group too large to read whole.
+        """
+        groups_channels = {}
+        for group_idx in group_indices:
+            channels = [
+                (ch_idx, ch_name)
+                for ch_idx, ch_name, _unit in self._channels.get(group_idx, ())
+                if channel_names is None or ch_name in channel_names
+            ]
+            if channels:
+                groups_channels[group_idx] = channels
+        results: dict[tuple[int, str], list] = {}
+        for group_idx, (_grp, ch_name, unit), ts, values, display in (
+            MDFReader._iter_arrays_all_groups(
+                self._mdf, groups_channels, True, self._channel_error
+            )
+        ):
+            results.setdefault((group_idx, ch_name), []).append(
+                (ts, values, display, unit)
+            )
+        return results
+
+    def close(self) -> None:
+        mdf, self._mdf = self._mdf, None
+        if mdf is None:
+            return
+        try:
+            mdf.close()
+        except Exception:
+            pass
+        remove_recovery_copy(self._recovery_path)

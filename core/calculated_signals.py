@@ -485,7 +485,7 @@ def estimate_output_points(
     source_series: Mapping[str, SignalSeries],
 ) -> int:
     parsed = parse_formula(definition.formula, source_series.keys())
-    return sum(len(source_series[key].timestamps) for key in parsed.references)
+    return sum(source_series[key].sample_count for key in parsed.references)
 
 
 @dataclass(frozen=True, slots=True)

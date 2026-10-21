@@ -278,7 +278,7 @@ class ExportService:
                     "Select exactly one export timestamp source: "
                     "a reference signal or a manual recurrence time."
                 )
-            return len(reference.timestamps)
+            return reference.sample_count
         if timebase is not None and timebase.recurrence_seconds is not None:
             return _regular_grid_size(
                 series_items, float(timebase.recurrence_seconds)

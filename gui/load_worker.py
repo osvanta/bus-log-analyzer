@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from core.readers import reader_factory
 from core.readers.base import MeasurementReader
-from core.signal_store import SignalStore
+from core.signal_store import SampleCache, SignalStore
 from core.raw_frame_store import FLAG_LIN, RawFrameStore
 from core.bus_types import (
     ALL_CHANNELS_NUMBER,
@@ -1323,7 +1323,31 @@ class LoadWorker(QObject):
                 f"{time.perf_counter() - stage_start:.1f} s"
             )
 
-        if metadata_first:
+        open_sample_source = getattr(reader, "open_sample_source", None)
+        if open_sample_source is not None:
+            # MDF: list the channels now and leave every sample in the file.
+            # A signal's group is read the first time the signal is used, and
+            # the store keeps a bounded number of groups in memory, so the
+            # memory a measurement needs no longer follows its size.
+            source = open_sample_source()
+            try:
+                on_metadata_ready(source.metadata_rows())
+                base_ts = source.first_timestamp()
+                store.base_ts = 0.0 if base_ts is None else base_ts
+                store.sample_cache = SampleCache(source, store.base_ts)
+            except BaseException:
+                source.close()
+                raise
+            for group_idx, grp_name, channels, cycles in source.groups:
+                for _ch_idx, ch_name, unit in channels:
+                    ch_count += 1
+                    store.add_lazy_series(
+                        channel=None, message_name=grp_name, message_id=0,
+                        signal_name=ch_name, unit=unit,
+                        group=group_idx, sample_count=cycles,
+                    )
+            array_iter = ()
+        elif metadata_first:
             array_iter = reader.iter_channel_arrays(
                 metadata_ready=on_metadata_ready,
                 batch_all_groups=True,

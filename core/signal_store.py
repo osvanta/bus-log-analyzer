@@ -61,10 +61,15 @@ class SignalSeries:
         )
 
     @property
+    def sample_count(self) -> int:
+        """Number of samples, known without reading them for a lazy series."""
+        return len(self.timestamps)
+
+    @property
     def latest_value(self) -> object:
         if self.raw_values:
             return self.raw_values[-1]
-        if self.values:
+        if len(self.values):
             return self.values[-1]
         return ""
 
@@ -87,6 +92,410 @@ class SignalSeries:
     def numpy_values(self) -> np.ndarray:
         """Return values as a numpy float64 array (zero-copy if possible)."""
         return np.frombuffer(self.values, dtype=np.float64)
+
+
+# The slots SignalSeries keeps its samples in. LazySignalSeries puts
+# properties in front of them and reaches the storage through these.
+_TIMESTAMPS = SignalSeries.__dict__["timestamps"]
+_VALUES = SignalSeries.__dict__["values"]
+_RAW_VALUES = SignalSeries.__dict__["raw_values"]
+_HAS_LABELS = SignalSeries.__dict__["has_labels"]
+
+
+class LazySignalSeries(SignalSeries):
+    """
+    A series whose samples stay in the measurement file until first read.
+
+    Reading ``timestamps``, ``values``, ``raw_values`` or ``has_labels`` asks
+    the store's :class:`SampleCache` to read the series' channel group. The
+    cache keeps recently read groups up to a memory budget and forgets the
+    oldest, which puts their series back in the file: the next read loads
+    them again. Memory therefore follows what is in use, not the file size.
+
+    Assigning one of the sample fields detaches the series from the cache,
+    so it then behaves as an ordinary in-memory series.
+    """
+
+    __slots__ = ("_cache", "_groups", "_sample_count")
+
+    def __init__(
+        self,
+        channel: BusChannel | None,
+        message_name: str,
+        message_id: int,
+        signal_name: str,
+        unit: str,
+        cache: "SampleCache",
+        group: int,
+        sample_count: int,
+    ) -> None:
+        self.channel = channel
+        self.message_name = message_name
+        self.message_id = message_id
+        self.signal_name = signal_name
+        self.unit = unit
+        _TIMESTAMPS.__set__(self, None)
+        _VALUES.__set__(self, None)
+        _RAW_VALUES.__set__(self, None)
+        _HAS_LABELS.__set__(self, False)
+        self._cache: SampleCache | None = cache
+        # Channel groups holding this series, in file order. More than one
+        # when several groups carry a channel of the same group and name.
+        self._groups: list[int] = [group]
+        self._sample_count = sample_count
+
+    @property
+    def is_loaded(self) -> bool:
+        return _TIMESTAMPS.__get__(self) is not None
+
+    @property
+    def sample_count(self) -> int:
+        return self._sample_count
+
+    def _field(self, slot):
+        value = slot.__get__(self)
+        cache = self._cache
+        if cache is None:
+            return _empty_field(slot) if value is None else value
+        if value is None:
+            # Read and returned under the cache's lock: the group may be
+            # forgotten again by another thread straight after.
+            return cache.load_field(self, slot)
+        cache.touch(self)
+        return value
+
+    @property
+    def timestamps(self):
+        return self._field(_TIMESTAMPS)
+
+    @timestamps.setter
+    def timestamps(self, value) -> None:
+        self._detach()
+        _TIMESTAMPS.__set__(self, value)
+
+    @property
+    def values(self):
+        return self._field(_VALUES)
+
+    @values.setter
+    def values(self, value) -> None:
+        self._detach()
+        _VALUES.__set__(self, value)
+
+    @property
+    def raw_values(self):
+        return self._field(_RAW_VALUES)
+
+    @raw_values.setter
+    def raw_values(self, value) -> None:
+        self._detach()
+        _RAW_VALUES.__set__(self, value)
+
+    @property
+    def has_labels(self) -> bool:
+        if self._cache is not None and not self.is_loaded:
+            self._cache.load_field(self, _TIMESTAMPS)
+        return _HAS_LABELS.__get__(self)
+
+    @has_labels.setter
+    def has_labels(self, value: bool) -> None:
+        _HAS_LABELS.__set__(self, value)
+
+    def _detach(self) -> None:
+        """Keep the samples in memory for good: the cache no longer owns them."""
+        if self._cache is not None:
+            self._cache.detach(self)
+
+
+#: Fallbacks for SampleCache's budget when the physical memory is unknown.
+_CACHE_BUDGET_MIN = 256 * 1024 * 1024
+_CACHE_BUDGET_MAX = 2 * 1024 * 1024 * 1024
+
+
+def default_cache_budget() -> int:
+    """An eighth of physical memory, between 256 MB and 2 GB.
+
+    Only a cost/speed trade: a group forgotten is read again when next used,
+    which for a typical group takes a fraction of a second.
+    """
+    total = 0
+    try:
+        import ctypes
+
+        class _MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatus()
+        status.dwLength = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            total = int(status.ullTotalPhys)
+    except (AttributeError, OSError):
+        pass
+    if not total:
+        try:
+            import os
+            total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except (AttributeError, ValueError, OSError):
+            return _CACHE_BUDGET_MIN
+    return max(_CACHE_BUDGET_MIN, min(_CACHE_BUDGET_MAX, total // 8))
+
+
+class SampleCache:
+    """
+    Reads lazy series from their measurement file, keeping a bounded amount.
+
+    *source* reads channel groups: ``read_groups(group_indices)`` returns
+    ``{(group_idx, channel_name): [(timestamps, values, display_values,
+    unit), ...]}`` with raw (not yet normalised) timestamps, and ``close()``
+    releases the file. Every read is one *load*: the groups a series needs,
+    plus every other series those groups complete. Loads are forgotten oldest
+    first once their samples pass *budget* bytes; the newest load is always
+    kept, however large.
+
+    Thread-safe: the GUI thread plots while a calculation thread reads.
+    """
+
+    def __init__(self, source, base_ts: float, budget: int | None = None) -> None:
+        import threading
+        import weakref
+
+        self._source = source
+        self._base_ts = base_ts
+        self.budget = default_cache_budget() if budget is None else budget
+        self._lock = threading.RLock()
+        self._series_by_group: dict[int, list[LazySignalSeries]] = defaultdict(list)
+        # Insertion order is age: oldest load first.
+        self._loads: dict[int, tuple[list[LazySignalSeries], int]] = {}
+        self._load_of: dict[int, int] = {}   # id(series) -> its load's number
+        self._next_load = 0
+        self.resident_bytes = 0
+        self.reads = 0
+        self._last_ts: tuple | None = None
+        self._bounds: dict[int, tuple[float, float]] = {}
+        # The file stays open until the store is closed or collected.
+        self._finalizer = weakref.finalize(self, _close_source, source)
+
+    # ── Registration (load worker) ────────────────────────────────────────
+
+    def register(self, series: LazySignalSeries) -> None:
+        for group in series._groups:
+            self._series_by_group[group].append(series)
+
+    def add_group(self, series: LazySignalSeries, group: int, sample_count: int) -> None:
+        """Extend *series* with another group's channel of the same name."""
+        series._groups.append(group)
+        series._sample_count += sample_count
+        self._series_by_group[group].append(series)
+
+    # ── Reading ──────────────────────────────────────────────────────────
+
+    def load_field(self, series: LazySignalSeries, slot):
+        with self._lock:
+            value = slot.__get__(series)
+            if value is not None:
+                return value
+            if self._source is None or series._cache is not self:
+                # The measurement was closed: its signals have nothing left.
+                return _empty_field(slot)
+            self._load(series)
+            return slot.__get__(series)
+
+    def _load(self, wanted: LazySignalSeries) -> None:
+        groups = set(wanted._groups)
+        # Reading a whole group costs one pass for all its channels. A group
+        # too large for a quarter of the budget is read one channel at a
+        # time instead, so no file layout can make a single read unbounded.
+        group_bytes = getattr(self._source, "group_bytes", None)
+        only = None
+        if group_bytes is not None and (
+            sum(group_bytes(g) for g in groups) > self.budget // 4
+        ):
+            only = {wanted.signal_name}
+        # A group's other series may also need groups of their own; read only
+        # what this one needs and fill every series the read completes.
+        results = self._source.read_groups(sorted(groups), only)
+        self.reads += 1
+        filled: list[LazySignalSeries] = []
+        arrays: dict[int, int] = {}   # id -> bytes; a shared time axis counts once
+        seen: set[int] = set()
+        for group in sorted(groups):
+            for series in self._series_by_group.get(group, ()):
+                if id(series) in seen or series._cache is not self:
+                    continue
+                seen.add(id(series))
+                if series.is_loaded or not groups.issuperset(series._groups):
+                    continue
+                if only is not None and series is not wanted:
+                    continue
+                for array in self._fill(series, results):
+                    arrays[id(array)] = array.nbytes
+                filled.append(series)
+        size = sum(arrays.values())
+        number = self._next_load
+        self._next_load += 1
+        self._loads[number] = (filled, size)
+        for series in filled:
+            self._load_of[id(series)] = number
+        self.resident_bytes += size
+        self._evict(keep=number)
+
+    def _fill(self, series: LazySignalSeries, results) -> tuple[np.ndarray, np.ndarray]:
+        """Give *series* its samples from *results*; return its two arrays."""
+        parts = []
+        unit = None
+        for group in series._groups:
+            parts.extend(results.get((group, series.signal_name), ()))
+        if not parts:
+            ts = np.empty(0, dtype=np.float64)
+            vs = np.empty(0, dtype=np.float64)
+            raw: Sequence[object] = []
+        elif len(parts) == 1:
+            ts, vs, raw, unit = parts[0]
+            ts = self._normalised(ts)
+        else:
+            ts = np.concatenate([self._normalised(p[0]) for p in parts])
+            vs = np.concatenate([np.asarray(p[1], dtype=np.float64) for p in parts])
+            raw = []
+            if any(len(p[2]) for p in parts):
+                for p in parts:
+                    raw.extend(p[2] if len(p[2]) else [float(v) for v in p[1]])
+            unit = parts[0][3]
+            if len(ts) > 1 and np.any(np.diff(ts) < 0):
+                order = np.argsort(ts, kind="stable")
+                ts, vs = ts[order], vs[order]
+                if raw:
+                    raw = [raw[i] for i in order.tolist()]
+        vs = np.asarray(vs, dtype=np.float64)
+        _TIMESTAMPS.__set__(series, ts)
+        _VALUES.__set__(series, vs)
+        _RAW_VALUES.__set__(series, raw if len(raw) else [])
+        _HAS_LABELS.__set__(series, bool(len(raw)))
+        if unit:
+            series.unit = unit
+        series._sample_count = len(ts)
+        return ts, vs
+
+    def _normalised(self, ts) -> np.ndarray:
+        # Channels of one group share their time axis, but asammdf hands each
+        # its own copy. Keep one normalised array for all of them: remember
+        # the last source array and its result.
+        last = self._last_ts
+        if last is not None and (
+            last[0] is ts or (len(last[0]) == len(ts) and np.array_equal(last[0], ts))
+        ):
+            return last[1]
+        normalised = np.asarray(ts, dtype=np.float64) - self._base_ts
+        self._last_ts = (ts, normalised)
+        return normalised
+
+    def _evict(self, keep: int) -> None:
+        self._last_ts = None
+        for number in list(self._loads):
+            if self.resident_bytes <= self.budget:
+                break
+            if number == keep:
+                continue
+            filled, size = self._loads.pop(number)
+            self.resident_bytes -= size
+            for series in filled:
+                self._load_of.pop(id(series), None)
+                _TIMESTAMPS.__set__(series, None)
+                _VALUES.__set__(series, None)
+                _RAW_VALUES.__set__(series, None)
+
+    def touch(self, series: LazySignalSeries) -> None:
+        """Mark *series*' load as the most recently used."""
+        with self._lock:
+            number = self._load_of.get(id(series))
+            if number is not None and number in self._loads:
+                self._loads[number] = self._loads.pop(number)
+
+    def detach(self, series: LazySignalSeries) -> None:
+        with self._lock:
+            if series._cache is not self:
+                return
+            if not series.is_loaded and self._source is not None:
+                self._load(series)
+            number = self._load_of.pop(id(series), None)
+            if number is not None and number in self._loads:
+                # Its values leave the budget; a time axis it shares stays.
+                filled, size = self._loads[number]
+                own = _VALUES.__get__(series).nbytes
+                filled = [s for s in filled if s is not series]
+                self._loads[number] = (filled, size - own)
+                self.resident_bytes -= own
+            for group in series._groups:
+                members = self._series_by_group.get(group)
+                if members and series in members:
+                    members.remove(series)
+            series._cache = None
+
+    # ── Time axes without reading samples ─────────────────────────────────
+
+    def lazy_groups(self) -> list[int]:
+        with self._lock:
+            return sorted(
+                group for group, members in self._series_by_group.items()
+                if any(s._cache is self for s in members)
+            )
+
+    def group_bounds(self, group: int) -> tuple[float, float] | None:
+        """First and last normalised time stamp of *group*, from two records."""
+        with self._lock:
+            bounds = self._bounds.get(group)
+            if bounds is not None or self._source is None:
+                return bounds
+            cycles = self._source.cycles(group)
+            if cycles <= 0:
+                return None
+            try:
+                first = self._source.master(group, 0, 1)
+                last = self._source.master(group, cycles - 1, 1)
+            except Exception:
+                return None
+            if not len(first) or not len(last):
+                return None
+            bounds = (
+                float(first[0]) - self._base_ts, float(last[-1]) - self._base_ts
+            )
+            self._bounds[group] = bounds
+            return bounds
+
+    def group_time_axis(self, group: int) -> np.ndarray:
+        """*group*'s normalised time stamps; read now, not kept."""
+        with self._lock:
+            if self._source is None:
+                return np.empty(0, dtype=np.float64)
+            return self._source.master(group) - self._base_ts
+
+    @property
+    def is_closed(self) -> bool:
+        return self._source is None
+
+    def close(self) -> None:
+        """Release the measurement file. Series not yet read stay empty."""
+        with self._lock:
+            self._source = None
+            self._finalizer()
+
+
+def _close_source(source) -> None:
+    try:
+        source.close()
+    except Exception:
+        pass
+
+
+def _empty_field(slot):
+    if slot is _RAW_VALUES:
+        return []
+    return np.empty(0, dtype=np.float64)
 
 
 class SignalStore:
@@ -129,6 +538,8 @@ class SignalStore:
         # On-disk indexed frame store (Option B: no cap, temp file on disk)
         self.raw_frame_store = None   # set to RawFrameStore by LoadWorker
         self.base_ts: float = 0.0  # set by LoadWorker for streaming
+        # Reads lazy series from the measurement file; see add_lazy_series().
+        self.sample_cache: SampleCache | None = None
 
     # ── Decoder integration (called once by LoadWorker) ──────────────────
 
@@ -383,6 +794,119 @@ class SignalStore:
         self.decoded_frames += 1        # one "frame" per bulk channel insert
         self.channels.add(channel)
         self.message_hits[(channel, message_name)] += n
+
+    def add_lazy_series(
+        self,
+        channel: BusChannel | int | None,
+        message_name: str,
+        message_id: int,
+        signal_name: str,
+        unit: str,
+        group: int,
+        sample_count: int,
+    ) -> None:
+        """
+        List a channel whose samples stay in the file until first read.
+
+        The samples are read through ``self.sample_cache``, which must be set
+        first. A second channel with the same key (another group of the same
+        name) joins the first: the series then reads both groups and puts
+        their samples in time order, as add_series_bulk does when it merges.
+        """
+        if sample_count <= 0:
+            return
+        cache = self.sample_cache
+        if cache is None:
+            raise RuntimeError("add_lazy_series needs a sample_cache")
+        channel = as_channel_key(channel)
+        key = self._make_key(channel, message_name, signal_name)
+        series = self._series_by_key.get(key)
+        if isinstance(series, LazySignalSeries) and series._cache is cache:
+            if group not in series._groups:
+                cache.add_group(series, group, sample_count)
+        elif series is None:
+            series = LazySignalSeries(
+                channel, message_name, message_id, signal_name, unit,
+                cache, group, sample_count,
+            )
+            cache.register(series)
+            self._series_by_key[key] = series
+            sigs = self._signals_by_channel_message[channel][message_name]
+            if signal_name not in sigs:
+                sigs.append(signal_name)
+            self._tree_dirty = True
+        else:
+            raise ValueError(f"{key} is already an in-memory series")
+        self.total_samples  += sample_count
+        self.decoded_frames += 1        # one "frame" per channel, as in bulk
+        self.channels.add(channel)
+        self.message_hits[(channel, message_name)] += sample_count
+
+    def time_bounds(self) -> tuple[float | None, float | None]:
+        """
+        Earliest and latest time stamp across every signal.
+
+        A lazy series that has not been read answers from its group's first
+        and last record, so this never reads a measurement's samples.
+        """
+        lo = hi = None
+        cache = self.sample_cache
+        lazy_groups: set[int] = set()
+        for series in self._series_by_key.values():
+            if (
+                isinstance(series, LazySignalSeries)
+                and series._cache is cache
+                and cache is not None
+            ):
+                lazy_groups.update(series._groups)
+                continue
+            ts = series.numpy_timestamps()
+            if not len(ts):
+                continue
+            t0, t1 = float(np.nanmin(ts)), float(np.nanmax(ts))
+            lo = t0 if lo is None else min(lo, t0)
+            hi = t1 if hi is None else max(hi, t1)
+        for group in sorted(lazy_groups):
+            bounds = cache.group_bounds(group)
+            if bounds is None:
+                continue
+            lo = bounds[0] if lo is None else min(lo, bounds[0])
+            hi = bounds[1] if hi is None else max(hi, bounds[1])
+        return lo, hi
+
+    def time_axes(self) -> list[SignalSeries]:
+        """
+        One series per distinct time axis, for the calculated Time signal.
+
+        Channels sharing a time stamp array count once, and a lazy group gives
+        its time channel alone: its other channels are not read.
+        """
+        axes: list[SignalSeries] = []
+        seen: set[int] = set()
+        cache = self.sample_cache
+        lazy_groups: set[int] = set()
+        for series in self._series_by_key.values():
+            if (
+                isinstance(series, LazySignalSeries)
+                and series._cache is cache
+                and cache is not None
+            ):
+                lazy_groups.update(series._groups)
+                continue
+            ts = series.numpy_timestamps()
+            if len(ts) and id(series.timestamps) not in seen:
+                seen.add(id(series.timestamps))
+                axes.append(series)
+        for group in sorted(lazy_groups):
+            ts = cache.group_time_axis(group)
+            if len(ts):
+                axes.append(SignalSeries(None, "", 0, "", "", ts, ts))
+        return axes
+
+    def close(self) -> None:
+        """Release the measurement file that lazy series read from."""
+        if self.sample_cache is not None:
+            self.sample_cache.close()
 
     def _own_timestamps(self, key: str, series: SignalSeries) -> None:
         """Give *series* its own timestamps before they are appended to."""

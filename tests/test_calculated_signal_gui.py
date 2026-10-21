@@ -43,6 +43,9 @@ class _Store:
     def get_series(self, key):
         return self._series.get(key)
 
+    def time_axes(self):
+        return list(self._series.values())
+
 
 def _series(name: str, values) -> SignalSeries:
     return SignalSeries(
