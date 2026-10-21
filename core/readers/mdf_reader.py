@@ -333,13 +333,13 @@ class MDFReader:
         recovery_path = None
         try:
             try:
-                mdf = asammdf.MDF(str(self._path))
+                mdf = asammdf.MDF(str(self._path), process_bus_logging=False)
             except Exception as original_exc:
                 recovery_path, warnings = make_bounded_mdf4_copy(self._path)
                 if recovery_path is None:
                     raise original_exc
                 self.load_warnings.extend(warnings)
-                mdf = asammdf.MDF(str(recovery_path))
+                mdf = asammdf.MDF(str(recovery_path), process_bus_logging=False)
         except Exception as exc:
             remove_recovery_copy(recovery_path)
             raise MDFReadError(
@@ -429,12 +429,12 @@ class MDFReader:
             import asammdf
             recovery_path = None
             try:
-                mdf = asammdf.MDF(str(mdf_path))
+                mdf = asammdf.MDF(str(mdf_path), process_bus_logging=False)
             except Exception as original_exc:
                 recovery_path, _warnings = make_bounded_mdf4_copy(mdf_path)
                 if recovery_path is None:
                     raise original_exc
-                mdf = asammdf.MDF(str(recovery_path))
+                mdf = asammdf.MDF(str(recovery_path), process_bus_logging=False)
             try:
                 for group in mdf.groups:
                     if MDFReader._is_raw_can_group(group):

@@ -206,7 +206,8 @@ def _prescan_lin_frames(
 
     from core.readers.mdf_reader import MDFReader
 
-    mdf = asammdf.MDF(str(path))
+    # Without asammdf's bus-logging map: built on open, it reads every frame.
+    mdf = asammdf.MDF(str(path), process_bus_logging=False)
     try:
         for group_idx, group in enumerate(mdf.groups):
             if not MDFReader._is_raw_lin_group(group):

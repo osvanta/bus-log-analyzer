@@ -1219,9 +1219,13 @@ class LoadWorker(QObject):
                 f"{time.perf_counter() - stage_start:.1f} s"
             )
 
-        # Retain each array until extraction closes, and find the global first
-        # timestamp before bulk insertion so every signal shares the same t=0.
+        # The MF4 reader leaves the decoded signals in asammdf's decoded file
+        # (lazy): they are read the first time each is used, so the decode
+        # holds none of them in memory. A reader without that keeps every
+        # array until extraction closes. Either way the global first
+        # timestamp is found before insertion so every signal shares t=0.
         arrays = []
+        lazy = None
         base_ts: float | None = None
         try:
             iterator_kwargs = {
@@ -1230,13 +1234,20 @@ class LoadWorker(QObject):
             }
             if trace_store is not None:
                 iterator_kwargs["raw_frame_batch"] = on_raw_frame_batch
-            for meta, ts_arr, num_arr, disp_list in \
-                    reader.iter_decoded_channel_arrays(cfg, **iterator_kwargs):
-                if len(ts_arr) == 0:
-                    continue
-                arrays.append((meta, ts_arr, num_arr, disp_list))
-                first = float(ts_arr[0])
-                base_ts = first if base_ts is None else min(base_ts, first)
+            open_decoded_sources = getattr(reader, "open_decoded_sources", None)
+            if open_decoded_sources is not None:
+                lazy = open_decoded_sources(cfg, **iterator_kwargs)
+                base_ts = lazy.source.first_timestamp(
+                    signal[0] for signal in lazy.signals
+                )
+            else:
+                for meta, ts_arr, num_arr, disp_list in \
+                        reader.iter_decoded_channel_arrays(cfg, **iterator_kwargs):
+                    if len(ts_arr) == 0:
+                        continue
+                    arrays.append((meta, ts_arr, num_arr, disp_list))
+                    first = float(ts_arr[0])
+                    base_ts = first if base_ts is None else min(base_ts, first)
         except Exception as exc:
             if trace_store is not None:
                 trace_store.close()
@@ -1247,10 +1258,32 @@ class LoadWorker(QObject):
             self._run_can_raw_vectorized(reader, store)
             return
 
+        try:
+            self._finish_mdf_bus_arrays(
+                reader, store, cfg, stage_start, arrays, lazy, base_ts,
+                trace_store, trace_frames, trace_message_names, metadata_keys,
+            )
+        except BaseException:
+            if lazy is not None and store.sample_cache is None:
+                lazy.source.close()
+            raise
+
+    def _finish_mdf_bus_arrays(
+        self, reader, store, cfg, stage_start, arrays, lazy, base_ts,
+        trace_store, trace_frames, trace_message_names, metadata_keys,
+    ) -> None:
+        """The CAN Trace and the signals of _run_mdf_bus_arrays()."""
+        import numpy as np
+
+        # Counted as the arrays were: signals with samples.
+        signal_count = (
+            sum(1 for signal in lazy.signals if signal[6] > 0)
+            if lazy is not None else len(arrays)
+        )
         extraction_elapsed = time.perf_counter() - stage_start
         self.progress.emit(
             f"asammdf extraction and global array read complete: "
-            f"{len(arrays):,} signals in "
+            f"{signal_count:,} signals in "
             f"{extraction_elapsed:.1f} s"
         )
 
@@ -1285,6 +1318,9 @@ class LoadWorker(QObject):
             trace_store = None
             trace_frames = 0
         if trace_store is not None and trace_frames:
+            # Sealed first: the frame columns are mapped from their files,
+            # and the shift and labels below write into them a chunk at a time.
+            trace_store.seal()
             timestamps_np = np.frombuffer(trace_store.timestamps, dtype=np.float64)
             trace_base_ts = float(np.min(timestamps_np))
             base_ts = (
@@ -1292,7 +1328,8 @@ class LoadWorker(QObject):
                 if base_ts is None
                 else min(base_ts, trace_base_ts)
             )
-            timestamps_np -= base_ts
+            for start in range(0, trace_frames, _GROUP_CHUNK_ROWS):
+                timestamps_np[start:start + _GROUP_CHUNK_ROWS] -= base_ts
 
             # Mark raw rows decoded and attach their message names in one
             # vectorised lookup. This keeps row expansion/search identical to
@@ -1340,26 +1377,30 @@ class LoadWorker(QObject):
                                 name_id = 0
                         key_name_ids[idx] = name_id
 
-                    frame_keys = (
-                        ((flags_np.astype(np.uint64) & np.uint64(FLAG_LIN))
-                         // np.uint64(FLAG_LIN)) << np.uint64(41)
-                    ) | (
-                        channels_np.astype(np.uint64) << np.uint64(33)
-                    ) | (
-                        (flags_np.astype(np.uint64) & np.uint64(1))
-                        << np.uint64(32)
-                    ) | arb_ids_np.astype(np.uint64)
-                    positions = np.searchsorted(encoded_keys, frame_keys)
-                    safe_positions = np.minimum(positions, len(encoded_keys) - 1)
-                    decoded_mask = (
-                        (positions < len(encoded_keys))
-                        & (encoded_keys[safe_positions] == frame_keys)
-                    )
-                    flags_np[decoded_mask] |= np.uint8(4)
-                    name_ids_np[decoded_mask] = key_name_ids[
-                        safe_positions[decoded_mask]
-                    ]
-                    trace_decoded_frames = int(np.count_nonzero(decoded_mask))
+                    # A chunk at a time: no per-frame array of the log's length.
+                    for start in range(0, trace_frames, _GROUP_CHUNK_ROWS):
+                        end = min(trace_frames, start + _GROUP_CHUNK_ROWS)
+                        chunk_flags = flags_np[start:end]
+                        frame_keys = (
+                            ((chunk_flags.astype(np.uint64) & np.uint64(FLAG_LIN))
+                             // np.uint64(FLAG_LIN)) << np.uint64(41)
+                        ) | (
+                            channels_np[start:end].astype(np.uint64) << np.uint64(33)
+                        ) | (
+                            (chunk_flags.astype(np.uint64) & np.uint64(1))
+                            << np.uint64(32)
+                        ) | arb_ids_np[start:end].astype(np.uint64)
+                        positions = np.searchsorted(encoded_keys, frame_keys)
+                        safe_positions = np.minimum(positions, len(encoded_keys) - 1)
+                        decoded_mask = (
+                            (positions < len(encoded_keys))
+                            & (encoded_keys[safe_positions] == frame_keys)
+                        )
+                        chunk_flags[decoded_mask] |= np.uint8(4)
+                        name_ids_np[start:end][decoded_mask] = key_name_ids[
+                            safe_positions[decoded_mask]
+                        ]
+                        trace_decoded_frames += int(np.count_nonzero(decoded_mask))
 
             trace_store.seal()
             store.raw_frame_store = trace_store
@@ -1381,11 +1422,32 @@ class LoadWorker(QObject):
             base_ts = 0.0
         store.base_ts = base_ts
 
-        total = len(arrays)
+        total = signal_count
         import_start = time.perf_counter()
-        self.progress.emit(
-            f"Bulk importing {total:,} decoded signal arrays into memory..."
-        )
+        if lazy is not None:
+            self.progress.emit(
+                f"Listing {total:,} decoded signals; each is read from the "
+                "decoded file when first used..."
+            )
+            if lazy.signals:
+                store.sample_cache = SampleCache(lazy.source, base_ts)
+            else:
+                lazy.source.close()
+            for (group, channel, message_name, message_id, signal_name,
+                 unit, sample_count) in lazy.signals:
+                store.add_lazy_series(
+                    channel=channel,
+                    message_name=message_name,
+                    message_id=message_id,
+                    signal_name=signal_name,
+                    unit=unit,
+                    group=group,
+                    sample_count=sample_count,
+                )
+        else:
+            self.progress.emit(
+                f"Bulk importing {total:,} decoded signal arrays into memory..."
+            )
         time_axis = _TimeAxis()
         for meta, ts_arr, num_arr, disp_list in arrays:
             channel, message_name, message_id, signal_name, unit = meta

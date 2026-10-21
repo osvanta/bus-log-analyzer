@@ -44,7 +44,7 @@ from core.dbc_decoder import (
     source_address_message_name,
 )
 from core.raw_frame_store import FLAG_LIN
-from core.readers.mdf_reader import MDFReader, _channel_failure_text
+from core.readers.mdf_reader import MDFReader, MDFSampleSource, _channel_failure_text
 from core.readers.mdf_recovery import (
     make_bounded_mdf4_copy,
     remove_recovery_copy,
@@ -53,6 +53,181 @@ from core.readers.mdf_recovery import (
 
 class MDFCANReadError(RuntimeError):
     pass
+
+
+#: Raw frame records read per get(): a CAN FD record is up to about 80 bytes.
+_TRACE_CHUNK_RECORDS = 1 << 20
+#: asammdf's read fragment for DBC extraction; see _bus_decode().
+_EXTRACT_FRAGMENT_BYTES = 64 << 20
+
+
+def _record_chunks(source, group_idx, index, group):
+    """Yield the raw records of *group* as Signals, a chunk at a time."""
+    cycles = int(
+        getattr(getattr(group, "channel_group", None), "cycles_nr", 0) or 0
+    )
+    if cycles <= 0:
+        yield source.get(group=group_idx, index=index, raw=True)
+        return
+    for offset in range(0, cycles, _TRACE_CHUNK_RECORDS):
+        yield source.get(
+            group=group_idx,
+            index=index,
+            raw=True,
+            record_offset=offset,
+            record_count=min(_TRACE_CHUNK_RECORDS, cycles - offset),
+        )
+
+
+def _bus_logging_keys(mdf) -> dict[str, list[int]]:
+    """
+    The keys asammdf's ``bus_logging_map`` would have, read a chunk at a time.
+
+    asammdf builds that map while opening a file unless told not to
+    (``process_bus_logging=False``), from per-frame arrays of each whole
+    bus-logging group: for a long log, memory in proportion to it. Only the
+    keys are used here: the CAN bus channels in the data, and (asammdf's own
+    LIN layout) the LIN frame IDs of groups without an attached database.
+    """
+    from asammdf.blocks import v4_constants as v4c
+
+    keys: dict[str, set[int]] = {"CAN": set(), "LIN": set()}
+    for group_idx, group in enumerate(getattr(mdf, "groups", ())):
+        channel_group = getattr(group, "channel_group", None)
+        if channel_group is None or not channel_group.flags & v4c.FLAG_CG_BUS_EVENT:
+            continue
+        source = getattr(channel_group, "acq_source", None)
+        if not source:
+            continue
+        names = [getattr(channel, "name", "") for channel in group.channels]
+        cycles = int(getattr(channel_group, "cycles_nr", 0) or 0)
+        reads = []
+        if (
+            source.bus_type in (v4c.BUS_TYPE_CAN, v4c.BUS_TYPE_OTHER)
+            and "CAN_DataFrame" in names
+        ):
+            reads.append(("CAN", "CAN_DataFrame.BusChannel", None))
+        if (
+            source.bus_type in (v4c.BUS_TYPE_LIN, v4c.BUS_TYPE_OTHER)
+            and "LIN_Frame" in names
+            and group.channels[names.index("LIN_Frame")].attachment is None
+        ):
+            reads.append(("LIN", "LIN_Frame.ID", 0x1FFFFFFF))
+        for bus, channel_name, mask in reads:
+            for offset in range(0, cycles, _TRACE_CHUNK_RECORDS):
+                values = mdf.get(
+                    channel_name,
+                    group=group_idx,
+                    record_offset=offset,
+                    record_count=min(_TRACE_CHUNK_RECORDS, cycles - offset),
+                    samples_only=True,
+                )[0]
+                values = np.unique(values)
+                if mask is not None:
+                    values = np.unique(values.astype("<u4") & mask)
+                keys[bus].update(int(value) for value in values)
+    return {bus: sorted(found) for bus, found in keys.items()}
+
+
+#: SampleCache numbers a DBC-decoded group g as DBC_GROUP_BASE + g, apart from
+#: the recorder-decoded groups of the same file.
+DBC_GROUP_BASE = 1 << 20
+
+
+class _BusDecodeHandles:
+    """What a bus decode hands over: its open decoded MDFs and signal names."""
+
+    def __init__(self, native_source, extracted, recovery_path,
+                 j1939_groups, metadata_by_key) -> None:
+        self.native_source = native_source
+        self.extracted = extracted
+        self.recovery_path = recovery_path
+        self.j1939_groups = j1939_groups
+        self.metadata_by_key = metadata_by_key
+
+    def close(self) -> None:
+        for mdf in (self.extracted, self.native_source):
+            if mdf is not None:
+                try:
+                    mdf.close()
+                except Exception:
+                    pass
+        remove_recovery_copy(self.recovery_path)
+
+
+class BusDecodeSources:
+    """
+    A decoded bus log, left in its files.
+
+    ``signals`` lists ``(group, channel, message_name, message_id,
+    signal_name, unit, sample_count)`` per signal; ``source`` reads the
+    groups for a SampleCache and must be closed.
+    """
+
+    def __init__(self, source: "_JoinedSampleSource", signals: list) -> None:
+        self.source = source
+        self.signals = signals
+
+
+class _JoinedSampleSource:
+    """A bus log's recorder-decoded and DBC-decoded groups as one source."""
+
+    def __init__(self, native, dbc, recovery_path) -> None:
+        self._native = native
+        self._dbc = dbc
+        self._recovery_path = recovery_path
+
+    def _part(self, group: int):
+        if group >= DBC_GROUP_BASE:
+            return self._dbc, group - DBC_GROUP_BASE
+        return self._native, group
+
+    def read_groups(self, group_indices, channel_names=None):
+        results = {}
+        for source, base in ((self._native, 0), (self._dbc, DBC_GROUP_BASE)):
+            mine = [
+                g - base for g in group_indices
+                if (g >= DBC_GROUP_BASE) == (base == DBC_GROUP_BASE)
+            ]
+            if source is None or not mine:
+                continue
+            for (group, name), parts in source.read_groups(mine, channel_names).items():
+                results[(group + base, name)] = parts
+        return results
+
+    def group_bytes(self, group: int) -> int:
+        source, local = self._part(group)
+        return source.group_bytes(local) if source is not None else 0
+
+    def cycles(self, group: int) -> int:
+        source, local = self._part(group)
+        return source.cycles(local) if source is not None else 0
+
+    def master(self, group: int, record_offset: int = 0, record_count=None):
+        source, local = self._part(group)
+        return source.master(local, record_offset, record_count)
+
+    def first_timestamp(self, groups) -> float | None:
+        """The earliest first time stamp of *groups*."""
+        first = None
+        for group in sorted(set(groups)):
+            if self.cycles(group) <= 0:
+                continue
+            try:
+                master = self.master(group, 0, 1)
+            except Exception:
+                continue
+            if len(master):
+                value = float(master[0])
+                first = value if first is None else min(first, value)
+        return first
+
+    def close(self) -> None:
+        for source in (self._native, self._dbc):
+            if source is not None:
+                source.close()
+        remove_recovery_copy(self._recovery_path)
+        self._recovery_path = None
 
 
 class MDFCANReader:
@@ -186,6 +361,89 @@ class MDFCANReader:
         raw_frame_batch=None,
     ):
         """Decode signals and expose raw CAN records through bulk arrays."""
+        yield from self._bus_decode(
+            channel_config, progress, metadata_ready, raw_frame_batch,
+            hand_over=False,
+        )
+
+    def open_decoded_sources(
+        self,
+        channel_config,
+        progress=None,
+        metadata_ready=None,
+        raw_frame_batch=None,
+    ) -> "BusDecodeSources":
+        """
+        Decode as :meth:`iter_decoded_channel_arrays` does, but read nothing back.
+
+        asammdf writes its decoded signals to a temporary file of its own. The
+        returned sources keep that decoded MDF (and any recorder-decoded
+        groups) open for a SampleCache, which reads a signal's group the first
+        time the signal is used. The CAN Trace's frames still arrive through
+        *raw_frame_batch* before this returns.
+        """
+        decode = self._bus_decode(
+            channel_config, progress, metadata_ready, raw_frame_batch,
+            hand_over=True,
+        )
+        handles = next(decode)
+        decode.close()
+        try:
+            return self._lazy_sources(handles, channel_config)
+        except BaseException:
+            handles.close()
+            raise
+
+    def _lazy_sources(self, handles, channel_config) -> "BusDecodeSources":
+        native = (
+            MDFSampleSource(handles.native_source, None, self._record_channel_error)
+            if handles.native_source is not None else None
+        )
+        dbc = (
+            MDFSampleSource(handles.extracted, None, self._record_channel_error)
+            if handles.extracted is not None else None
+        )
+        handles.native_source = handles.extracted = None   # the sources own them
+        signals = []
+        for group_idx, group_name, channels, cycles in (native.groups if native else ()):
+            for _ch_idx, signal_name, unit in channels:
+                signals.append((group_idx, None, group_name, 0, signal_name, unit, cycles))
+        j1939_groups = handles.j1939_groups
+        for group_idx, _name, channels, cycles in (dbc.groups if dbc else ()):
+            if group_idx in j1939_groups and j1939_groups[group_idx] is None:
+                continue
+            for _ch_idx, signal_name, unit in channels:
+                meta = handles.metadata_by_key.get((group_idx, signal_name))
+                if meta is None and group_idx in j1939_groups:
+                    channel, message_name, message_id = j1939_groups[group_idx]
+                elif meta is None:
+                    channel, message_name, message_id = self._decoded_group_metadata(
+                        dbc._mdf, group_idx, signal_name, channel_config
+                    )
+                else:
+                    channel, message_name, message_id, _signal, unit = meta
+                signals.append((
+                    DBC_GROUP_BASE + group_idx, channel, message_name,
+                    message_id, signal_name, unit, cycles,
+                ))
+        return BusDecodeSources(
+            _JoinedSampleSource(native, dbc, handles.recovery_path), signals
+        )
+
+    def _bus_decode(
+        self,
+        channel_config,
+        progress,
+        metadata_ready,
+        raw_frame_batch,
+        hand_over: bool,
+    ):
+        """
+        The decode itself. With *hand_over*, once the signal list is known and
+        the CAN Trace is loaded, yield one _BusDecodeHandles and leave the
+        decoded MDFs open for the caller; otherwise yield the arrays.
+        """
+        handed_over = False
         try:
             import asammdf
         except ImportError as exc:
@@ -214,7 +472,8 @@ class MDFCANReader:
         try:
             try:
                 source = asammdf.MDF(
-                    str(self._path), use_display_names=False
+                    str(self._path), use_display_names=False,
+                    process_bus_logging=False,
                 )
             except Exception as original_exc:
                 recovery_path, warnings = make_bounded_mdf4_copy(self._path)
@@ -222,9 +481,16 @@ class MDFCANReader:
                     raise original_exc
                 self.load_warnings.extend(warnings)
                 source = asammdf.MDF(
-                    str(recovery_path), use_display_names=False
+                    str(recovery_path), use_display_names=False,
+                    process_bus_logging=False,
                 )
             active_path = recovery_path or self._path
+            # asammdf decodes a raw group a fragment at a time, holding a few
+            # times the fragment in memory; its default 256 MB fragment made
+            # that over a gigabyte. A smaller one costs a little time.
+            configure = getattr(source, "configure", None)
+            if configure is not None:
+                configure(read_fragment_size=_EXTRACT_FRAGMENT_BYTES)
 
             # A mixed MDF contains two independent signal sources:
             #
@@ -245,7 +511,9 @@ class MDFCANReader:
                     for group in source.groups
                 )
                 if has_native_groups:
-                    native_source = asammdf.MDF(str(active_path))
+                    native_source = asammdf.MDF(
+                        str(active_path), process_bus_logging=False
+                    )
                     native_metadata_rows = [
                         (None, group_name, 0, signal_name, unit)
                         for group_name, signal_name, unit
@@ -282,9 +550,9 @@ class MDFCANReader:
             # database and the fallback database from both decoding the same bus.
             if channel_config is not None:
                 try:
-                    bus_logging_map = source._mdf.bus_logging_map
+                    bus_logging_map = _bus_logging_keys(source)
                     for bus in (BusType.CAN, BusType.LIN):
-                        discovered = bus_logging_map.get(bus.value, {})
+                        discovered = bus_logging_map.get(bus.value, ())
                         concrete = []
                         for channel in discovered:
                             path = channel_config.dbc_path_for(bus, int(channel))
@@ -372,6 +640,20 @@ class MDFCANReader:
                 # DBC-derived channels are appended under their CAN channel.
                 metadata_ready(native_metadata_rows + dbc_metadata_rows)
 
+            if hand_over:
+                if raw_future is not None:
+                    try:
+                        raw_future.result()
+                    except Exception as exc:
+                        self.raw_trace_error = str(exc)
+                handles = _BusDecodeHandles(
+                    native_source, extracted, recovery_path,
+                    j1939_groups, metadata_by_key,
+                )
+                handed_over = True
+                yield handles
+                return
+
             # Yield the recorder-decoded arrays first.  Their key layout is the
             # established MDFReader layout: CH? / acquisition-group / signal.
             # DBC-decoded arrays follow under CHn / message / signal, so both
@@ -436,18 +718,24 @@ class MDFCANReader:
         finally:
             if raw_executor is not None:
                 raw_executor.shutdown(wait=True, cancel_futures=False)
-            for mdf in (extracted, native_source, source):
+            # Handed over, the decoded MDFs and the recovery copy belong to the
+            # caller; the raw-frame handle is done with either way.
+            for mdf in ((source,) if handed_over else (extracted, native_source, source)):
                 if mdf is not None:
                     try:
                         mdf.close()
                     except Exception:
                         pass
-            remove_recovery_copy(recovery_path)
+            if not handed_over:
+                remove_recovery_copy(recovery_path)
 
     def _load_raw_frame_arrays(self, asammdf, callback) -> int:
         raw_source = None
         try:
-            raw_source = asammdf.MDF(str(self._path), use_display_names=False)
+            raw_source = asammdf.MDF(
+                str(self._path), use_display_names=False,
+                process_bus_logging=False,
+            )
             total = self._emit_raw_frame_arrays(
                 raw_source, callback, self._record_channel_error
             )
@@ -476,60 +764,58 @@ class MDFCANReader:
                 continue
             group_name = MDFReader._group_name(source, group_idx)
             try:
-                signal = source.get(
-                    group=group_idx,
-                    index=parent_idx,
-                    raw=True,
-                )
-                samples = np.asarray(signal.samples)
-                field_names = samples.dtype.names or ()
+                # A chunk of records at a time: a group can hold every
+                # frame of a long log, far more than fits in memory.
+                for signal in _record_chunks(source, group_idx, parent_idx, group):
+                    samples = np.asarray(signal.samples)
+                    field_names = samples.dtype.names or ()
 
-                def field(suffix, required=True):
-                    exact = f"CAN_DataFrame.{suffix}"
-                    name = exact if exact in field_names else next(
-                        (item for item in field_names if item.endswith(f".{suffix}")),
-                        None,
+                    def field(suffix, required=True):
+                        exact = f"CAN_DataFrame.{suffix}"
+                        name = exact if exact in field_names else next(
+                            (item for item in field_names if item.endswith(f".{suffix}")),
+                            None,
+                        )
+                        if name is None:
+                            if required:
+                                raise MDFCANReadError(
+                                    f"Raw CAN channel '{exact}' is missing from "
+                                    f"group {group_idx}."
+                                )
+                            return None
+                        return samples[name]
+
+                    timestamps = np.asarray(signal.timestamps, dtype=np.float64)
+                    channels = field("BusChannel")
+                    arb_ids = field("ID")
+                    data_rows = field("DataBytes")
+                    data_lengths = field("DataLength", required=False)
+                    if data_lengths is None:
+                        data_lengths = field("DLC")
+                    directions = field("Dir", required=False)
+                    if directions is None:
+                        directions = np.full(len(samples), 2, dtype=np.uint8)
+                    ide = field("IDE", required=False)
+                    if ide is None:
+                        ide = np.asarray(arb_ids, dtype=np.uint32) > 0x7FF
+                    edl = field("EDL", required=False)
+                    if edl is None:
+                        edl = np.zeros(len(samples), dtype=np.uint8)
+                    flags = (
+                        (np.asarray(ide, dtype=np.uint8) & np.uint8(1))
+                        | ((np.asarray(edl, dtype=np.uint8) & np.uint8(1)) << np.uint8(1))
                     )
-                    if name is None:
-                        if required:
-                            raise MDFCANReadError(
-                                f"Raw CAN channel '{exact}' is missing from "
-                                f"group {group_idx}."
-                            )
-                        return None
-                    return samples[name]
 
-                timestamps = np.asarray(signal.timestamps, dtype=np.float64)
-                channels = field("BusChannel")
-                arb_ids = field("ID")
-                data_rows = field("DataBytes")
-                data_lengths = field("DataLength", required=False)
-                if data_lengths is None:
-                    data_lengths = field("DLC")
-                directions = field("Dir", required=False)
-                if directions is None:
-                    directions = np.full(len(samples), 2, dtype=np.uint8)
-                ide = field("IDE", required=False)
-                if ide is None:
-                    ide = np.asarray(arb_ids, dtype=np.uint32) > 0x7FF
-                edl = field("EDL", required=False)
-                if edl is None:
-                    edl = np.zeros(len(samples), dtype=np.uint8)
-                flags = (
-                    (np.asarray(ide, dtype=np.uint8) & np.uint8(1))
-                    | ((np.asarray(edl, dtype=np.uint8) & np.uint8(1)) << np.uint8(1))
-                )
-
-                callback(
-                    timestamps,
-                    channels,
-                    arb_ids,
-                    data_lengths,
-                    directions,
-                    flags,
-                    data_rows,
-                )
-                total += len(timestamps)
+                    callback(
+                        timestamps,
+                        channels,
+                        arb_ids,
+                        data_lengths,
+                        directions,
+                        flags,
+                        data_rows,
+                    )
+                    total += len(timestamps)
             except Exception as exc:
                 if channel_error is None:
                     raise
@@ -562,59 +848,57 @@ class MDFCANReader:
                 continue
             group_name = MDFReader._group_name(source, group_idx)
             try:
-                signal = source.get(
-                    group=group_idx,
-                    index=parent_idx,
-                    raw=True,
-                )
-                samples = np.asarray(signal.samples)
-                field_names = samples.dtype.names or ()
+                # A chunk of records at a time: a group can hold every
+                # frame of a long log, far more than fits in memory.
+                for signal in _record_chunks(source, group_idx, parent_idx, group):
+                    samples = np.asarray(signal.samples)
+                    field_names = samples.dtype.names or ()
 
-                def field(suffix, required=True):
-                    exact = f"LIN_Frame.{suffix}"
-                    name = exact if exact in field_names else next(
-                        (item for item in field_names if item.endswith(f".{suffix}")),
-                        None,
+                    def field(suffix, required=True):
+                        exact = f"LIN_Frame.{suffix}"
+                        name = exact if exact in field_names else next(
+                            (item for item in field_names if item.endswith(f".{suffix}")),
+                            None,
+                        )
+                        if name is None:
+                            if required:
+                                raise MDFCANReadError(
+                                    f"Raw LIN channel '{exact}' is missing from "
+                                    f"group {group_idx}."
+                                )
+                            return None
+                        return samples[name]
+
+                    timestamps = np.asarray(signal.timestamps, dtype=np.float64)
+                    arb_ids = field("ID")
+                    data_rows = field("DataBytes")
+                    count = len(timestamps)
+
+                    channels = field("BusChannel", required=False)
+                    if channels is None:
+                        # Single-bus recorders may omit BusChannel entirely.
+                        channels = np.ones(count, dtype=np.uint8)
+                    data_lengths = field("DataLength", required=False)
+                    if data_lengths is None:
+                        data_lengths = field("ReceivedDataByteCount", required=False)
+                    if data_lengths is None:
+                        data_lengths = np.full(count, 8, dtype=np.uint8)
+                    directions = field("Dir", required=False)
+                    if directions is None:
+                        directions = np.full(count, 2, dtype=np.uint8)
+
+                    flags = np.full(count, FLAG_LIN, dtype=np.uint8)
+
+                    callback(
+                        timestamps,
+                        channels,
+                        arb_ids,
+                        data_lengths,
+                        directions,
+                        flags,
+                        data_rows,
                     )
-                    if name is None:
-                        if required:
-                            raise MDFCANReadError(
-                                f"Raw LIN channel '{exact}' is missing from "
-                                f"group {group_idx}."
-                            )
-                        return None
-                    return samples[name]
-
-                timestamps = np.asarray(signal.timestamps, dtype=np.float64)
-                arb_ids = field("ID")
-                data_rows = field("DataBytes")
-                count = len(timestamps)
-
-                channels = field("BusChannel", required=False)
-                if channels is None:
-                    # Single-bus recorders may omit BusChannel entirely.
-                    channels = np.ones(count, dtype=np.uint8)
-                data_lengths = field("DataLength", required=False)
-                if data_lengths is None:
-                    data_lengths = field("ReceivedDataByteCount", required=False)
-                if data_lengths is None:
-                    data_lengths = np.full(count, 8, dtype=np.uint8)
-                directions = field("Dir", required=False)
-                if directions is None:
-                    directions = np.full(count, 2, dtype=np.uint8)
-
-                flags = np.full(count, FLAG_LIN, dtype=np.uint8)
-
-                callback(
-                    timestamps,
-                    channels,
-                    arb_ids,
-                    data_lengths,
-                    directions,
-                    flags,
-                    data_rows,
-                )
-                total += count
+                    total += count
             except Exception as exc:
                 if channel_error is None:
                     raise

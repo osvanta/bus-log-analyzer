@@ -90,6 +90,11 @@ _COLUMN_TYPECODES = (
     ('directions', 'B'), ('flags', 'B'), ('name_ids', 'H'),
 )
 
+#: Rows sort_by_time() merges per block, and the most time-ordered runs it
+#: merges; a column in more runs than that is sorted in one piece.
+_MERGE_BLOCK_ROWS = 1 << 20
+_MAX_MERGE_RUNS = 4096
+
 _FILE_PREFIX = 'osvanta_'
 _FILE_SUFFIX = '.rawdata'
 
@@ -430,19 +435,22 @@ class RawFrameStore:
         ):
             raise ValueError("Raw frame NumPy columns have different lengths")
 
-        def extend_column(target, values, dtype) -> None:
+        columns = []
+        for (_name, dtype), values in zip(
+            _COLUMN_DTYPES,
+            (timestamps, channels, arb_ids, dlcs, directions, flags),
+        ):
             column = np.ascontiguousarray(values, dtype=dtype).reshape(-1)
             if len(column) != count:
                 raise ValueError("Raw frame NumPy column has an invalid shape")
-            target.frombytes(column.tobytes())
-
-        extend_column(self.timestamps, timestamps, np.float64)
-        extend_column(self.channels, channels, np.uint8)
-        extend_column(self.arb_ids, arb_ids, np.uint32)
-        extend_column(self.dlcs, dlcs, np.uint8)
-        extend_column(self.directions, directions, np.uint8)
-        extend_column(self.flags, flags, np.uint8)
-        self.name_ids.frombytes(bytes(count * self.name_ids.itemsize))
+            columns.append(column)
+        if self._file_columns is not None or not len(self.timestamps):
+            # Straight to the column files, as append_raw_batch() does.
+            self._write_columns(count, columns)
+        else:
+            for (name, _dtype), column in zip(_COLUMN_DTYPES, columns):
+                getattr(self, name).frombytes(column.tobytes())
+            self.name_ids.frombytes(bytes(count * self.name_ids.itemsize))
 
         payload = np.asarray(data_rows, dtype=np.uint8)
         if payload.ndim == 1:
@@ -480,7 +488,7 @@ class RawFrameStore:
         if self._sealed:
             raise RuntimeError("sort_by_time() must be called before seal()")
         if self._file_columns is not None:
-            raise RuntimeError("sort_by_time() sorts the in-memory columns only")
+            return self._merge_by_time()
         self._materialize()
         count = len(self.timestamps)
         timestamps = np.frombuffer(self.timestamps, dtype=np.float64)
@@ -522,6 +530,93 @@ class RawFrameStore:
         self._data_file.close()     # which deletes the unsorted copy
         self._data_file, self._data_path = data_file, path
         return True
+
+    def _merge_by_time(self) -> bool:
+        """
+        :meth:`sort_by_time` for columns in files, in bounded memory.
+
+        The rows arrive as runs already in time order (one per MDF channel
+        group, typically). The runs are merged a block at a time: each block
+        takes every remaining row up to a time stamp, from every run, and puts
+        them in (time, row) order, which is what a stable sort of the whole
+        column gives. A column with too many runs to merge is sorted whole.
+        """
+        from core.sample_file import AppendColumn
+
+        self._data_file.flush()
+        mapped = {name: column.mapped() for name, column in self._file_columns.items()}
+        timestamps = mapped['timestamps']
+        count = len(timestamps)
+        starts = [0]
+        for start in range(0, max(count - 1, 0), _MERGE_BLOCK_ROWS):
+            stop = min(count, start + _MERGE_BLOCK_ROWS + 1)
+            chunk = timestamps[start:stop]
+            starts.extend((np.flatnonzero(chunk[1:] < chunk[:-1]) + start + 1).tolist())
+        if len(starts) == 1:
+            return False
+        ends = starts[1:] + [count]
+        if len(starts) > _MAX_MERGE_RUNS:
+            # Too fragmented to merge: one sort, the order in memory.
+            blocks = [np.argsort(timestamps, kind='stable')]
+        else:
+            blocks = self._merge_blocks(timestamps, starts, ends)
+
+        data_file, path = _create_data_file()
+        sorted_columns = {
+            name: AppendColumn(column.dtype) for name, column in mapped.items()
+        }
+        try:
+            source = mmap.mmap(self._data_file.fileno(), length=count * _DATA_BYTES,
+                               access=mmap.ACCESS_READ)
+            rows = None
+            try:
+                rows = np.frombuffer(source, dtype=np.uint8).reshape(count, _DATA_BYTES)
+                for block in blocks:
+                    for start in range(0, len(block), _MERGE_BLOCK_ROWS):
+                        part = block[start:start + _MERGE_BLOCK_ROWS]
+                        for name, column in mapped.items():
+                            sorted_columns[name].extend(column[part])
+                        data_file.write(memoryview(rows[part]))
+            finally:
+                del rows        # the view must go before the map can close
+                source.close()
+        except BaseException:
+            data_file.close()       # which deletes it
+            for column in sorted_columns.values():
+                column.close()
+            raise
+
+        del mapped, timestamps
+        for column in self._file_columns.values():
+            column.close()          # its file goes once nothing maps it
+        self._file_columns = sorted_columns
+        self._data_file.close()     # which deletes the unsorted copy
+        self._data_file, self._data_path = data_file, path
+        return True
+
+    @staticmethod
+    def _merge_blocks(timestamps, starts, ends):
+        """Yield the merged row order of the time-ordered runs, block by block."""
+        heads = list(starts)
+        while True:
+            active = [r for r in range(len(heads)) if heads[r] < ends[r]]
+            if not active:
+                return
+            step = max(1, _MERGE_BLOCK_ROWS // len(active))
+            # No run gives more than *step* rows below this time, unless they
+            # tie with it; every row at this time goes into this block.
+            limit = min(
+                timestamps[min(heads[r] + step, ends[r]) - 1] for r in active
+            )
+            parts = []
+            for r in active:
+                run = timestamps[heads[r]:ends[r]]
+                taken = int(np.searchsorted(run, limit, side='right'))
+                if taken:
+                    parts.append(np.arange(heads[r], heads[r] + taken, dtype=np.int64))
+                    heads[r] += taken
+            block = np.concatenate(parts)
+            yield block[np.argsort(timestamps[block], kind='stable')]
 
     def seal(self) -> None:
         """
