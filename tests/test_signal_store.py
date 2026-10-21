@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from core.models import DecodedSignalSample
-from core.bus_types import BusType
+from core.bus_types import BusType, store_key_prefix
 from core.signal_store import SignalStore, SignalSeries
 
 
@@ -107,6 +107,44 @@ def test_add_series_bulk_empty_is_noop(signal_store):
         timestamps=ts, values=vals, raw_values=[], has_labels=False,
     )
     assert signal_store.get_series("CH1::EngineControl::EngSpeed") is None
+
+
+def _bulk(store, signal_name, ts, vals):
+    store.add_series_bulk(
+        channel=None, message_name="Group", message_id=0,
+        signal_name=signal_name, unit="",
+        timestamps=ts, values=vals, raw_values=[], has_labels=False,
+    )
+    return store.get_series(f"{store_key_prefix(None)}::Group::{signal_name}")
+
+
+def test_add_series_bulk_shares_a_repeated_time_axis(signal_store):
+    ts = np.array([0.0, 0.1, 0.2])
+    a = _bulk(signal_store, "A", ts, np.array([1.0, 2.0, 3.0]))
+    b = _bulk(signal_store, "B", ts, np.array([4.0, 5.0, 6.0]))
+    c = _bulk(signal_store, "C", ts.copy(), np.array([7.0, 8.0, 9.0]))
+
+    assert b.timestamps is a.timestamps
+    assert c.timestamps is not a.timestamps
+    assert list(b.values) == [4.0, 5.0, 6.0]
+    assert signal_store.total_samples == 9
+
+
+def test_appending_to_a_shared_time_axis_leaves_the_others_alone(signal_store):
+    ts = np.array([0.0, 0.1])
+    a = _bulk(signal_store, "A", ts, np.array([1.0, 2.0]))
+    b = _bulk(signal_store, "B", ts, np.array([3.0, 4.0]))
+
+    _bulk(signal_store, "A", np.array([0.2, 0.3]), np.array([5.0, 6.0]))
+    signal_store.add_samples_direct([DecodedSignalSample(
+        timestamp=0.5, channel=None, message_id=0, message_name="Group",
+        signal_name="B", value=7.0, unit="", is_extended_id=False,
+        direction="Rx", numeric_value=7.0,
+    )])
+
+    assert list(a.timestamps) == [0.0, 0.1, 0.2, 0.3]
+    assert list(b.timestamps) == [0.0, 0.1, 0.5]
+    assert len(a.timestamps) == len(a.values)
 
 
 # ── numpy helpers on SignalSeries ──────────────────────────────────────────

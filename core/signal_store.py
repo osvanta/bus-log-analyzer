@@ -31,6 +31,11 @@ from core.models import DecodedSignalSample
 as_channel_key = coerce_channel_key
 
 
+def _byte_view(arr) -> memoryview:
+    """Return *arr* as float64 bytes, without copying when it already is."""
+    return memoryview(np.ascontiguousarray(arr, dtype=np.float64)).cast("B")
+
+
 @dataclass(slots=True)
 class SignalSeries:
     channel: BusChannel | None
@@ -103,6 +108,12 @@ class SignalStore:
         # Series whose bulk inserts arrived out of time order; see
         # sort_merged_series().
         self._unsorted_keys: set[str] = set()
+        # Channels of one MDF group share one time axis. The last bulk insert's
+        # source array and its stored copy let the next channel on the same
+        # axis reuse that copy instead of storing the timestamps again; the
+        # keys in _shared_ts_keys copy their timestamps before appending.
+        self._last_bulk_ts: tuple[np.ndarray, _array.array, str] | None = None
+        self._shared_ts_keys: set[str] = set()
         self.total_frames    = 0
         self.decoded_frames  = 0
         self.total_samples   = 0
@@ -196,6 +207,8 @@ class SignalStore:
                     sigs.append(sample.signal_name)
                 self._tree_dirty = True
             series = self._series_by_key[key]
+            if key in self._shared_ts_keys:
+                self._own_timestamps(key, series)
             series.timestamps.append(sample.timestamp)
             if series.has_labels:
                 series.raw_values.append(sample.value)
@@ -276,6 +289,8 @@ class SignalStore:
                 if sig_name not in sigs_for_msg:
                     sigs_for_msg.append(sig_name)
                 self._tree_dirty = True
+            elif str_key in self._shared_ts_keys:
+                self._own_timestamps(str_key, series)
             series_list.append(series)
         self._msg_series_cache[(channel, msg_name)] = series_list
         return series_list
@@ -295,8 +310,10 @@ class SignalStore:
         """
         Insert a complete channel time-series in one bulk operation.
 
-        Uses ``array.array.frombytes(ndarray.tobytes())`` which is a single
-        C-level memcopy — no per-sample Python loop, no temporary list.
+        Uses ``array.array.frombytes(ndarray)`` which is a single C-level
+        memcopy — no per-sample Python loop, no temporary list. A new series
+        whose *timestamps* is the very array the previous insert received
+        (the channels of one MDF group) shares that series' stored copy.
         Called by the LoadWorker MDF/CSV fast path and the BLF/ASC vectorised
         decode path.
 
@@ -311,7 +328,8 @@ class SignalStore:
                      the series is treated as plain numeric and consumers fall
                      back to ``values[idx]`` for display.
         """
-        if len(timestamps) == 0:
+        n = len(timestamps)
+        if n == 0:
             return
 
         channel = as_channel_key(channel)
@@ -334,12 +352,23 @@ class SignalStore:
             series = self._series_by_key[key]
             if series.timestamps and timestamps[0] < series.timestamps[-1]:
                 self._unsorted_keys.add(key)
+            if key in self._shared_ts_keys:
+                self._own_timestamps(key, series)
+            # The recorded copy may be the one about to grow.
+            self._last_bulk_ts = None
 
-        # C-level memcopy — no Python loop, no object allocation per sample
-        ts_bytes  = np.asarray(timestamps, dtype=np.float64).tobytes()
-        val_bytes = np.asarray(values,     dtype=np.float64).tobytes()
-        series.timestamps.frombytes(ts_bytes)
-        series.values.frombytes(val_bytes)
+        # C-level memcopy straight from the array buffer — no Python loop,
+        # no intermediate bytes object the size of the series.
+        last = self._last_bulk_ts
+        if not series.timestamps and last is not None and last[0] is timestamps:
+            series.timestamps = last[1]
+            self._shared_ts_keys.add(key)
+            self._shared_ts_keys.add(last[2])
+        else:
+            series.timestamps.frombytes(_byte_view(timestamps))
+            if len(series.timestamps) == n and isinstance(timestamps, np.ndarray):
+                self._last_bulk_ts = (timestamps, series.timestamps, key)
+        series.values.frombytes(_byte_view(values))
         if has_labels and raw_values:
             if not series.raw_values and not isinstance(raw_values, list):
                 # MDF native extraction supplies a lazy text sequence so the
@@ -350,11 +379,16 @@ class SignalStore:
                     series.raw_values = list(series.raw_values)
                 series.raw_values.extend(raw_values)
 
-        n = len(timestamps)
         self.total_samples  += n
         self.decoded_frames += 1        # one "frame" per bulk channel insert
         self.channels.add(channel)
         self.message_hits[(channel, message_name)] += n
+
+    def _own_timestamps(self, key: str, series: SignalSeries) -> None:
+        """Give *series* its own timestamps before they are appended to."""
+        # Appending in place would change every series sharing the array.
+        series.timestamps = _array.array("d", series.timestamps)
+        self._shared_ts_keys.discard(key)
 
     def sort_merged_series(self) -> int:
         """
@@ -367,6 +401,8 @@ class SignalStore:
         timestamps, which only works when they increase. Returns the number
         of series reordered.
         """
+        # Every bulk loader ends here; stop holding the last source array.
+        self._last_bulk_ts = None
         reordered = 0
         for key in self._unsorted_keys:
             series = self._series_by_key.get(key)

@@ -123,6 +123,35 @@ def _group_frames(combined):
     return sort_idx, boundaries
 
 
+class _TimeAxis:
+    """
+    Normalise channel timestamps, reusing the result for a repeated axis.
+
+    asammdf returns a separate timestamp array for every channel, even for
+    the channels of one group that share a time axis. Handing the store the
+    same normalised array for those lets it keep one copy per group instead
+    of one per channel, which for a large MF4 is most of the timestamp memory.
+    """
+
+    __slots__ = ("_source", "_normalised")
+
+    def __init__(self) -> None:
+        self._source = None
+        self._normalised = None
+
+    def normalise(self, ts_arr, base_ts: float):
+        import numpy as np
+        source = self._source
+        if source is not None and (
+            ts_arr is source
+            or (len(ts_arr) == len(source) and np.array_equal(ts_arr, source))
+        ):
+            return self._normalised
+        self._source = ts_arr
+        self._normalised = ts_arr - base_ts
+        return self._normalised
+
+
 class LoadWorker(QObject):
     """
     Background worker that reads any measurement file and populates a SignalStore.
@@ -941,7 +970,12 @@ class LoadWorker(QObject):
             np.frombuffer(
                 recovered_store.timestamps, dtype=np.float64
             )[:] += shift
+            # Series of one group can share a timestamp array; shift it once.
+            shifted: set[int] = set()
             for series in store._series_by_key.values():
+                if id(series.timestamps) in shifted:
+                    continue
+                shifted.add(id(series.timestamps))
                 series.numpy_timestamps()[:] += shift
         store.base_ts = global_base_ts
         return global_base_ts
@@ -1209,6 +1243,7 @@ class LoadWorker(QObject):
         self.progress.emit(
             f"Bulk importing {total:,} decoded signal arrays into memory..."
         )
+        time_axis = _TimeAxis()
         for meta, ts_arr, num_arr, disp_list in arrays:
             channel, message_name, message_id, signal_name, unit = meta
             store.add_series_bulk(
@@ -1217,7 +1252,7 @@ class LoadWorker(QObject):
                 message_id=message_id,
                 signal_name=signal_name,
                 unit=unit,
-                timestamps=ts_arr - base_ts,
+                timestamps=time_axis.normalise(ts_arr, base_ts),
                 values=num_arr,
                 raw_values=disp_list,
                 has_labels=bool(disp_list),
@@ -1296,6 +1331,7 @@ class LoadWorker(QObject):
         else:
             array_iter = reader.iter_channel_arrays()
 
+        time_axis = _TimeAxis()
         for (grp_name, ch_name, unit), ts_arr, num_arr, disp_list in \
                 array_iter:
             ch_count += 1
@@ -1305,7 +1341,7 @@ class LoadWorker(QObject):
             if base_ts is None:
                 base_ts = float(ts_arr[0])
                 store.base_ts = base_ts
-            ts_norm    = ts_arr - base_ts
+            ts_norm    = time_axis.normalise(ts_arr, base_ts)
             has_labels = len(disp_list) > 0
             store.add_series_bulk(
                 channel=None, message_name=grp_name, message_id=0,

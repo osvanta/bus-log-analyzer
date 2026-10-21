@@ -180,6 +180,56 @@ def test_extracted_bus_arrays_use_two_global_selects():
     assert list(rows[1][4]) == ["Off", "On"]
 
 
+def test_batched_select_reads_large_files_a_few_groups_at_a_time(monkeypatch):
+    import core.readers.mdf_reader as mdf_reader
+
+    # 100 cycles of 92 record bytes + an 8-byte time stamp: 10 kB per group.
+    monkeypatch.setattr(mdf_reader, "_SELECT_BATCH_BYTES", 25_000)
+    groups = [
+        SimpleNamespace(
+            channels=[SimpleNamespace(name=f"Signal{i}", channel_type=0)],
+            channel_group=SimpleNamespace(
+                acq_name=f"Group{i}", cycles_nr=100, samples_byte_nr=92,
+                invalidation_bytes_nr=0,
+            ),
+        )
+        for i in range(5)
+    ]
+    select_calls = []
+
+    class _MDF:
+        def __init__(self):
+            self.groups = groups
+
+        def select(self, specs, raw=False):
+            select_calls.append([group for _name, group, _index in specs])
+            if len(select_calls) == 2:
+                raise ValueError("select failed")
+            return [
+                SimpleNamespace(
+                    timestamps=np.array([0.0, 1.0]),
+                    samples=np.array([float(group), 0.0]),
+                    unit="",
+                )
+                for _name, group, _index in specs
+            ]
+
+        def get(self, name, group, index, raw=False):
+            return SimpleNamespace(
+                timestamps=np.array([0.0, 1.0]),
+                samples=np.array([float(group), 0.0]),
+                unit="",
+            )
+
+    rows = list(MDFReader._iter_arrays(_MDF(), batch_all_groups=True))
+
+    # Two groups per select; the failed second batch falls back to its own
+    # groups only, one select per group, and the last batch is selected whole.
+    assert select_calls == [[0, 1], [2, 3], [2], [3], [4]]
+    assert [row[0][0] for row in rows] == [f"Group{i}" for i in range(5)]
+    assert [row[2][0] for row in rows] == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
 def test_signal_metadata_callback_precedes_sample_array_read(tmp_path, monkeypatch):
     events = []
     signal = SimpleNamespace(
@@ -688,3 +738,30 @@ def test_predecoded_mdf_avoids_incremental_tree_rebuild_queue(tmp_path):
     assert len(tree_payloads[0][None]["Status"]) == 25
     assert len(partial_updates) == 1
     assert len(store.all_keys()) == 25
+
+
+def test_predecoded_mdf_stores_one_time_axis_per_group(tmp_path):
+    class _Reader:
+        metadata_first_arrays = True
+        source_description = "decoded MF4"
+
+        def iter_channel_arrays(self, metadata_ready=None, batch_all_groups=False):
+            metadata_ready([])
+            # asammdf hands every channel its own copy of the group's axis.
+            for group, start in (("Fast", 10.0), ("Slow", 10.5)):
+                for i in range(2):
+                    yield (
+                        (group, f"{group}{i}", ""),
+                        np.array([start, start + 1.0]),
+                        np.array([float(i), 2.0]),
+                        [],
+                    )
+
+    store = SignalStore()
+    LoadWorker(tmp_path / "decoded.mf4")._run_bulk_array(_Reader(), store)
+
+    series = [store.get_series(key) for key in store.all_keys()]
+    assert len(series) == 4
+    assert len({id(s.timestamps) for s in series}) == 2
+    for s in series:
+        assert list(s.timestamps) in ([0.0, 1.0], [0.5, 1.5])
