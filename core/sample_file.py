@@ -115,3 +115,65 @@ class SampleFile:
             self._file.close()
         except OSError:
             pass
+
+
+class AppendColumn:
+    """
+    One typed column appended to its own temporary file, then mapped.
+
+    The CAN Trace's frame index (time, channel, ID, ...) grows by a few bytes
+    per frame; written here batch by batch instead of held in the heap, it
+    costs no memory while a measurement is read, and once mapped it costs no
+    commit while the measurement is open. Same delete-on-close file and name
+    as the CAN Trace's data file.
+    """
+
+    def __init__(self, dtype) -> None:
+        self.dtype = np.dtype(dtype)
+        self._file, self.path = _create_data_file()
+        self.count = 0
+        self._map: mmap.mmap | None = None
+
+    def extend(self, values) -> None:
+        column = np.ascontiguousarray(values, dtype=self.dtype).reshape(-1)
+        if len(column):
+            self._file.write(memoryview(column).cast("B"))
+            self.count += len(column)
+
+    def mapped(self) -> np.ndarray:
+        """A writable view of the whole column; further extends are refused."""
+        if self._map is None and self.count:
+            self._file.flush()
+            self._map = mmap.mmap(
+                self._file.fileno(), self.count * self.dtype.itemsize,
+                access=mmap.ACCESS_WRITE,
+            )
+        if self._map is None:
+            return np.empty(0, dtype=self.dtype)
+        return np.frombuffer(self._map, dtype=self.dtype, count=self.count)
+
+    def close(self) -> None:
+        """Close the file; a mapped view stays valid and the file goes with it."""
+        self._map = None
+        try:
+            self._file.close()
+        except OSError:
+            pass
+
+
+def scratch_array(count: int, dtype, heap_limit: int = 64 * 1024 * 1024) -> np.ndarray:
+    """
+    A writable work array: in the heap when small, file-backed when large.
+
+    For per-frame working arrays of a decode (a sort order, say) that would
+    otherwise take memory in proportion to the measurement.
+    """
+    dtype = np.dtype(dtype)
+    if count * dtype.itemsize <= heap_limit:
+        return np.empty(count, dtype=dtype)
+    column = AppendColumn(dtype)
+    column._file.truncate(count * dtype.itemsize)
+    column.count = count
+    view = column.mapped()
+    column.close()
+    return view

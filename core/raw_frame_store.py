@@ -78,6 +78,18 @@ _LARGE_STORE_LIMIT = 500_000     # frames; disable data-hex search above this
 
 _DIR_STRINGS = ['Rx', 'Tx', 'Unknown']
 
+#: The columns append_raw_batch() receives, in its argument order, and their
+#: types; name_ids (uint16) follows them.
+_COLUMN_DTYPES = (
+    ('timestamps', np.float64), ('channels', np.uint8), ('arb_ids', np.uint32),
+    ('dlcs', np.uint8), ('directions', np.uint8), ('flags', np.uint8),
+)
+
+_COLUMN_TYPECODES = (
+    ('timestamps', 'd'), ('channels', 'B'), ('arb_ids', 'I'), ('dlcs', 'B'),
+    ('directions', 'B'), ('flags', 'B'), ('name_ids', 'H'),
+)
+
 _FILE_PREFIX = 'osvanta_'
 _FILE_SUFFIX = '.rawdata'
 
@@ -193,6 +205,11 @@ class RawFrameStore:
         self._pending: list[list] = []
         self._pending_rows = 0
 
+        # Batches from append_raw_batch() go straight to one temporary file
+        # per column (core.sample_file.AppendColumn), and seal() maps every
+        # column, so the frame index costs no memory however many frames.
+        self._file_columns: dict[str, object] | None = None
+
         # Pre-allocated 64-byte buffer for zero-copy disk writes (Bottleneck 2).
         # Re-used on every append_raw() call — no per-frame bytes() allocation.
         self._write_buf: bytearray = bytearray(_DATA_BYTES)
@@ -304,7 +321,11 @@ class RawFrameStore:
             raise ValueError("Raw frame batch columns have different lengths")
 
         columns = [timestamps, channels, arb_ids, dlcs, directions, flags]
-        if all(isinstance(values, np.ndarray) for values in columns):
+        if self._file_columns is not None or (
+            not len(self.timestamps) and not self._pending
+        ):
+            self._write_columns(count, columns)
+        elif all(isinstance(values, np.ndarray) for values in columns):
             self._pending.append(columns)
             self._pending_rows += count
         else:
@@ -324,6 +345,40 @@ class RawFrameStore:
             extend_column(self.flags, flags)
             self.name_ids.frombytes(bytes(count * self.name_ids.itemsize))
         self._data_file.write(memoryview(data_block)[:count * _DATA_BYTES])
+
+    def _write_columns(self, count: int, columns) -> None:
+        """Append one batch to the column files, creating them on first use."""
+        from core.sample_file import AppendColumn
+
+        if self._file_columns is None:
+            self._file_columns = {
+                name: AppendColumn(dtype)
+                for name, dtype in (*_COLUMN_DTYPES, ('name_ids', np.uint16))
+            }
+        for (name, dtype), values in zip(_COLUMN_DTYPES, columns):
+            if isinstance(values, (bytes, bytearray, memoryview)):
+                values = np.frombuffer(values, dtype=dtype)
+            self._file_columns[name].extend(values)
+        self._file_columns['name_ids'].extend(np.zeros(count, dtype=np.uint16))
+
+    def _map_columns(self) -> None:
+        """Put every column in its file and keep a mapped view of it."""
+        from core.sample_file import AppendColumn
+
+        if self._file_columns is None:
+            if not len(self.timestamps):
+                return
+            # Built in memory (one frame at a time, or MDF bus logging):
+            # moved to the files now, so the open measurement holds no index.
+            self._file_columns = {}
+            for name, dtype in (*_COLUMN_DTYPES, ('name_ids', np.uint16)):
+                column = AppendColumn(dtype)
+                column.extend(np.frombuffer(getattr(self, name), dtype=dtype))
+                self._file_columns[name] = column
+        for name, column in self._file_columns.items():
+            setattr(self, name, column.mapped())
+            column.close()
+        self._file_columns = None
 
     def _materialize(self) -> None:
         """Join the NumPy batches held by append_raw_batch() into the columns."""
@@ -424,6 +479,8 @@ class RawFrameStore:
         """
         if self._sealed:
             raise RuntimeError("sort_by_time() must be called before seal()")
+        if self._file_columns is not None:
+            raise RuntimeError("sort_by_time() sorts the in-memory columns only")
         self._materialize()
         count = len(self.timestamps)
         timestamps = np.frombuffer(self.timestamps, dtype=np.float64)
@@ -478,6 +535,7 @@ class RawFrameStore:
         self._sealed = True
         if self._data_file:
             self._data_file.flush()
+        self._map_columns()
         n = len(self.timestamps)
         if n == 0:
             return
@@ -492,7 +550,8 @@ class RawFrameStore:
             self._mmap = None   # fallback: read via file.seek/read
 
     def __len__(self) -> int:
-        return len(self.timestamps) + self._pending_rows
+        written = 0 if self._file_columns is None else self._file_columns['timestamps'].count
+        return len(self.timestamps) + self._pending_rows + written
 
     def close(self) -> None:
         """Release mmap and delete temp file.
@@ -514,6 +573,14 @@ class RawFrameStore:
                 pass
             self._data_file = None
         self._data_path = None
+        # The mapped columns hold their files open; empty ones let them go.
+        for name, typecode in _COLUMN_TYPECODES:
+            if not isinstance(getattr(self, name, None), _array.array):
+                setattr(self, name, _array.array(typecode))
+        if self._file_columns is not None:
+            for column in self._file_columns.values():
+                column.close()
+            self._file_columns = None
 
     def __del__(self) -> None:
         self.close()
@@ -532,20 +599,20 @@ class RawFrameStore:
             if idx < 0 or idx >= n:
                 continue
 
-            # In-memory metadata
-            ts  = self.timestamps[idx]
-            raw_ch = self.channels[idx]
+            # Mapped metadata, as plain Python numbers
+            ts  = float(self.timestamps[idx])
+            raw_ch = int(self.channels[idx])
             ch  = raw_ch if raw_ch != 255 else None
-            aid = self.arb_ids[idx]
-            dlc = self.dlcs[idx]
-            fl  = self.flags[idx]
-            nid = self.name_ids[idx]
+            aid = int(self.arb_ids[idx])
+            dlc = int(self.dlcs[idx])
+            fl  = int(self.flags[idx])
+            nid = int(self.name_ids[idx])
 
             is_extended = bool(fl & FLAG_EXTENDED)
             is_fd       = bool(fl & FLAG_FD)
             decoded     = bool(fl & FLAG_DECODED)
             bus         = BusType.LIN if fl & FLAG_LIN else BusType.CAN
-            direction   = _DIR_STRINGS[min(self.directions[idx], 2)]
+            direction   = _DIR_STRINGS[min(int(self.directions[idx]), 2)]
             name        = self.name_table[nid] if nid < len(self.name_table) else ''
 
             # Disk data

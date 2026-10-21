@@ -54,7 +54,7 @@ class ChoiceLabels:
     store keeps them.
     """
 
-    __slots__ = ("_values", "_lut", "_valid")
+    __slots__ = ("_values", "_lut", "_valid", "_count")
 
     _CHUNK = 65_536
 
@@ -62,6 +62,19 @@ class ChoiceLabels:
         self._values = values
         self._lut = lut          # object array: label per integer value
         self._valid = valid      # bool array: whether that value has a label
+        self._count = None
+
+    @classmethod
+    def unbound(cls, lut: np.ndarray, valid: np.ndarray, count: int) -> "ChoiceLabels":
+        """
+        Labels for *count* values the store has yet to put together.
+
+        For a signal handed to add_series_bulk() in parts: the store binds the
+        labels to the stored values. Only len() works before that.
+        """
+        labels = cls(None, lut, valid)
+        labels._count = count
+        return labels
 
     def rebase(self, values) -> "ChoiceLabels":
         """The same choices over *values*."""
@@ -96,10 +109,10 @@ class ChoiceLabels:
         return result
 
     def __len__(self) -> int:
-        return len(self._values)
+        return self._count if self._values is None else len(self._values)
 
     def __bool__(self) -> bool:
-        return len(self._values) > 0
+        return len(self) > 0
 
     def __getitem__(self, index):
         if isinstance(index, slice):
@@ -821,8 +834,12 @@ class SignalStore:
 
         Parameters
         ----------
-        timestamps : float64 ndarray, already normalised (t=0 at recording start)
-        values     : float64 ndarray of numeric values (integer keys for enum)
+        timestamps : float64 ndarray, already normalised (t=0 at recording start),
+                     or a list of such arrays: parts the store puts together
+                     without first joining them in memory. The same list
+                     object for several series shares one stored copy.
+        values     : float64 ndarray of numeric values (integer keys for enum),
+                     or a list of parts matching *timestamps*
         raw_values : list of display values (string labels or floats); may be
                      empty when *has_labels* is False
         has_labels : True for signals whose display value differs from the
@@ -830,7 +847,10 @@ class SignalStore:
                      the series is treated as plain numeric and consumers fall
                      back to ``values[idx]`` for display.
         """
-        n = len(timestamps)
+        ts_parts = timestamps if isinstance(timestamps, list) else [timestamps]
+        value_parts = values if isinstance(values, list) else [values]
+        ts_parts = [part for part in ts_parts if len(part)]
+        n = sum(len(part) for part in ts_parts)
         if n == 0:
             return
 
@@ -852,7 +872,7 @@ class SignalStore:
             self._tree_dirty = True
         else:
             series = self._series_by_key[key]
-            if len(series.timestamps) and timestamps[0] < series.timestamps[-1]:
+            if len(series.timestamps) and ts_parts[0][0] < series.timestamps[-1]:
                 self._unsorted_keys.add(key)
             if key in self._shared_ts_keys:
                 self._own_timestamps(key, series)
@@ -868,10 +888,10 @@ class SignalStore:
             self._shared_ts_keys.add(key)
             self._shared_ts_keys.add(last[2])
         else:
-            series.timestamps = self._extend(series.timestamps, timestamps)
-            if len(series.timestamps) == n and isinstance(timestamps, np.ndarray):
+            series.timestamps = self._extend(series.timestamps, *ts_parts)
+            if len(series.timestamps) == n and isinstance(timestamps, (np.ndarray, list)):
                 self._last_bulk_ts = (timestamps, series.timestamps, key)
-        series.values = self._extend(series.values, values)
+        series.values = self._extend(series.values, *value_parts)
         if has_labels and isinstance(raw_values, ChoiceLabels) and (
             len(series.raw_values) + len(raw_values) == len(series.values)
             and (
@@ -1032,9 +1052,20 @@ class SignalStore:
         if isinstance(series.raw_values, ChoiceLabels):
             series.raw_values = list(series.raw_values)
 
-    def _extend(self, stored, new):
+    def keep(self, array: np.ndarray):
         """
-        Return *stored* followed by *new*, in the heap or the sample file.
+        A copy of *array* held as the store holds samples: in the heap within
+        the memory budget, in the sample file past it.
+
+        For a decoder that hands a long signal over in parts (add_series_bulk
+        with lists): the parts it keeps meanwhile cost no more memory than the
+        finished series would.
+        """
+        return self._extend(_array.array("d"), array)
+
+    def _extend(self, stored, *new_parts):
+        """
+        Return *stored* followed by *new_parts*, in the heap or the sample file.
 
         Up to ``memory_budget`` bytes of samples stay in the heap as
         ``array.array``. Beyond it, arrays go to the sample file; a series
@@ -1043,13 +1074,14 @@ class SignalStore:
         if self._spilling():
             from core.sample_file import SampleFileFull
             try:
-                return self._sample_file.store(stored, new)
+                return self._sample_file.store(stored, *new_parts)
             except SampleFileFull as exc:
                 self._sample_file_full(exc)
         if not isinstance(stored, _array.array):
             stored = _heap_copy(stored)
-        stored.frombytes(_byte_view(new))
-        self._heap_sample_bytes += len(new) * 8
+        for new in new_parts:
+            stored.frombytes(_byte_view(new))
+            self._heap_sample_bytes += len(new) * 8
         return stored
 
     def _replace(self, array: np.ndarray):

@@ -32,6 +32,11 @@ _CAN_PROGRESS_INTERVAL = 10_000
 _BULK_PLOT_INTERVAL    = 10
 _BULK_PROGRESS_INTERVAL = 50
 _RAW_BATCH_SIZE         = 65_536
+# A raw-frame log longer than this is grouped by CAN ID chunk by chunk, so
+# grouping takes memory per chunk rather than per frame of the log.
+_GROUP_CHUNK_ROWS       = 1 << 22
+# A CAN ID with more frames than this is decoded in slices of this many.
+_DECODE_SLICE_ROWS      = 1 << 20
 
 
 def _bulk_compute_store_stats(store, rfs) -> None:
@@ -56,9 +61,12 @@ def _bulk_compute_store_stats(store, rfs) -> None:
     # Channel set + per-channel frame counts in one counting pass. A channel
     # number can appear on both buses; the bus bit splits the count so
     # "CAN 1" and "LIN 1" are reported separately rather than merged.
-    is_lin_np = (flags_np & np.uint8(FLAG_LIN)) != 0
-    codes = (channels_np.astype(np.uint16) << 1) | is_lin_np
-    counts = np.bincount(codes, minlength=512)
+    counts = np.zeros(512, dtype=np.int64)
+    for start in range(0, n, _GROUP_CHUNK_ROWS):
+        end = min(n, start + _GROUP_CHUNK_ROWS)
+        is_lin = (flags_np[start:end] & np.uint8(FLAG_LIN)) != 0
+        codes = (channels_np[start:end].astype(np.uint16) << 1) | is_lin
+        counts += np.bincount(codes, minlength=512)
     unknown = int(counts[255 << 1] + counts[(255 << 1) | 1])
     if unknown:
         store.channels.add(None)
@@ -120,6 +128,139 @@ def _group_frames(combined):
     counts = np.bincount(ranks, minlength=len(sample))
     boundaries = np.zeros(len(sample) + 1, dtype=np.int64)
     np.cumsum(counts, out=boundaries[1:])
+    return sort_idx, boundaries
+
+
+def _choice_labels(choices, values, count=None):
+    """
+    Display labels for an enum signal's *values*, or [] for a plain signal.
+
+    *values* is one array, or a list of parts (with their total *count*) that
+    the store puts together. Integer choice keys below 65 536 — every DBC seen
+    so far — give a ChoiceLabels, which reads each label from the stored
+    values when asked (Bottleneck 5: no per-sample Python list). Other keys
+    fall back to a per-sample list.
+    """
+    import numpy as np
+    from core.signal_store import ChoiceLabels
+
+    if not choices:
+        return []
+    try:
+        int_keys = {
+            k: str(v) for k, v in choices.items()
+            if isinstance(k, int) and k >= 0
+        }
+        max_key = max(int_keys) if int_keys else -1
+    except (TypeError, ValueError):
+        int_keys = {}
+        max_key  = -1
+
+    if int_keys and max_key < 65536:
+        lut       = np.empty(max_key + 1, dtype=object)
+        lut_valid = np.zeros(max_key + 1, dtype=bool)
+        for k, v in int_keys.items():
+            lut[k]       = v
+            lut_valid[k] = True
+        if isinstance(values, list):
+            return ChoiceLabels.unbound(lut, lut_valid, count)
+        return ChoiceLabels(values, lut, lut_valid)
+
+    # Fallback: Python loop (non-integer / very large keys)
+    parts = values if isinstance(values, list) else [values]
+    return [
+        '' if np.isnan(v)
+        else (str(choices[int(v)])
+              if int(v) in choices
+              else float(v))
+        for part in parts
+        for v in np.asarray(part, dtype=np.float64)
+    ]
+
+
+def _frame_keys(flags, channels, arb_ids):
+    """Each frame's (bus, channel, arbitration ID) as one uint64 key.
+
+    The bus goes in bit 40, above the 8-bit channel at 32 and the 32-bit ID:
+    CAN 1 and LIN 1 are different channels that happen to share a number, so
+    grouping on the number alone would decode one bus's frames against the
+    other's database. Bit 41 is already spoken for by the trace-name encoding.
+    """
+    import numpy as np
+    is_lin = (flags & np.uint8(FLAG_LIN)) != 0
+    return (
+        (is_lin.astype(np.uint64) << np.uint64(40))
+        | (channels.astype(np.uint64) << np.uint64(32))
+        | arb_ids.astype(np.uint64)
+    )
+
+
+def _group_frames_chunked(flags, channels, arb_ids, chunk_rows=None):
+    """
+    What ``_group_frames(_frame_keys(...))`` returns, in bounded memory.
+
+    Two passes over the frame columns, a chunk at a time. The first numbers
+    each key in the order it first appears and counts its frames; the second
+    turns those numbers into ranks in key order and puts each frame in its
+    group's place. The per-frame arrays (the numbers and the sort order) are
+    file-backed when large (core.sample_file.scratch_array), so a log of any
+    length groups in the memory of one chunk. Frames keep their file order
+    within a group.
+    """
+    import numpy as np
+    from core.sample_file import scratch_array
+
+    chunk_rows = chunk_rows or _GROUP_CHUNK_ROWS
+    n = len(channels)
+    chunks = [(s, min(n, s + chunk_rows)) for s in range(0, n, chunk_rows)]
+
+    # Keys seen so far, sorted, and the number each got when first seen.
+    sorted_keys = np.empty(0, dtype=np.uint64)
+    number_of_sorted = np.empty(0, dtype=np.int64)
+    numbers = scratch_array(n, np.uint32)
+    counts = np.zeros(0, dtype=np.int64)
+    for start, end in chunks:
+        keys = _frame_keys(flags[start:end], channels[start:end], arb_ids[start:end])
+        at = np.searchsorted(sorted_keys, keys)
+        known = at < len(sorted_keys)
+        known[known] = sorted_keys[at[known]] == keys[known]
+        if not known.all():
+            new_keys = np.unique(keys[~known])
+            first_number = len(sorted_keys)
+            merged = np.concatenate((sorted_keys, new_keys))
+            order = np.argsort(merged, kind='stable')
+            sorted_keys = merged[order]
+            number_of_sorted = np.concatenate((
+                number_of_sorted,
+                np.arange(first_number, first_number + len(new_keys), dtype=np.int64),
+            ))[order]
+            at = np.searchsorted(sorted_keys, keys)
+        chunk_numbers = number_of_sorted[at]
+        numbers[start:end] = chunk_numbers
+        chunk_counts = np.bincount(chunk_numbers, minlength=len(sorted_keys))
+        counts = np.concatenate((counts, np.zeros(len(chunk_counts) - len(counts), np.int64)))
+        counts += chunk_counts
+
+    # A key's rank is its place in key order.
+    rank_of_number = np.empty(len(sorted_keys), dtype=np.int64)
+    rank_of_number[number_of_sorted] = np.arange(len(sorted_keys))
+    rank_type = np.uint16 if len(sorted_keys) <= 65_536 else np.uint32
+    rank_of_number = rank_of_number.astype(rank_type)
+    boundaries = np.zeros(len(sorted_keys) + 1, dtype=np.int64)
+    np.cumsum(counts[number_of_sorted], out=boundaries[1:])
+
+    sort_idx = scratch_array(n, np.int64)
+    cursor = boundaries[:-1].copy()
+    for start, end in chunks:
+        chunk_ranks = rank_of_number[numbers[start:end]]
+        order = np.argsort(chunk_ranks, kind='stable')
+        present, first, size = np.unique(
+            chunk_ranks[order], return_index=True, return_counts=True
+        )
+        order += start
+        for rank, at, count in zip(present.tolist(), first.tolist(), size.tolist()):
+            sort_idx[cursor[rank]:cursor[rank] + count] = order[at:at + count]
+            cursor[rank] += count
     return sort_idx, boundaries
 
 
@@ -476,18 +617,17 @@ class LoadWorker(QObject):
         flags_np    = np.asarray(memoryview(rfs.flags))
         name_ids_np = np.asarray(memoryview(rfs.name_ids))
 
-        # Build (bus, channel, arb_id) groups. The bus goes in bit 40, above
-        # the 8-bit channel at 32 and the 32-bit ID: CAN 1 and LIN 1 are
-        # different channels that happen to share a number, so grouping on the
-        # number alone would decode one bus's frames against the other's
-        # database. Bit 41 is already spoken for by the trace-name encoding.
-        is_lin_np = (flags_np & np.uint8(FLAG_LIN)) != 0
-        combined = (
-            (is_lin_np.astype(np.uint64) << np.uint64(40))
-            | (channels_np.astype(np.uint64) << np.uint64(32))
-            | arb_ids_np.astype(np.uint64)
-        )
-        sort_idx, boundaries = _group_frames(combined)
+        # Build (bus, channel, arb_id) groups; see _frame_keys(). A long log
+        # is grouped a chunk at a time, so no array the length of the log is
+        # held in memory.
+        if n <= _GROUP_CHUNK_ROWS:
+            sort_idx, boundaries = _group_frames(
+                _frame_keys(flags_np, channels_np, arb_ids_np)
+            )
+        else:
+            sort_idx, boundaries = _group_frames_chunked(
+                flags_np, channels_np, arb_ids_np
+            )
 
         vec_dbcs: dict[int, VectorizedDBC] = {}
         decoded_total    = 0
@@ -508,7 +648,7 @@ class LoadWorker(QObject):
             first    = sort_idx[int(boundaries[g])]
             ch_byte  = int(channels_np[first])
             arb_id   = int(arb_ids_np[first])
-            bus      = BusType.LIN if is_lin_np[first] else BusType.CAN
+            bus      = BusType.LIN if flags_np[first] & FLAG_LIN else BusType.CAN
             ch       = None if ch_byte == 255 else ch_byte
             ch_key   = as_channel_key(ch, bus)
 
@@ -553,6 +693,14 @@ class LoadWorker(QObject):
                 msg_id   = int(getattr(message, 'frame_id', arb_id))
             msg_dec  = vec.get_message_decoder(message)
 
+            # A CAN ID with more frames than one slice is decoded a slice at
+            # a time, so no copy of all its frames' data is held at once.
+            slices = [
+                sort_idx[s:min(end, s + _DECODE_SLICE_ROWS)]
+                for s in range(start, end, _DECODE_SLICE_ROWS)
+            ]
+            in_parts = len(slices) > 1
+
             # Frames shorter than the message they matched decode from the
             # zero padding of the fixed 64-byte record rather than failing, so
             # a database meant for a different cluster produces plausible
@@ -561,85 +709,91 @@ class LoadWorker(QObject):
             # reuse the same low frame IDs and only the lengths differ.
             expected_length = int(getattr(message, 'length', 0) or 0)
             if expected_length:
-                short_rows = int(
-                    (dlcs_np[group_idx] < expected_length).sum()
+                short_rows = sum(
+                    int((dlcs_np[group_idx] < expected_length).sum())
+                    for group_idx in slices
                 )
                 if short_rows:
                     dlc_short_total += short_rows
                     dlc_short_names.add(msg_name)
 
-            try:
-                sig_results = msg_dec.decode(data_view[group_idx])
-            except Exception:
+            # In parts: name -> [ext, own time parts or None, value parts].
+            # A signal valid in every row shares the slices' time parts.
+            parts: dict[str, list] = {}
+            shared_ts: list = []
+            has_results = False
+            failed = False
+            for group_idx in slices:
+                try:
+                    sig_results = msg_dec.decode(data_view[group_idx])
+                except Exception:
+                    failed = True
+                    break
+                has_results = has_results or bool(sig_results)
+                ts_arr = timestamps_np[group_idx]
+                if in_parts:
+                    shared_ts.append(store.keep(ts_arr))
+
+                for sig_name, (ext, numeric_arr) in sig_results.items():
+                    # Slow-path decode and vectorized multiplexing represent
+                    # inactive/failed rows as NaN.  Do not materialize those rows
+                    # in SignalStore; asammdf and cantools expose sparse branch
+                    # series containing only timestamps where the signal exists.
+                    valid_mask = ~np.isnan(numeric_arr)
+                    if in_parts:
+                        entry = parts.setdefault(sig_name, [ext, None, []])
+                        all_valid = bool(valid_mask.all())
+                        if not all_valid and entry[1] is None:
+                            # Its own time parts from here on, the earlier
+                            # (all-valid) slices' shared ones first.
+                            entry[1] = list(shared_ts[:-1])
+                        if entry[1] is not None:
+                            entry[1].append(
+                                shared_ts[-1] if all_valid
+                                else store.keep(ts_arr[valid_mask])
+                            )
+                        entry[2].append(store.keep(
+                            numeric_arr if all_valid else numeric_arr[valid_mask]
+                        ))
+                        continue
+                    if not valid_mask.any():
+                        continue
+                    if valid_mask.all():
+                        signal_ts = ts_arr
+                    else:
+                        signal_ts = ts_arr[valid_mask]
+                        numeric_arr = numeric_arr[valid_mask]
+                    raw_values = _choice_labels(ext.choices, numeric_arr)
+                    store.add_series_bulk(
+                        channel      = ch_key,
+                        message_name = msg_name,
+                        message_id   = msg_id,
+                        signal_name  = sig_name,
+                        unit         = ext.unit,
+                        timestamps   = signal_ts,
+                        values       = numeric_arr,
+                        raw_values   = raw_values,
+                        has_labels   = bool(ext.choices),
+                    )
+            if failed:
                 continue
 
-            ts_arr = timestamps_np[group_idx]
-
-            for sig_name, (ext, numeric_arr) in sig_results.items():
-                # Slow-path decode and vectorized multiplexing represent
-                # inactive/failed rows as NaN.  Do not materialize those rows
-                # in SignalStore; asammdf and cantools expose sparse branch
-                # series containing only timestamps where the signal exists.
-                valid_mask = ~np.isnan(numeric_arr)
-                if not valid_mask.any():
+            for sig_name, (ext, own_ts, value_parts) in parts.items():
+                count = sum(len(part) for part in value_parts)
+                if not count:
                     continue
-                if valid_mask.all():
-                    signal_ts = ts_arr
-                else:
-                    signal_ts = ts_arr[valid_mask]
-                    numeric_arr = numeric_arr[valid_mask]
-
-                choices = ext.choices
-                if choices:
-                    # Vectorised choices lookup (Bottleneck 5).
-                    # Build a numpy object LUT keyed by integer choice value;
-                    # ChoiceLabels reads each label from the stored values
-                    # when asked, so no per-sample list is kept.
-                    # Falls back to a Python loop only when keys are non-integer
-                    # or exceed 65 535 (never seen in practice for DBC enums).
-                    try:
-                        int_keys = {
-                            k: str(v) for k, v in choices.items()
-                            if isinstance(k, int) and k >= 0
-                        }
-                        max_key = max(int_keys) if int_keys else -1
-                    except (TypeError, ValueError):
-                        int_keys = {}
-                        max_key  = -1
-
-                    if int_keys and max_key < 65536:
-                        # Build LUT and a parallel bool mask for valid entries.
-                        lut       = np.empty(max_key + 1, dtype=object)
-                        lut_valid = np.zeros(max_key + 1, dtype=bool)
-                        for k, v in int_keys.items():
-                            lut[k]       = v
-                            lut_valid[k] = True
-                        disp_list = ChoiceLabels(numeric_arr, lut, lut_valid)
-                    else:
-                        # Fallback: Python loop (non-integer / very large keys)
-                        disp_list = [
-                            '' if np.isnan(v)
-                            else (str(choices[int(v)])
-                                  if int(v) in choices
-                                  else float(v))
-                            for v in numeric_arr
-                        ]
-                    has_labels = True
-                    raw_values = disp_list
-                else:
-                    has_labels = False
-                    raw_values = []
                 store.add_series_bulk(
                     channel      = ch_key,
                     message_name = msg_name,
                     message_id   = msg_id,
                     signal_name  = sig_name,
                     unit         = ext.unit,
-                    timestamps   = signal_ts,
-                    values       = numeric_arr,
-                    raw_values   = raw_values,
-                    has_labels   = has_labels,
+                    timestamps   = shared_ts if own_ts is None else own_ts,
+                    values       = value_parts,
+                    raw_values   = _choice_labels(ext.choices, value_parts, count),
+                    has_labels   = bool(ext.choices),
                 )
+            del parts, shared_ts
 
             # Mark these frames as decoded in the raw-frame store
             nid = rfs._name_to_id.get(msg_name)
@@ -650,23 +804,25 @@ class LoadWorker(QObject):
                     rfs._name_to_id[msg_name] = nid
                 else:
                     nid = 0
-            flags_np[group_idx]    |= np.uint8(4)         # decoded bit
-            name_ids_np[group_idx]  = np.uint16(nid)
+            for group_idx in slices:
+                flags_np[group_idx]    |= np.uint8(4)         # decoded bit
+                name_ids_np[group_idx]  = np.uint16(nid)
 
             # Update decoder stats so diagnostics_text() makes sense.
             # Signal-less groups (e.g. raw UDS diagnostic frames) are counted
             # separately — they are not decode failures.
-            if sig_results:
+            group_size = end - start
+            if has_results:
                 decoder.stats['decode_success'] = (
-                    decoder.stats.get('decode_success', 0) + len(group_idx)
+                    decoder.stats.get('decode_success', 0) + group_size
                 )
             elif not message.signals:
                 decoder.stats['decoded_no_signals'] = (
-                    decoder.stats.get('decoded_no_signals', 0) + len(group_idx)
+                    decoder.stats.get('decoded_no_signals', 0) + group_size
                 )
-                no_signals_total += len(group_idx)
+                no_signals_total += group_size
 
-            decoded_total  += len(group_idx)
+            decoded_total  += group_size
             decoded_groups += 1
 
         # Override per-frame counters (add_series_bulk is series-oriented and
