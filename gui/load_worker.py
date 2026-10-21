@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from core.readers import reader_factory
 from core.readers.base import MeasurementReader
-from core.signal_store import SampleCache, SignalStore
+from core.signal_store import ChoiceLabels, SampleCache, SignalStore
 from core.raw_frame_store import FLAG_LIN, RawFrameStore
 from core.bus_types import (
     ALL_CHANNELS_NUMBER,
@@ -592,12 +592,11 @@ class LoadWorker(QObject):
                 choices = ext.choices
                 if choices:
                     # Vectorised choices lookup (Bottleneck 5).
-                    # Build a numpy object LUT keyed by integer choice value,
-                    # then use fancy indexing instead of a Python per-sample loop.
+                    # Build a numpy object LUT keyed by integer choice value;
+                    # ChoiceLabels reads each label from the stored values
+                    # when asked, so no per-sample list is kept.
                     # Falls back to a Python loop only when keys are non-integer
                     # or exceed 65 535 (never seen in practice for DBC enums).
-                    nan_mask = np.isnan(numeric_arr)
-                    int_arr  = numeric_arr.astype(np.int64)
                     try:
                         int_keys = {
                             k: str(v) for k, v in choices.items()
@@ -615,19 +614,7 @@ class LoadWorker(QObject):
                         for k, v in int_keys.items():
                             lut[k]       = v
                             lut_valid[k] = True
-
-                        safe_idx  = np.clip(int_arr, 0, max_key)
-                        in_range  = ~nan_mask & (int_arr >= 0) & (int_arr <= max_key)
-                        has_val   = in_range & lut_valid[safe_idx]
-
-                        result = np.empty(len(numeric_arr), dtype=object)
-                        result[nan_mask]           = ''
-                        result[~nan_mask & ~in_range] = numeric_arr[~nan_mask & ~in_range]
-                        result[in_range & ~lut_valid[safe_idx]] = \
-                            numeric_arr[in_range & ~lut_valid[safe_idx]]
-                        if has_val.any():
-                            result[has_val] = lut[safe_idx[has_val]]
-                        disp_list = result.tolist()
+                        disp_list = ChoiceLabels(numeric_arr, lut, lut_valid)
                     else:
                         # Fallback: Python loop (non-integer / very large keys)
                         disp_list = [

@@ -36,6 +36,86 @@ def _byte_view(arr) -> memoryview:
     return memoryview(np.ascontiguousarray(arr, dtype=np.float64)).cast("B")
 
 
+def _heap_copy(arr) -> _array.array:
+    """A growable float64 copy of *arr* in the heap."""
+    copy = _array.array("d")
+    copy.frombytes(_byte_view(arr))
+    return copy
+
+
+class ChoiceLabels:
+    """
+    The display labels of an enum signal, read from its numeric values.
+
+    One label per sample, as the decoder's lookup table gives it: the choice
+    text where the value has one, the value itself where it has none, and ''
+    where the value is NaN. Nothing is kept per sample, so the labels cost no
+    memory however long the signal, and they follow the values wherever the
+    store keeps them.
+    """
+
+    __slots__ = ("_values", "_lut", "_valid")
+
+    _CHUNK = 65_536
+
+    def __init__(self, values, lut: np.ndarray, valid: np.ndarray) -> None:
+        self._values = values
+        self._lut = lut          # object array: label per integer value
+        self._valid = valid      # bool array: whether that value has a label
+
+    def rebase(self, values) -> "ChoiceLabels":
+        """The same choices over *values*."""
+        return ChoiceLabels(values, self._lut, self._valid)
+
+    def same_choices(self, other) -> bool:
+        return (
+            isinstance(other, ChoiceLabels)
+            and len(other._lut) == len(self._lut)
+            and bool(np.array_equal(other._valid, self._valid))
+            and all(
+                a == b for a, b, ok in zip(other._lut, self._lut, self._valid) if ok
+            )
+        )
+
+    def _labels(self, numeric) -> np.ndarray:
+        numeric = np.asarray(numeric, dtype=np.float64)
+        nan_mask = np.isnan(numeric)
+        with np.errstate(invalid="ignore"):
+            int_arr = numeric.astype(np.int64)
+        max_key = len(self._lut) - 1
+        safe_idx = np.clip(int_arr, 0, max_key)
+        in_range = ~nan_mask & (int_arr >= 0) & (int_arr <= max_key)
+        valid = self._valid[safe_idx]
+        result = np.empty(len(numeric), dtype=object)
+        result[nan_mask] = ''
+        result[~nan_mask & ~in_range] = numeric[~nan_mask & ~in_range]
+        result[in_range & ~valid] = numeric[in_range & ~valid]
+        has_val = in_range & valid
+        if has_val.any():
+            result[has_val] = self._lut[safe_idx[has_val]]
+        return result
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __bool__(self) -> bool:
+        return len(self._values) > 0
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return self._labels(self._values[index]).tolist()
+        value = self._values[index]   # IndexError as a list would
+        return self._labels(np.array([value], dtype=np.float64))[0]
+
+    def __iter__(self):
+        for start in range(0, len(self._values), self._CHUNK):
+            yield from self._labels(self._values[start:start + self._CHUNK]).tolist()
+
+    def __array__(self, dtype=None, copy=None):
+        labels = self._labels(self._values)
+        return labels if dtype in (None, object) else labels.astype(dtype)
+
+
 @dataclass(slots=True)
 class SignalSeries:
     channel: BusChannel | None
@@ -540,6 +620,12 @@ class SignalStore:
         self.base_ts: float = 0.0  # set by LoadWorker for streaming
         # Reads lazy series from the measurement file; see add_lazy_series().
         self.sample_cache: SampleCache | None = None
+        # Bulk samples past this many bytes go to a temporary file instead of
+        # the heap; see _extend() and core.sample_file.
+        self.memory_budget = default_cache_budget()
+        self._heap_sample_bytes = 0
+        self._sample_file = None
+        self._sample_file_refused = False
 
     # ── Decoder integration (called once by LoadWorker) ──────────────────
 
@@ -620,6 +706,8 @@ class SignalStore:
             series = self._series_by_key[key]
             if key in self._shared_ts_keys:
                 self._own_timestamps(key, series)
+            if not isinstance(series.values, _array.array):
+                self._make_appendable(series)
             series.timestamps.append(sample.timestamp)
             if series.has_labels:
                 series.raw_values.append(sample.value)
@@ -700,8 +788,11 @@ class SignalStore:
                 if sig_name not in sigs_for_msg:
                     sigs_for_msg.append(sig_name)
                 self._tree_dirty = True
-            elif str_key in self._shared_ts_keys:
-                self._own_timestamps(str_key, series)
+            else:
+                if str_key in self._shared_ts_keys:
+                    self._own_timestamps(str_key, series)
+                if not isinstance(series.values, _array.array):
+                    self._make_appendable(series)
             series_list.append(series)
         self._msg_series_cache[(channel, msg_name)] = series_list
         return series_list
@@ -761,7 +852,7 @@ class SignalStore:
             self._tree_dirty = True
         else:
             series = self._series_by_key[key]
-            if series.timestamps and timestamps[0] < series.timestamps[-1]:
+            if len(series.timestamps) and timestamps[0] < series.timestamps[-1]:
                 self._unsorted_keys.add(key)
             if key in self._shared_ts_keys:
                 self._own_timestamps(key, series)
@@ -769,18 +860,28 @@ class SignalStore:
             self._last_bulk_ts = None
 
         # C-level memcopy straight from the array buffer — no Python loop,
-        # no intermediate bytes object the size of the series.
+        # no intermediate bytes object the size of the series. Past the
+        # memory budget the copy goes to the sample file instead.
         last = self._last_bulk_ts
-        if not series.timestamps and last is not None and last[0] is timestamps:
+        if not len(series.timestamps) and last is not None and last[0] is timestamps:
             series.timestamps = last[1]
             self._shared_ts_keys.add(key)
             self._shared_ts_keys.add(last[2])
         else:
-            series.timestamps.frombytes(_byte_view(timestamps))
+            series.timestamps = self._extend(series.timestamps, timestamps)
             if len(series.timestamps) == n and isinstance(timestamps, np.ndarray):
                 self._last_bulk_ts = (timestamps, series.timestamps, key)
-        series.values.frombytes(_byte_view(values))
-        if has_labels and raw_values:
+        series.values = self._extend(series.values, values)
+        if has_labels and isinstance(raw_values, ChoiceLabels) and (
+            len(series.raw_values) + len(raw_values) == len(series.values)
+            and (
+                not len(series.raw_values)
+                or raw_values.same_choices(series.raw_values)
+            )
+        ):
+            # Labels are read from the stored values, wherever they are.
+            series.raw_values = raw_values.rebase(series.values)
+        elif has_labels and raw_values:
             if not series.raw_values and not isinstance(raw_values, list):
                 # MDF native extraction supplies a lazy text sequence so the
                 # signal list is not blocked by millions of byte->str decodes.
@@ -903,16 +1004,82 @@ class SignalStore:
                 axes.append(SignalSeries(None, "", 0, "", "", ts, ts))
         return axes
 
+    @property
+    def sample_file_bytes(self) -> int:
+        """Bytes of samples kept in the temporary sample file."""
+        return 0 if self._sample_file is None else self._sample_file.bytes_stored
+
     def close(self) -> None:
-        """Release the measurement file that lazy series read from."""
+        """Release the measurement file and the temporary sample file."""
         if self.sample_cache is not None:
             self.sample_cache.close()
+        if self._sample_file is not None:
+            self._sample_file.close()
 
     def _own_timestamps(self, key: str, series: SignalSeries) -> None:
         """Give *series* its own timestamps before they are appended to."""
-        # Appending in place would change every series sharing the array.
-        series.timestamps = _array.array("d", series.timestamps)
+        # Appending in place would change every series sharing the array. An
+        # array in the sample file never grows in place: _extend copies it.
+        if isinstance(series.timestamps, _array.array):
+            series.timestamps = _array.array("d", series.timestamps)
         self._shared_ts_keys.discard(key)
+
+    @staticmethod
+    def _make_appendable(series: SignalSeries) -> None:
+        """Copy file-backed samples to the heap for one-sample appends."""
+        series.timestamps = _heap_copy(series.timestamps)
+        series.values = _heap_copy(series.values)
+        if isinstance(series.raw_values, ChoiceLabels):
+            series.raw_values = list(series.raw_values)
+
+    def _extend(self, stored, new):
+        """
+        Return *stored* followed by *new*, in the heap or the sample file.
+
+        Up to ``memory_budget`` bytes of samples stay in the heap as
+        ``array.array``. Beyond it, arrays go to the sample file; a series
+        that grows there is copied whole to a new region.
+        """
+        if self._spilling():
+            from core.sample_file import SampleFileFull
+            try:
+                return self._sample_file.store(stored, new)
+            except SampleFileFull as exc:
+                self._sample_file_full(exc)
+        if not isinstance(stored, _array.array):
+            stored = _heap_copy(stored)
+        stored.frombytes(_byte_view(new))
+        self._heap_sample_bytes += len(new) * 8
+        return stored
+
+    def _replace(self, array: np.ndarray):
+        """Store *array* afresh (sorting), in the heap or the sample file."""
+        return self._extend(_array.array("d"), array)
+
+    def _spilling(self) -> bool:
+        if self._sample_file is not None:
+            return not self._sample_file.closed
+        if self._sample_file_refused or self._heap_sample_bytes < self.memory_budget:
+            return False
+        from core.sample_file import SampleFile
+        try:
+            self._sample_file = SampleFile()
+        except OSError as exc:
+            self._sample_file_full(exc)
+            return False
+        return True
+
+    def _sample_file_full(self, exc: OSError) -> None:
+        """Keep the rest of the measurement in memory, and say so once."""
+        self._sample_file_refused = True
+        if self._sample_file is not None:
+            self._sample_file.close()
+            self._sample_file = None
+        self.load_warnings.append(
+            "The temporary folder has no room for more decoded signals "
+            f"({exc}); the rest of this measurement is kept in memory, "
+            "which may run out for a very large file."
+        )
 
     def sort_merged_series(self) -> int:
         """
@@ -934,13 +1101,11 @@ class SignalStore:
                 continue
             ts = series.numpy_timestamps()
             order = np.argsort(ts, kind="stable")
-            timestamps = _array.array("d")
-            timestamps.frombytes(ts[order].tobytes())
-            values = _array.array("d")
-            values.frombytes(series.numpy_values()[order].tobytes())
-            series.timestamps = timestamps
-            series.values = values
-            if series.raw_values and len(series.raw_values) == len(order):
+            series.timestamps = self._replace(ts[order])
+            series.values = self._replace(series.numpy_values()[order])
+            if isinstance(series.raw_values, ChoiceLabels):
+                series.raw_values = series.raw_values.rebase(series.values)
+            elif series.raw_values and len(series.raw_values) == len(order):
                 raw_values = series.raw_values
                 series.raw_values = [raw_values[i] for i in order.tolist()]
             reordered += 1
@@ -963,14 +1128,14 @@ class SignalStore:
         # Legacy path: full normalisation pass (used if called without LoadWorker)
         min_ts: float | None = None
         for series in self._series_by_key.values():
-            if series.timestamps:
+            if len(series.timestamps):
                 local_min = min(series.timestamps)
                 if min_ts is None or local_min < min_ts:
                     min_ts = local_min
         if min_ts is None:
             return
         for series in self._series_by_key.values():
-            if series.timestamps:
+            if len(series.timestamps):
                 new_ts = _array.array('d', (t - min_ts for t in series.timestamps))
                 series.timestamps = new_ts
         # raw_frame_store timestamps are normalised inline by LoadWorker
