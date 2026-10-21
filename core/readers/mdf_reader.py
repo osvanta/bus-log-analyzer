@@ -20,6 +20,14 @@ from core.readers.mdf_recovery import (
 )
 
 
+#: Upper bound on the record bytes one ``mdf.select()`` reads at once when
+#: the caller asks for groups to be batched. Selecting every group together
+#: is fastest for a small file, but it holds the whole decoded measurement
+#: in memory while the store copies it, and a 5 GB MF4 ran out of memory.
+#: A group larger than this is still read on its own.
+_SELECT_BATCH_BYTES = 256 * 1024 * 1024
+
+
 class MDFImportError(RuntimeError):
     """Raised when asammdf is not installed."""
 
@@ -176,7 +184,8 @@ class MDFReader:
     ------
     asammdf uses lazy / memory-mapped channel loading internally.
     Yielding one channel at a time with explicit ``del`` bounds peak heap RAM
-    to ~1 channel group at a time regardless of file size.
+    to ~1 channel group, or one batch of groups of at most
+    ``_SELECT_BATCH_BYTES`` when groups are batched, regardless of file size.
 
     Attributes
     ----------
@@ -492,16 +501,52 @@ class MDFReader:
             if ch_list:
                 groups_channels[group_idx] = ch_list
 
-        # extract_bus_logging() returns an in-memory decoded MDF and the caller
-        # retains every yielded array. In that specific case, selecting all
-        # groups together avoids hundreds of select() dispatches and lets enum
-        # labels remain lazy. Pre-decoded MDF keeps the bounded per-group path.
+        # Selecting many groups together avoids hundreds of select()
+        # dispatches and lets enum labels remain lazy. The groups are taken
+        # in batches of bounded size so a large file is never decoded whole.
         if batch_all_groups:
-            yield from MDFReader._iter_arrays_all_groups(
-                mdf, groups_channels, include_group_index, channel_error
-            )
+            for batch in MDFReader._select_batches(mdf, groups_channels):
+                yield from MDFReader._iter_arrays_all_groups(
+                    mdf, batch, include_group_index, channel_error
+                )
             return
 
+        yield from MDFReader._iter_groups(
+            mdf, groups_channels, include_group_index, channel_error
+        )
+
+    @staticmethod
+    def _group_sample_bytes(group) -> int:
+        """Estimate the bytes one group's samples and timestamps take."""
+        channel_group = getattr(group, "channel_group", None)
+        try:
+            cycles = int(getattr(channel_group, "cycles_nr", 0) or 0)
+            record = int(getattr(channel_group, "samples_byte_nr", 0) or 0)
+            record += int(getattr(channel_group, "invalidation_bytes_nr", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+        # Each decoded group also carries a float64 time stamp per cycle.
+        return max(0, cycles * (record + 8))
+
+    @staticmethod
+    def _select_batches(mdf, groups_channels):
+        """Split *groups_channels* into consecutive batches of bounded size."""
+        batch: dict[int, list[tuple[int, str]]] = {}
+        batch_bytes = 0
+        for group_idx, ch_list in groups_channels.items():
+            size = MDFReader._group_sample_bytes(mdf.groups[group_idx])
+            if batch and batch_bytes + size > _SELECT_BATCH_BYTES:
+                yield batch
+                batch = {}
+                batch_bytes = 0
+            batch[group_idx] = ch_list
+            batch_bytes += size
+        if batch:
+            yield batch
+
+    @staticmethod
+    def _iter_groups(mdf, groups_channels, include_group_index, channel_error):
+        """Read *groups_channels* one group at a time (bounded per-group path)."""
         # ── Phase 2: batch-fetch one group at a time ──────────────────────
         for group_idx, ch_list in groups_channels.items():
             grp_name     = MDFReader._group_name(mdf, group_idx)
@@ -641,7 +686,7 @@ class MDFReader:
     def _iter_arrays_all_groups(
         mdf, groups_channels, include_group_index, channel_error=None
     ):
-        """Read an already-extracted bus-log MDF with two global selects."""
+        """Read the groups in *groups_channels* with two shared selects."""
         flat_channels = [
             (group_idx, ch_idx, ch_name)
             for group_idx, ch_list in groups_channels.items()
@@ -656,11 +701,8 @@ class MDFReader:
             sigs = mdf.select(select_specs, raw=False)
         except Exception:
             # Retain the established per-group/get fallback for unusual MDFs.
-            yield from MDFReader._iter_arrays(
-                mdf,
-                include_group_index=include_group_index,
-                batch_all_groups=False,
-                channel_error=channel_error,
+            yield from MDFReader._iter_groups(
+                mdf, groups_channels, include_group_index, channel_error
             )
             return
 
@@ -759,6 +801,9 @@ class MDFReader:
                 num_arr,
                 disp_values,
             )
+            # Drop this batch's reference so the consumer holds the only copy.
+            sigs[i] = None
+            raw_map.pop(i, None)
             if include_group_index:
                 yield (group_idx, *item)
             else:
