@@ -592,7 +592,7 @@ class LoadWorker(QObject):
             )
             return
 
-        if rfs._mmap is None:
+        if not rfs.payload_mapped:
             self.progress.emit(
                 "WARNING: mmap unavailable for raw-frame store; "
                 "falling back to per-frame decode."
@@ -607,10 +607,7 @@ class LoadWorker(QObject):
         channels_np   = np.frombuffer(rfs.channels,   dtype=np.uint8)
         arb_ids_np    = np.frombuffer(rfs.arb_ids,    dtype=np.uint32)
         dlcs_np       = np.frombuffer(rfs.dlcs,       dtype=np.uint8)
-        # Mmap → [N, 64] uint8 view (zero-copy); rows are zero-padded.
-        data_view = np.frombuffer(
-            rfs._mmap, dtype=np.uint8, count=n * 64
-        ).reshape(n, 64)
+        # Frames' 64-byte payload rows come from rfs.rows(), zero-padded.
 
         # Writable views into the in-memory metadata so we can flip the
         # "decoded" bit and assign name_ids per group post-hoc.
@@ -725,7 +722,7 @@ class LoadWorker(QObject):
             failed = False
             for group_idx in slices:
                 try:
-                    sig_results = msg_dec.decode(data_view[group_idx])
+                    sig_results = msg_dec.decode(rfs.rows(group_idx))
                 except Exception:
                     failed = True
                     break
@@ -1079,7 +1076,6 @@ class LoadWorker(QObject):
                     source_store.directions, dtype=np.uint8
                 )
                 flags = np.frombuffer(source_store.flags, dtype=np.uint8)
-                data = memoryview(source_store._mmap)
                 for start in range(0, frame_count, batch_size):
                     end = min(frame_count, start + batch_size)
                     yield (
@@ -1090,7 +1086,7 @@ class LoadWorker(QObject):
                         dlcs[start:end].tolist(),
                         directions[start:end].tolist(),
                         flags[start:end].tolist(),
-                        data[start * 64:end * 64],
+                        source_store.rows(slice(start, end)).tobytes(),
                     )
 
         self.progress.emit(

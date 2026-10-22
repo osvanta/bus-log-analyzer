@@ -312,7 +312,8 @@ def test_the_temp_file_goes_when_the_process_ends_without_close():
     try:
         pid, path = process.stdout.readline().split(' ', 1)
         path = path.strip()
-        assert os.path.getsize(path) == 20_000 * 64
+        # 8 bytes a frame: classic CAN payload kept whole in the main file.
+        assert os.path.getsize(path) == 20_000 * 8
         # By its own pid: a virtual environment's python.exe is a launcher
         # that runs the interpreter as a child, which outlives the launcher.
         os.kill(int(pid), signal.SIGTERM)    # TerminateProcess on Windows
@@ -362,7 +363,9 @@ def test_leftover_files_are_removed_and_a_running_copy_keeps_its_own(tmp_path, m
 
     removed, freed = remove_leftover_files(tmp_path)
 
-    assert (removed, freed) == (3, 64 * 100)
+    # The two leftovers, and the running copy's two payload files: their
+    # names go, the files stay usable (see the rows below).
+    assert (removed, freed) == (4, 64 * 100)
     assert sorted(tmp_path.iterdir()) == sorted(kept)
     running.append(0.3, 1, 0x103, 8, 'Rx', False, False, bytes([3] * 8), 'Msg3', True)
     running.seal()
@@ -610,7 +613,8 @@ def test_a_failed_sort_leaves_the_store_as_it_was(monkeypatch):
         store.sort_by_time()
     monkeypatch.undo()
 
-    assert len(created) == 1 and _disappears(created[0]), \
+    # The copy is two files: the payload and its overflow.
+    assert len(created) == 2 and all(_disappears(path) for path in created), \
         "the half-written copy was left behind"
     assert store._data_path == data_path
     assert np.frombuffer(store.timestamps, dtype=np.float64).tolist() == [0.3, 0.1, 0.2]
