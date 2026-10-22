@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -26,6 +27,14 @@ from core.readers.mdf_recovery import (
 #: in memory while the store copies it, and a 5 GB MF4 ran out of memory.
 #: A group larger than this is still read on its own.
 _SELECT_BATCH_BYTES = 256 * 1024 * 1024
+
+#: The record bytes one pass of a group copy reads at once (_GroupCopy).
+_COPY_CHUNK_BYTES = 4 * 1024 * 1024
+#: A group copy starts this long after the read that asked for it, so the
+#: signal just read is drawn first, and rests this long between chunks, so
+#: drawing and reading keep going while it runs.
+_COPY_DELAY_S = 0.5
+_COPY_REST_S = 0.002
 
 
 class MDFImportError(RuntimeError):
@@ -887,6 +896,17 @@ class MDFSampleSource:
                     (group_idx, MDFReader._group_name(mdf, group_idx), channels, cycles)
                 )
         self._channels = {g[0]: g[2] for g in self.groups}
+        # One thread at a time uses the MDF: the reader's (plotting, a
+        # calculation) or a group copy's.
+        self._lock = threading.RLock()
+        # Groups read one channel at a time are copied in the background
+        # after their first read (_GroupCopy), one at a time so the copies
+        # take no more than one thread from plotting: the copy once made, or
+        # None where a group could not be copied; the groups waiting.
+        self._copies: dict[int, _GroupCopy | None] = {}
+        self._copying: list[int] = []
+        self._copier: threading.Thread | None = None
+        self._closing = threading.Event()
 
     def metadata_rows(self) -> list[tuple[str, str, str]]:
         """``(group_name, channel_name, unit)`` per channel, for the signal tree."""
@@ -905,12 +925,13 @@ class MDFSampleSource:
 
     def master(self, group_idx: int, record_offset: int = 0, record_count=None):
         """A group's time stamps, raw; *record_count* None reads to the end."""
-        return np.asarray(
-            self._mdf.get_master(
-                group_idx, record_offset=record_offset, record_count=record_count
-            ),
-            dtype=np.float64,
-        )
+        with self._lock:
+            return np.asarray(
+                self._mdf.get_master(
+                    group_idx, record_offset=record_offset, record_count=record_count
+                ),
+                dtype=np.float64,
+            )
 
     def cycles(self, group_idx: int) -> int:
         for idx, _name, _channels, cycles in self.groups:
@@ -924,7 +945,8 @@ class MDFSampleSource:
             if cycles <= 0:
                 continue
             try:
-                master = self._mdf.get_master(group_idx, record_offset=0, record_count=1)
+                with self._lock:
+                    master = self._mdf.get_master(group_idx, record_offset=0, record_count=1)
             except Exception:
                 continue
             if master is not None and len(master):
@@ -938,8 +960,22 @@ class MDFSampleSource:
         Returns ``{(group_idx, channel_name): [(timestamps, values,
         display_values, unit), ...]}``; a list, because one group can hold two
         channels of the same name. *channel_names* limits the read to those
-        channels, for a group too large to read whole.
+        channels, for a group too large to read whole. Such a group is then
+        copied in the background (_GroupCopy), and once the copy is made its
+        channels come from it.
         """
+        results: dict[tuple[int, str], list] = {}
+        to_copy = []
+        if channel_names is not None:
+            remaining = []
+            for group_idx in group_indices:
+                copy = self._copies.get(group_idx)
+                if copy is not None and copy.read(channel_names, results):
+                    continue
+                remaining.append(group_idx)
+                if group_idx not in self._copies and group_idx not in self._copying:
+                    to_copy.append(group_idx)
+            group_indices = remaining
         groups_channels = {}
         for group_idx in group_indices:
             channels = [
@@ -949,19 +985,87 @@ class MDFSampleSource:
             ]
             if channels:
                 groups_channels[group_idx] = channels
-        results: dict[tuple[int, str], list] = {}
-        for group_idx, (_grp, ch_name, unit), ts, values, display in (
-            MDFReader._iter_arrays_all_groups(
-                self._mdf, groups_channels, True, self._channel_error
-            )
-        ):
-            results.setdefault((group_idx, ch_name), []).append(
-                (ts, values, display, unit)
-            )
+        if groups_channels:
+            with self._lock:
+                for group_idx, (_grp, ch_name, unit), ts, values, display in (
+                    MDFReader._iter_arrays_all_groups(
+                        self._mdf, groups_channels, True, self._channel_error
+                    )
+                ):
+                    results.setdefault((group_idx, ch_name), []).append(
+                        (ts, values, display, unit)
+                    )
+        for group_idx in to_copy:
+            self._start_copy(group_idx)
         return results
 
+    def _start_copy(self, group_idx: int) -> None:
+        if self._closing.is_set():
+            return
+        with self._lock:
+            self._copying.append(group_idx)
+            if self._copier is None:
+                self._copier = threading.Thread(
+                    target=self._copy_groups, name="mdf-group-copy", daemon=True
+                )
+                self._copier.start()
+
+    def _copy_groups(self) -> None:
+        while not self._closing.wait(_COPY_DELAY_S):
+            with self._lock:
+                if not self._copying:
+                    self._copier = None
+                    return
+                group_idx = self._copying[0]
+            self._copy_group(group_idx)
+            with self._lock:
+                self._copying.remove(group_idx)
+        with self._lock:
+            self._copier = None
+
+    def _copy_group(self, group_idx: int) -> None:
+        copy = None
+        try:
+            group = self._mdf.groups[group_idx].channel_group
+            record = int(getattr(group, "samples_byte_nr", 0) or 0) + int(
+                getattr(group, "invalidation_bytes_nr", 0) or 0
+            )
+            copy = _GroupCopy(
+                self._select_chunk, record, group_idx,
+                self._channels.get(group_idx, ()), self.cycles(group_idx),
+            )
+        except Exception:
+            # No room on the disk, a layout the copy does not take, or the
+            # file closed: the group stays read one channel at a time.
+            copy = None
+        if self._closing.is_set() and copy is not None:
+            copy.close()
+            copy = None
+        self._copies[group_idx] = copy
+
+    def _select_chunk(self, specs, record_offset: int, record_count: int):
+        """One chunk of records for a group copy, between the reader's reads."""
+        if self._closing.wait(_COPY_REST_S):
+            raise _CopyCancelled
+        with self._lock:
+            if self._closing.is_set() or self._mdf is None:
+                raise _CopyCancelled
+            return self._mdf.select(
+                specs, raw=True, record_offset=record_offset,
+                record_count=record_count, copy_master=False,
+            )
+
     def close(self) -> None:
-        mdf, self._mdf = self._mdf, None
+        self._closing.set()
+        copier = self._copier
+        if copier is not None and copier is not threading.current_thread():
+            copier.join()
+        for copy in self._copies.values():
+            if copy is not None:
+                copy.close()
+        self._copies = {}
+        with self._lock:
+            mdf, self._mdf = self._mdf, None
         if mdf is None:
             return
         try:
@@ -969,3 +1073,131 @@ class MDFSampleSource:
         except Exception:
             pass
         remove_recovery_copy(self._recovery_path)
+
+
+class _CopyCancelled(Exception):
+    """The measurement closed while one of its groups was being copied."""
+
+
+class _GroupCopy:
+    """
+    One channel group, copied channel by channel into a temporary file.
+
+    A group stores its channels record by record, so asammdf reads the whole
+    group for any one channel. A group too large to keep in memory was read
+    that way for every channel plotted: seconds a channel for a group of a
+    gigabyte or more, and as long again for the next one. After the first
+    such read, a background thread (MDFSampleSource._copy_group) copies every
+    channel's raw samples, a few megabytes of records at a time (small enough
+    to stay in the processor's cache while each channel is taken out), into a
+    PieceFile; a channel is then its pieces through its conversion, exactly
+    what ``select(raw=False)`` computes. Raw samples keep the copy about the
+    size of the group in the file, not eight bytes a value.
+
+    *select(specs, record_offset, record_count)* reads one chunk of raw
+    channels. Only plain numeric channels are copied: anything else raises
+    from the constructor, or leaves the channel out, and is read as before.
+    """
+
+    def __init__(self, select, record_bytes: int, group_idx: int, channels,
+                 cycles: int) -> None:
+        self._group_idx = group_idx
+        self._all = list(channels)                                   # idx, name, unit
+        self._copied: list[tuple[int, str, object, str]] = []      # idx, name, conversion, unit
+        self._pieces: dict[object, list] = {}
+        self._file = None
+        if cycles <= 0 or not channels:
+            raise ValueError("nothing to copy")
+        chunk = max(1, _COPY_CHUNK_BYTES // max(1, record_bytes))
+        specs = [(None, group_idx, ch_idx) for ch_idx, _name, _unit in channels]
+        try:
+            for offset in range(0, cycles, chunk):
+                count = min(chunk, cycles - offset)
+                sigs = select(specs, offset, count)
+                if self._file is None:
+                    self._start(channels, sigs, cycles)
+                timestamps = np.asarray(sigs[0].timestamps, dtype=np.float64)
+                if len(timestamps) != count:
+                    raise ValueError("the group has fewer records than it says")
+                self._pieces["time"].append(self._file.append(timestamps))
+                for position, ch_idx in self._positions:
+                    samples = sigs[position].samples
+                    if len(samples) != count or samples.dtype != self._dtypes[ch_idx]:
+                        raise ValueError("a channel's samples do not match its records")
+                    self._pieces[ch_idx].append(self._file.append(samples))
+                del sigs
+            self._file.seal()
+        except BaseException:
+            self.close()
+            raise
+
+    def _start(self, channels, sigs, cycles: int) -> None:
+        from core.sample_file import PieceFile
+
+        self._positions: list[tuple[int, int]] = []
+        self._dtypes: dict[int, np.dtype] = {}
+        for position, ((ch_idx, ch_name, _unit), sig) in enumerate(zip(channels, sigs)):
+            samples = getattr(sig, "samples", None)
+            if (
+                isinstance(samples, np.ndarray) and samples.ndim == 1
+                and samples.dtype.kind in "biuf" and samples.dtype.itemsize <= 8
+                and samples.dtype.names is None
+            ):
+                self._positions.append((position, ch_idx))
+                self._dtypes[ch_idx] = samples.dtype
+                self._pieces[ch_idx] = []
+                self._copied.append(
+                    (ch_idx, ch_name, sig.conversion, str(getattr(sig, "unit", "") or ""))
+                )
+        if not self._copied:
+            raise ValueError("no channel of the group can be copied")
+        self._pieces["time"] = []
+        size = cycles * (8 + sum(dtype.itemsize for dtype in self._dtypes.values()))
+        self._file = PieceFile(size)
+
+    def read(self, channel_names, results) -> bool:
+        """
+        Add the arrays of the channels named in *channel_names* to *results*,
+        as ``MDFSampleSource.read_groups`` returns them. False, adding
+        nothing, when one of them was not copied.
+        """
+        wanted = [c for c in self._all if c[1] in channel_names]
+        copied = [c for c in self._copied if c[1] in channel_names]
+        if len(copied) != len(wanted) or self._file is None:
+            return False
+        found: dict[tuple[int, str], list] = {}
+        timestamps = None
+        for ch_idx, ch_name, conversion, unit in copied:
+            try:
+                raw = self._file.read(self._pieces[ch_idx])
+                values, display = _physical_arrays(raw, conversion)
+            except Exception:
+                return False
+            if timestamps is None:
+                timestamps = self._file.read(self._pieces["time"])
+            found.setdefault((self._group_idx, ch_name), []).append(
+                (timestamps, values, display, unit)
+            )
+        for key, parts in found.items():
+            results.setdefault(key, []).extend(parts)
+        return True
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+
+def _physical_arrays(raw: np.ndarray, conversion):
+    """
+    A channel's values and display values from its raw samples, as
+    ``_iter_arrays_all_groups`` makes them from ``select(raw=False)``.
+    """
+    eng = conversion.convert(raw) if conversion else raw
+    if _is_text(eng):
+        # Text through a conversion: the raw number, and the text to show.
+        return np.asarray(raw, dtype=np.float64), LazyTextValues(eng)
+    try:
+        return np.asarray(eng, dtype=np.float64), []
+    except (TypeError, ValueError):
+        return np.arange(len(eng), dtype=np.float64), LazyTextValues(eng)

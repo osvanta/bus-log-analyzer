@@ -161,6 +161,62 @@ class AppendColumn:
             pass
 
 
+class PieceFile:
+    """
+    Arrays of any numeric type, appended one after another to one temporary
+    file, then mapped for reading.
+
+    An MF4 group stores its channels record by record, so reading one channel
+    reads the whole group. Copied here a chunk of records at a time, each
+    channel's piece of each chunk in turn, any channel is then a few mapped
+    reads. Written front to back, the file is never zero-filled first.
+    """
+
+    def __init__(self, expected_bytes: int = 0) -> None:
+        self._file, self.path = _create_data_file()
+        free = shutil.disk_usage(os.path.dirname(self.path) or tempfile.gettempdir()).free
+        if free < expected_bytes + _DISK_RESERVE_BYTES:
+            self._file.close()
+            raise SampleFileFull(
+                f"{expected_bytes / 1e9:.1f} GB is needed in {os.path.dirname(self.path)}, "
+                f"which has {free / 1e9:.1f} GB free"
+            )
+        self.nbytes = 0
+        self._map: mmap.mmap | None = None
+
+    def append(self, values: np.ndarray) -> tuple[np.dtype, int, int]:
+        """Write *values*; return the piece (dtype, byte offset, count)."""
+        values = np.ascontiguousarray(values).reshape(-1)
+        piece = (values.dtype, self.nbytes, len(values))
+        if len(values):
+            self._file.write(memoryview(values).cast("B"))
+            self.nbytes += values.nbytes
+        return piece
+
+    def seal(self) -> None:
+        """Map what was written; further appends are refused."""
+        self._file.flush()
+        if self.nbytes:
+            self._map = mmap.mmap(self._file.fileno(), self.nbytes, access=mmap.ACCESS_READ)
+
+    def read(self, pieces) -> np.ndarray:
+        """The pieces joined, as a new array of their type."""
+        parts = [
+            np.frombuffer(self._map, dtype=dtype, count=count, offset=offset)
+            for dtype, offset, count in pieces if count
+        ]
+        if not parts:
+            return np.empty(0, dtype=pieces[0][0] if pieces else np.float64)
+        return np.concatenate(parts) if len(parts) > 1 else parts[0].copy()
+
+    def close(self) -> None:
+        self._map = None
+        try:
+            self._file.close()
+        except OSError:
+            pass
+
+
 def scratch_array(count: int, dtype, heap_limit: int = 64 * 1024 * 1024) -> np.ndarray:
     """
     A writable work array: in the heap when small, file-backed when large.
