@@ -27,6 +27,7 @@
 |---|---|
 | ++f++ | Fit to Window: the whole recording, in time and height |
 | ++v++ | Fit Vertical: the height only, keeping the time range |
+| ++s++ | Step Mode or Interpolation Mode: each value held until the next sample, or straight lines between samples |
 | ++c++ | Change the colour of the selected signal |
 | ++delete++ | Remove the selected signal from the plot |
 | ++ctrl+z++ | Undo the last plot action, up to three times |

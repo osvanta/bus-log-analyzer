@@ -37,6 +37,8 @@ _HEAD = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none
 _SAMPLES = ('<g fill="currentColor" stroke="none">'
             '<circle cx="4" cy="17" r="2"/><circle cx="9" cy="11" r="2"/>'
             '<circle cx="14" cy="15" r="2"/><circle cx="20" cy="7" r="2"/></g>')
+_TWO_SAMPLES = ('<g fill="currentColor" stroke="none">'
+                '<circle cx="6" cy="17" r="2.2"/><circle cx="16" cy="7" r="2.2"/></g>')
 
 # Drawn on a 24 x 24 grid.
 DRAWINGS: dict[str, str] = {
@@ -55,6 +57,11 @@ DRAWINGS: dict[str, str] = {
     'cursor2': ('<path d="M8 3v18" stroke-dasharray="3 3"/>'
                 '<path d="M13.5 9.6c0-1.3 1.1-2.1 2.4-2.1 1.4 0 2.4.9 2.4 2.1 0 1-.6 1.7-1.5 2.5'
                 'L13.5 17h5"/>'),
+    # The one line-mode button shows the mode the plot is in. Two samples,
+    # the first held until the second: Step Mode ...
+    'step_lines': '<path d="M2 17H16V7H22"/>' + _TWO_SAMPLES,
+    # ... or joined by a straight line: Interpolation Mode.
+    'interpolated_lines': '<path d="M2 17H6L16 7H22"/>' + _TWO_SAMPLES,
     # A trace with its samples marked.
     'points': '<path d="M4 17l5-6 5 4 6-8"/>' + _SAMPLES,
     # The samples alone: the line is hidden.

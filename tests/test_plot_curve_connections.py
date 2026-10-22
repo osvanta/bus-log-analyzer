@@ -61,6 +61,7 @@ def test_plot_curve_receives_open_segment_mask():
     class PanelStub:
         _hide_lines = False
         _show_points = False
+        _step_lines = True
         _LINE_WIDTH = 2.8
         _SELECTED_LINE_WIDTH = 5.0
         _curve_connect_mask = staticmethod(PlotPanel._curve_connect_mask)
