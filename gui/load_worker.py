@@ -365,6 +365,8 @@ class LoadWorker(QObject):
                 self._run_can_raw(reader, store)
             elif hasattr(reader, "iter_channel_arrays"):
                 self._run_bulk_array(reader, store)
+            elif hasattr(reader, "iter_signal_chunks"):
+                self._run_signal_chunks(reader, store)
             else:
                 self._run_sample_loop(reader, store)
 
@@ -1606,6 +1608,97 @@ class LoadWorker(QObject):
             store.channel_summary_text()
             + f"\n\nSource: {reader.source_description}"
             + f"\n\nChannels loaded: {ch_count:,}"
+            + "\n\nNo raw frames — pre-decoded format."
+        )
+
+    # ── Pre-decoded CSV: chunks of rows as arrays ─────────────────────────
+
+    def _run_signal_chunks(self, reader, store: SignalStore) -> None:
+        """
+        Load a pre-decoded signal file read a chunk of rows at a time.
+
+        Each chunk's arrays are kept as the store keeps samples (the heap up
+        to its budget, then the sample file) and every signal is inserted
+        once at the end, from its parts, so the file is never held whole.
+        A signal with a value in every row of a wide file shares one time
+        axis with the others like it.
+        """
+        self.progress.emit("Reading pre-decoded signals...")
+        base_ts: float | None = None
+        rows = 0
+        # Each chunk's shared time axis, kept: used by every signal that had
+        # a value in every row so far.
+        shared: list = []
+        # store key -> [meta, own time parts or None, value parts, labels]
+        signals: dict[tuple, list] = {}
+        order: list[tuple] = []
+        for chunk, (first_ts, shared_ts, chunk_signals) in enumerate(
+            reader.iter_signal_chunks()
+        ):
+            if base_ts is None:
+                base_ts = first_ts
+                store.base_ts = base_ts
+            kept_shared = None
+            if shared_ts is not None:
+                kept_shared = store.keep(shared_ts - base_ts)
+                rows += len(shared_ts)
+            shared.append(kept_shared)
+            seen = set()
+            for meta, ts, values, labels in chunk_signals:
+                key = (meta[0], meta[1], meta[3])
+                seen.add(key)
+                entry = signals.get(key)
+                if entry is None:
+                    # New in this chunk: it shares only if it had every row of
+                    # every chunk before, which a late newcomer did not.
+                    entry = signals[key] = [meta, None if chunk == 0 else [], [], None]
+                    order.append(key)
+                if ts is shared_ts and entry[1] is None:
+                    pass                    # still sharing: shared[chunk] is its part
+                else:
+                    if entry[1] is None:
+                        entry[1] = list(shared[:chunk])
+                    entry[1].append(kept_shared if ts is shared_ts else store.keep(ts - base_ts))
+                entry[2].append(store.keep(values))
+                if labels is not None or entry[3] is not None:
+                    if entry[3] is None:
+                        # Earlier chunks were numbers only: their labels are those.
+                        entry[3] = [float(v) for part in entry[2][:-1] for v in part]
+                    entry[3].extend(labels if labels is not None else values.tolist())
+                if shared_ts is None:
+                    rows += len(ts)
+            # A sharing signal with no value in a whole chunk stops sharing.
+            for key, entry in signals.items():
+                if key not in seen and entry[1] is None:
+                    entry[1] = list(shared[:chunk])     # nothing of this chunk
+            self.progress.emit(
+                f"Processed {rows:,} records | signals: {len(signals):,}"
+            )
+
+        for key in order:
+            meta, own_ts, value_parts, labels = signals[key]
+            channel, message_name, message_id, signal_name, unit = meta
+            store.add_series_bulk(
+                channel=channel,
+                message_name=message_name,
+                message_id=message_id,
+                signal_name=signal_name,
+                unit=unit,
+                timestamps=shared if own_ts is None else own_ts,
+                values=value_parts,
+                raw_values=labels or [],
+                has_labels=bool(labels),
+            )
+        # Counted as the one-sample-at-a-time load did: one per sample.
+        store.decoded_frames = store.total_samples
+        store.unmatched_frames = 0
+        store.sort_merged_series()
+        self.tree_update.emit(store.build_tree_payload())
+        self.partial_ready.emit()
+        store.normalize_timestamps(already_normalized=True)
+        store.diagnostics_text = (
+            store.channel_summary_text()
+            + f"\n\nSource: {reader.source_description}"
             + "\n\nNo raw frames — pre-decoded format."
         )
 
