@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime
+import weakref
 from dataclasses import dataclass
 from itertools import cycle
 from pathlib import Path
@@ -675,6 +676,59 @@ def _curve_connection(ts: np.ndarray, vs: np.ndarray, connect_mask):
         ):
             return connect_mask(ts, vs), False
     return 'all', True
+
+
+def _all_finite(values: np.ndarray) -> bool:
+    """Whether every value is finite, checked a chunk at a time."""
+    return all(
+        bool(np.isfinite(values[start:start + _RANGE_CHUNK]).all())
+        for start in range(0, values.size, _RANGE_CHUNK)
+    )
+
+
+def _note_finite(curve, x: np.ndarray, x_finite: bool, y_finite: bool) -> None:
+    """Record, for _trust_finite_data(), what this panel checked of *x* and y."""
+    curve._finite_data = (_buffer_address(x), x.size, x_finite, y_finite)
+
+
+def _buffer_address(array: np.ndarray) -> int:
+    return array.__array_interface__['data'][0]
+
+
+def _trust_finite_data(curve: pg.PlotDataItem) -> None:
+    """
+    Let *curve* take what this panel checked of its data as known.
+
+    pyqtgraph's PlotDataItem builds its dataset without finiteness flags, so
+    the first display of new data works them out over the whole signal: a
+    finite-values-only copy of x for auto-downsampling and a mask for the
+    data bounds, about 9 bytes per sample, gigabytes for a long signal. The
+    curve's display step is wrapped to set the flags first from the record
+    _note_finite() left — only while the curve still holds the very array the
+    record describes. It does nothing should pyqtgraph's private
+    ``_getDisplayDataset`` or ``_dataset`` go away.
+    """
+    display = getattr(type(curve), '_getDisplayDataset', None)
+    if display is None:
+        return
+    ref = weakref.ref(curve)    # no reference cycle through the curve
+
+    def get_display_dataset():
+        item = ref()
+        dataset = getattr(item, '_dataset', None)
+        known = getattr(item, '_finite_data', None)
+        x = getattr(dataset, 'x', None)
+        if (
+            known is not None and isinstance(x, np.ndarray)
+            and (_buffer_address(x), x.size) == known[:2]
+        ):
+            if known[2] and getattr(dataset, 'xAllFinite', True) is None:
+                dataset.xAllFinite = True
+            if known[3] and getattr(dataset, 'yAllFinite', True) is None:
+                dataset.yAllFinite = True
+        return display(item)
+
+    curve._getDisplayDataset = get_display_dataset
 
 
 def _union_range(spans) -> tuple[float, float] | None:
@@ -2311,6 +2365,7 @@ class PlotPanel(QWidget):
         """
         curve.setClipToView(True)
         curve.setDownsampling(auto=True, method='peak')   # kwarg is 'method', not 'mode'
+        _trust_finite_data(curve)
 
     @staticmethod
     def _curve_connect_mask(ts: np.ndarray, vs: np.ndarray) -> np.ndarray:
@@ -2329,12 +2384,13 @@ class PlotPanel(QWidget):
         if ts.size < 2:
             return connect
 
-        finite = np.isfinite(ts) & np.isfinite(vs)
-        connect[:-1] = (
-            finite[:-1]
-            & finite[1:]
-            & (ts[1:] >= ts[:-1])
-        )
+        # A chunk at a time (one sample of overlap), so the only array the
+        # length of the signal is the mask itself.
+        for start in range(0, ts.size - 1, _RANGE_CHUNK):
+            stop = min(ts.size, start + _RANGE_CHUNK + 1)
+            t, v = ts[start:stop], vs[start:stop]
+            finite = np.isfinite(t) & np.isfinite(v)
+            connect[start:stop - 1] = finite[:-1] & finite[1:] & (t[1:] >= t[:-1])
         return connect
 
     def _apply_curve_style(self, plotted: PlottedSignal,
@@ -2381,6 +2437,7 @@ class PlotPanel(QWidget):
             ts = np.asarray(plotted.series.timestamps, dtype=np.float64)
             vs = np.asarray(plotted.series.values,     dtype=np.float64)
             connect, all_finite = _curve_connection(ts, vs, self._curve_connect_mask)
+            _note_finite(plotted.curve, ts, all_finite or _all_finite(ts), all_finite)
             plotted.curve.setData(ts, vs, pen=pen, connect=connect,
                                   skipFiniteCheck=all_finite)
         else:

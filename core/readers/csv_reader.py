@@ -13,6 +13,8 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Iterator
 
+import numpy as np
+
 from core.models import DecodedSignalSample, RawFrame
 
 
@@ -111,6 +113,41 @@ def prescan_can_bus_logging_csv(
     return sorted(channels), ids_per_channel
 
 
+#: Rows a CSV is read in at a time; see CSVSignalReader.iter_signal_chunks().
+_CHUNK_ROWS = 200_000
+
+
+def _parse_cells(cells: list[str], fallbacks: list[str] | None = None):
+    """
+    Numbers and labels of one signal's cells.
+
+    Returns ``(values, labels)``: a float64 array, and None when every cell is
+    a number, else each cell's display value — its text, or its number. A
+    text cell's value is its *fallbacks* entry (a narrow file's raw_value)
+    when that is a number, else NaN.
+    """
+    try:
+        return np.asarray(cells, dtype=np.float64), None
+    except ValueError:
+        pass
+    values = np.empty(len(cells), dtype=np.float64)
+    labels: list = []
+    for i, cell in enumerate(cells):
+        try:
+            values[i] = number = float(cell)
+            labels.append(number)
+            continue
+        except ValueError:
+            pass
+        fallback = fallbacks[i] if fallbacks is not None else ""
+        try:
+            values[i] = float(fallback)
+        except ValueError:
+            values[i] = np.nan
+        labels.append(cell)
+    return values, labels
+
+
 class CSVSignalReader:
     """
     Reads pre-decoded signal CSV files and yields
@@ -140,7 +177,7 @@ class CSVSignalReader:
     """
 
     has_raw_frames:     bool = False
-    has_channel_arrays: bool = False  # uses sample loop
+    has_channel_arrays: bool = False  # LoadWorker reads iter_signal_chunks()
 
     def __init__(self, csv_path: str | Path) -> None:
         self._path = Path(csv_path)
@@ -177,6 +214,165 @@ class CSVSignalReader:
 
     def _detect_format(self) -> _CSVFormat:
         return _header_info(self._path)[0]
+
+    # ── Chunked arrays (LoadWorker) ───────────────────────────────────────
+
+    def iter_signal_chunks(self, chunk_rows: int = _CHUNK_ROWS):
+        """
+        Yield the file a chunk of rows at a time, as arrays per signal.
+
+        Each chunk is ``(first_ts, shared_ts, signals)``. *first_ts* is the
+        time of the chunk's first sample, in file order. *signals* lists
+        ``((channel, message_name, message_id, signal_name, unit), timestamps,
+        values, labels)``: float64 arrays, and *labels* None or the display
+        value of each sample (the text, or the number where there is one) when
+        any of the chunk's cells for the signal holds text. A signal with a
+        value in every row of a wide file has *shared_ts* itself as its
+        timestamps, the same object, so its time axis can be shared.
+
+        Only one chunk of rows is held at a time, so a file of any size reads
+        in bounded memory. The detected delimiter (``,``, ``;`` or tab) is
+        used.
+        """
+        fmt, delimiter, _header = _header_info(self._path)
+        self.load_messages.append(f"CSV format detected: {fmt.name}")
+        if fmt == _CSVFormat.NARROW:
+            yield from self._narrow_chunks(delimiter, chunk_rows)
+        elif fmt == _CSVFormat.WIDE:
+            yield from self._wide_chunks(delimiter, chunk_rows)
+        else:
+            # The same messages as the sample iterator gives.
+            next(iter(self), None)
+
+    def _wide_chunks(self, delimiter: str, chunk_rows: int):
+        try:
+            with self._path.open(newline="", encoding="utf-8-sig") as fh:
+                reader = csv.reader(fh, delimiter=delimiter)
+                header_row = None
+                for row in reader:
+                    if any(c.strip() for c in row):
+                        header_row = row
+                        break
+                if not header_row:
+                    return
+                signal_cols: list[tuple[int, str, str]] = []
+                for col_idx, hdr in enumerate(header_row):
+                    if col_idx == 0:
+                        continue
+                    hdr = hdr.strip()
+                    unit_match = _UNIT_RE.search(hdr)
+                    unit = unit_match.group(1).strip() if unit_match else ""
+                    name = _UNIT_RE.sub("", hdr).strip() or f"Signal_{col_idx}"
+                    signal_cols.append((col_idx, name, unit))
+                if not signal_cols:
+                    return
+
+                rows: list[list[str]] = []
+                for row in reader:
+                    if not any(c.strip() for c in row):
+                        continue
+                    rows.append(row)
+                    if len(rows) == chunk_rows:
+                        yield from self._wide_chunk(rows, signal_cols)
+                        rows = []
+                if rows:
+                    yield from self._wide_chunk(rows, signal_cols)
+        except CSVReadError:
+            raise
+        except Exception as exc:
+            raise CSVReadError(
+                f"Failed to read wide CSV '{self._path}': {exc}"
+            ) from exc
+
+    @staticmethod
+    def _wide_chunk(rows, signal_cols):
+        times, kept = [], []
+        for row in rows:
+            try:
+                times.append(float(row[0]))
+            except (IndexError, ValueError, TypeError):
+                continue
+            kept.append(row)
+        if not kept:
+            return
+        shared_ts = np.asarray(times, dtype=np.float64)
+        first_ts = None
+        signals = []
+        for col_idx, name, unit in signal_cols:
+            cells = [
+                row[col_idx].strip() if col_idx < len(row) else "" for row in kept
+            ]
+            present = np.fromiter((bool(c) for c in cells), dtype=bool, count=len(cells))
+            if not present.any():
+                continue
+            if not present.all():
+                cells = [c for c in cells if c]
+            values, labels = _parse_cells(cells)
+            ts = shared_ts if present.all() else shared_ts[present]
+            first = int(np.argmax(present))
+            first_ts = (
+                (first, shared_ts[first]) if first_ts is None or first < first_ts[0]
+                else first_ts
+            )
+            signals.append(((None, "CSV", 0, name, unit), ts, values, labels))
+        if signals:
+            yield float(first_ts[1]), shared_ts, signals
+
+    def _narrow_chunks(self, delimiter: str, chunk_rows: int):
+        try:
+            with self._path.open(newline="", encoding="utf-8-sig") as fh:
+                reader = csv.DictReader(fh, delimiter=delimiter)
+                rows = []
+                for row in reader:
+                    rows.append(row)
+                    if len(rows) == chunk_rows:
+                        yield from self._narrow_chunk(rows)
+                        rows = []
+                if rows:
+                    yield from self._narrow_chunk(rows)
+        except CSVReadError:
+            raise
+        except Exception as exc:
+            raise CSVReadError(
+                f"Failed to read narrow CSV '{self._path}': {exc}"
+            ) from exc
+
+    @staticmethod
+    def _narrow_chunk(rows):
+        """Group a chunk's rows by signal, keeping file order within each."""
+        grouped: dict[tuple, list] = {}
+        first_ts = None
+        for row in rows:
+            try:
+                ts = float(row.get("timestamp", 0) or 0)
+                ch_raw = (row.get("channel") or "").strip()
+                channel = int(ch_raw) if ch_raw.lstrip("-").isdigit() else None
+                msg_id_str = (row.get("message_id") or "0").strip()
+                try:
+                    msg_id = int(msg_id_str, 0)
+                except (ValueError, TypeError):
+                    msg_id = 0
+                message = (row.get("message_name") or "").strip()
+                signal = (row.get("signal_name") or "").strip()
+                entry = grouped.get((channel, message, signal))
+                if entry is None:
+                    meta = (channel, message, msg_id, signal, (row.get("unit") or "").strip())
+                    entry = grouped[(channel, message, signal)] = [meta, [], [], []]
+                value = (row.get("value") or "").strip()
+                raw_value = (row.get("raw_value") or "").strip()
+            except Exception:
+                continue   # skip malformed rows silently
+            if first_ts is None:
+                first_ts = ts
+            entry[1].append(ts)
+            entry[2].append(value)
+            entry[3].append(raw_value)
+        signals = []
+        for meta, times, values, raw_values in grouped.values():
+            numbers, labels = _parse_cells(values, raw_values)
+            signals.append((meta, np.asarray(times, dtype=np.float64), numbers, labels))
+        if signals:
+            yield first_ts, None, signals
 
     # ── Narrow reader ─────────────────────────────────────────────────────
 
