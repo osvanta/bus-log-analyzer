@@ -4,6 +4,16 @@
 > repository moved to `github.com/osvanta/bus-log-analyzer`. Releases up to and
 > including v00.00.60 were published as **CAN Scope / CANScope**; the entries below
 > use the names in force at the time of each release.
+## [v00.02.02] — 2026-10-22: measurements of many gigabytes load without running out of memory
+
+- **Fixed:** a very large measurement no longer runs out of memory. Pre-decoded MF4/MDF, BLF, ASC and bus-logging MF4 files of many gigabytes load in memory that does not grow with the file.
+- **Faster:** a pre-decoded MF4 decodes in under a second whatever its size: a 5 GB file takes 0.5 seconds instead of almost a minute. Each signal is read from the file when it is first plotted.
+- **Faster:** a bus-logging MF4 decoded through a DBC loads in less than half the time, with a fraction of the memory.
+- **Faster:** Fit to Window and Fit Vertical take a fraction of a second on a signal of millions of samples, instead of several seconds.
+- **Faster:** searching the Trace no longer freezes the window on a large recording, and the Trace takes a third of the temporary disk space for classic CAN.
+- **Fixed:** in a small Trace, searching an odd number of hex digits (such as 1a0) no longer fails.
+- **Changed:** while an MF4 or MDF measurement is open, the application keeps the file open, so it cannot be deleted or replaced until another measurement is opened or the application is closed.
+
 ## [v00.02.01] — 2026-10-14: BLF files load six times faster, and a user guide
 
 - **Faster:** a BLF file loads about six times faster: a 13-million-frame CAN FD recording goes from Decode to the signal tree in under 5 seconds instead of 29, with less memory.

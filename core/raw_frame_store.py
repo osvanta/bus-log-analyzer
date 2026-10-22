@@ -44,8 +44,12 @@ a ``(bus, number)`` key rather than a bare integer.
 
 Disk layout
 -----------
-Fixed 64-byte records (CAN + CAN-FD), one per frame. Unchanged by LIN support.
-Random access: ``offset = frame_index * _DATA_BYTES``
+8 bytes of payload per frame, in one file: a classic CAN or LIN frame, whose
+bytes past the eighth are all zero, keeps its first 8 bytes there. Any other
+frame (CAN FD) is stored, up to its last non-zero 8-byte word, in a second
+file, and its 8 bytes say where; ``FLAG_LONG`` marks it. :meth:`RawFrameStore.rows`
+puts the 64-byte rows back together. A fixed 64-byte record per frame took
+eight times the disk for classic CAN.
 
 Filter interface
 ----------------
@@ -71,12 +75,31 @@ from core.bus_types import BusChannel, BusType, coerce_channel_key
 
 
 # ── Constants ─────────────────────────────────────────────────────────────
-_DATA_BYTES        = 64          # bytes of raw data stored per frame (CAN FD max)
+_DATA_BYTES        = 64          # bytes of raw data per frame (CAN FD max)
+_SHORT_BYTES       = 8           # bytes kept per frame; see _Payload
+_WORDS             = _DATA_BYTES // 8
 _DIR_RX,_DIR_TX,_DIR_UNK = 0, 1, 2
-_ZEROS_64          = b'\x00' * _DATA_BYTES   # module-level constant — no allocation per frame
 _LARGE_STORE_LIMIT = 500_000     # frames; disable data-hex search above this
+_SEARCH_CHUNK      = 1 << 22     # frames a search looks at per step
 
 _DIR_STRINGS = ['Rx', 'Tx', 'Unknown']
+
+#: The columns append_raw_batch() receives, in its argument order, and their
+#: types; name_ids (uint16) follows them.
+_COLUMN_DTYPES = (
+    ('timestamps', np.float64), ('channels', np.uint8), ('arb_ids', np.uint32),
+    ('dlcs', np.uint8), ('directions', np.uint8), ('flags', np.uint8),
+)
+
+_COLUMN_TYPECODES = (
+    ('timestamps', 'd'), ('channels', 'B'), ('arb_ids', 'I'), ('dlcs', 'B'),
+    ('directions', 'B'), ('flags', 'B'), ('name_ids', 'H'),
+)
+
+#: Rows sort_by_time() merges per block, and the most time-ordered runs it
+#: merges; a column in more runs than that is sorted in one piece.
+_MERGE_BLOCK_ROWS = 1 << 20
+_MAX_MERGE_RUNS = 4096
 
 _FILE_PREFIX = 'osvanta_'
 _FILE_SUFFIX = '.rawdata'
@@ -86,6 +109,7 @@ FLAG_EXTENDED = 1
 FLAG_FD       = 2
 FLAG_DECODED  = 4
 FLAG_LIN      = 8      # bus discriminator; absent means CAN
+FLAG_LONG     = 0x80   # payload kept whole in the overflow file; see _Payload
 
 
 def _create_data_file():
@@ -131,6 +155,127 @@ def remove_leftover_files(directory: str | os.PathLike | None = None) -> tuple[i
         removed += 1
         freed += size
     return removed, freed
+
+
+class _Payload:
+    """
+    Each frame's payload: its 8 bytes, or where its longer payload is.
+
+    A frame whose bytes past the eighth are all zero (classic CAN, LIN) keeps
+    its first 8 bytes in the main file. Any other frame (CAN FD) has its
+    payload, up to its last non-zero 8-byte word, appended to the overflow
+    file, and its 8 bytes hold that record's offset and length (``offset <<
+    8 | length``). Written a batch at a time (:meth:`write`), which returns
+    the overflowed rows so the caller can set ``FLAG_LONG`` on them; read
+    back as 64-byte rows (:meth:`rows`) once :meth:`map` has mapped both
+    files.
+    """
+
+    def __init__(self) -> None:
+        self.short_file, self.short_path = _create_data_file()
+        self.long_file, self.long_path = _create_data_file()
+        self.count = 0
+        self.long_count = 0
+        self.long_bytes = 0
+        self._short_map: mmap.mmap | None = None
+        self._long_map: mmap.mmap | None = None
+
+    def write(self, rows: np.ndarray) -> np.ndarray:
+        """Append *rows* ((k, width <= 64) uint8); return the overflowed rows' mask."""
+        count, width = rows.shape
+        if width == _DATA_BYTES and rows.flags.c_contiguous:
+            # Eight 8-byte words a row: any non-zero word past the first.
+            words = rows.view('<u8')
+            long = (words[:, 1:] != 0).any(axis=1)
+            short = words[:, 0].copy()
+        else:
+            long = (
+                rows[:, _SHORT_BYTES:].any(axis=1) if width > _SHORT_BYTES
+                else np.zeros(count, dtype=bool)
+            )
+            first = np.zeros((count, _SHORT_BYTES), dtype=np.uint8)
+            first[:, :min(width, _SHORT_BYTES)] = rows[:, :_SHORT_BYTES]
+            short = first.view('<u8').reshape(count)
+        long_rows = int(np.count_nonzero(long))
+        if long_rows:
+            overflow = rows[long]
+            if width != _DATA_BYTES:
+                padded = np.zeros((long_rows, _DATA_BYTES), dtype=np.uint8)
+                padded[:, :width] = overflow
+                overflow = padded
+            # Up to and including the last non-zero 8-byte word of each row:
+            # whole words keep this a few operations per batch.
+            words = overflow.view('<u8')
+            nwords = _WORDS - np.argmax((words != 0)[:, ::-1], axis=1)
+            kept = np.arange(_WORDS) < nwords[:, None]
+            self.long_file.write(memoryview(np.ascontiguousarray(words[kept])))
+            lengths = (nwords * 8).astype(np.uint64)
+            offsets = self.long_bytes + np.concatenate(
+                ([0], np.cumsum(lengths)[:-1])
+            ).astype(np.uint64)
+            short[long] = (offsets << np.uint64(8)) | lengths
+            self.long_bytes += int(lengths.sum())
+            self.long_count += long_rows
+        self.short_file.write(memoryview(np.ascontiguousarray(short)))
+        self.count += count
+        return long
+
+    @property
+    def mapped(self) -> bool:
+        return self._short_map is not None
+
+    def map(self) -> None:
+        """Map both files for reading; writing after this is not supported."""
+        if self._short_map is not None or not self.count:
+            return
+        self.short_file.flush()
+        self.long_file.flush()
+        self._short_map = mmap.mmap(
+            self.short_file.fileno(), self.count * _SHORT_BYTES, access=mmap.ACCESS_READ
+        )
+        if self.long_bytes:
+            self._long_map = mmap.mmap(
+                self.long_file.fileno(), self.long_bytes, access=mmap.ACCESS_READ
+            )
+
+    def rows(self, indices, flags: np.ndarray) -> np.ndarray:
+        """The 64-byte rows of *indices* (array or slice); *flags* are theirs."""
+        short = np.frombuffer(
+            self._short_map, dtype='<u8', count=self.count
+        )[indices]
+        out = np.zeros((len(short), _DATA_BYTES), dtype=np.uint8)
+        out[:, :_SHORT_BYTES] = short.view(np.uint8).reshape(-1, _SHORT_BYTES)
+        long = (np.asarray(flags) & np.uint8(FLAG_LONG)) != 0
+        if long.any():
+            slots = short[long]
+            offsets = (slots >> np.uint64(8)).astype(np.int64)
+            lengths = (slots & np.uint64(0xFF)).astype(np.int64)
+            # Every kept byte's position in the overflow file, in row order.
+            starts = np.cumsum(lengths) - lengths
+            positions = (
+                np.repeat(offsets - starts, lengths) + np.arange(int(lengths.sum()))
+            )
+            data = np.frombuffer(self._long_map, dtype=np.uint8, count=self.long_bytes)
+            overflow = np.zeros((len(slots), _DATA_BYTES), dtype=np.uint8)
+            overflow[np.arange(_DATA_BYTES) < lengths[:, None]] = data[positions]
+            out[long] = overflow
+        return out
+
+    def close(self) -> None:
+        """Close the maps and files; the operating system deletes the files."""
+        for name in ('_short_map', '_long_map'):
+            view = getattr(self, name)
+            setattr(self, name, None)
+            if view is not None:
+                try:
+                    view.close()
+                except (BufferError, ValueError):
+                    pass    # a live NumPy view: it goes when the view does
+        for handle in (self.short_file, self.long_file):
+            try:
+                handle.close()
+            except OSError:
+                pass
 
 
 class RawFrameRecord(NamedTuple):
@@ -181,10 +326,7 @@ class RawFrameStore:
         # ── Decoder reference (set after decode for on-demand signal fetch)
         self.decoder = None   # DBCDecoder | None
 
-        # ── Temp data file ────────────────────────────────────────────────
-        self._data_path: str | None = None
-        self._data_file = None          # file handle (write phase)
-        self._mmap:      mmap.mmap | None = None   # read phase (after seal)
+        # ── Payload files (see _Payload) ──────────────────────────────────
         self._sealed = False
 
         # NumPy batches from append_raw_batch(), held until seal(). Growing an
@@ -193,12 +335,13 @@ class RawFrameStore:
         self._pending: list[list] = []
         self._pending_rows = 0
 
-        # Pre-allocated 64-byte buffer for zero-copy disk writes (Bottleneck 2).
-        # Re-used on every append_raw() call — no per-frame bytes() allocation.
-        self._write_buf: bytearray = bytearray(_DATA_BYTES)
+        # Batches from append_raw_batch() go straight to one temporary file
+        # per column (core.sample_file.AppendColumn), and seal() maps every
+        # column, so the frame index costs no memory however many frames.
+        self._file_columns: dict[str, object] | None = None
 
-        # Create temp file immediately
-        self._data_file, self._data_path = _create_data_file()
+        # Create the payload files immediately
+        self._payload: _Payload | None = _Payload()
 
     # ── Write phase (during decode) ───────────────────────────────────────
 
@@ -223,6 +366,8 @@ class RawFrameStore:
             (FLAG_DECODED  if decoded     else 0) |
             (FLAG_LIN      if bus is BusType.LIN else 0)
         )
+        if self._write_payload(bytes(data)[:_DATA_BYTES]):
+            flags |= FLAG_LONG
         self.flags.append(flags)
 
         # Name table lookup / insert
@@ -236,10 +381,6 @@ class RawFrameStore:
                 self._name_to_id[frame_name] = nid
         self.name_ids.append(nid)
 
-        # Write data bytes to disk (pad to _DATA_BYTES)
-        raw = bytes(data)[:_DATA_BYTES]
-        self._data_file.write(raw + b'\x00' * (_DATA_BYTES - len(raw)))
-
     def append_raw(self, timestamp: float, channel_byte: int,
                    arb_id: int, dlc: int, direction_int: int,
                    is_extended: bool, is_fd: bool, data) -> None:
@@ -252,9 +393,6 @@ class RawFrameStore:
         * Accepts ``direction_int`` (0/1/2) — skips string comparison.
         * Always ``frame_name=''``, ``decoded=False`` — skips name-table
           lookup (always ``nid=0``) and the decoded-bit shift (Bottleneck 4).
-        * Disk write uses a pre-allocated ``bytearray`` buffer filled by two
-          C-level memcopy calls instead of three temporary ``bytes`` objects
-          (Bottleneck 2).
         """
         self._materialize()
         self.timestamps.append(timestamp)
@@ -262,18 +400,18 @@ class RawFrameStore:
         self.arb_ids.append(arb_id & 0xFFFF_FFFF)
         self.dlcs.append(min(dlc, 255))
         self.directions.append(direction_int)
-        self.flags.append(
-            (FLAG_EXTENDED if is_extended else 0) | (FLAG_FD if is_fd else 0)
-        )
+        flags = (FLAG_EXTENDED if is_extended else 0) | (FLAG_FD if is_fd else 0)
+        if self._write_payload(bytes(data[:_DATA_BYTES])):
+            flags |= FLAG_LONG
+        self.flags.append(flags)
         self.name_ids.append(0)   # always '' for 2-pass path
 
-        # Zero-copy disk write: zero the buffer, copy data in — no bytes alloc.
-        buf = self._write_buf
-        n   = min(len(data), _DATA_BYTES)
-        buf[:] = _ZEROS_64        # C-level memcopy of 64 B, no Python object
-        if n:
-            buf[:n] = data[:n]    # C-level memcopy of payload
-        self._data_file.write(buf)
+    def _write_payload(self, data: bytes) -> bool:
+        """Store one frame's payload; return whether it overflowed (FLAG_LONG)."""
+        row = np.zeros((1, _DATA_BYTES), dtype=np.uint8)
+        if data:
+            row[0, :len(data)] = np.frombuffer(data, dtype=np.uint8)
+        return bool(self._payload.write(row)[0])
 
     def append_raw_batch(
         self,
@@ -303,8 +441,22 @@ class RawFrameStore:
         ):
             raise ValueError("Raw frame batch columns have different lengths")
 
+        # The payload first: rows that overflow get FLAG_LONG in their flags.
+        long = self._payload.write(np.frombuffer(
+            memoryview(data_block)[:count * _DATA_BYTES], dtype=np.uint8,
+        ).reshape(count, _DATA_BYTES))
+        if long.any():
+            marked = np.asarray(flags, dtype=np.uint8) | (
+                long.astype(np.uint8) * np.uint8(FLAG_LONG)
+            )
+            flags = marked if isinstance(flags, np.ndarray) else marked.tolist()
+
         columns = [timestamps, channels, arb_ids, dlcs, directions, flags]
-        if all(isinstance(values, np.ndarray) for values in columns):
+        if self._file_columns is not None or (
+            not len(self.timestamps) and not self._pending
+        ):
+            self._write_columns(count, columns)
+        elif all(isinstance(values, np.ndarray) for values in columns):
             self._pending.append(columns)
             self._pending_rows += count
         else:
@@ -323,7 +475,40 @@ class RawFrameStore:
             extend_column(self.directions, directions)
             extend_column(self.flags, flags)
             self.name_ids.frombytes(bytes(count * self.name_ids.itemsize))
-        self._data_file.write(memoryview(data_block)[:count * _DATA_BYTES])
+
+    def _write_columns(self, count: int, columns) -> None:
+        """Append one batch to the column files, creating them on first use."""
+        from core.sample_file import AppendColumn
+
+        if self._file_columns is None:
+            self._file_columns = {
+                name: AppendColumn(dtype)
+                for name, dtype in (*_COLUMN_DTYPES, ('name_ids', np.uint16))
+            }
+        for (name, dtype), values in zip(_COLUMN_DTYPES, columns):
+            if isinstance(values, (bytes, bytearray, memoryview)):
+                values = np.frombuffer(values, dtype=dtype)
+            self._file_columns[name].extend(values)
+        self._file_columns['name_ids'].extend(np.zeros(count, dtype=np.uint16))
+
+    def _map_columns(self) -> None:
+        """Put every column in its file and keep a mapped view of it."""
+        from core.sample_file import AppendColumn
+
+        if self._file_columns is None:
+            if not len(self.timestamps):
+                return
+            # Built in memory (one frame at a time, or MDF bus logging):
+            # moved to the files now, so the open measurement holds no index.
+            self._file_columns = {}
+            for name, dtype in (*_COLUMN_DTYPES, ('name_ids', np.uint16)):
+                column = AppendColumn(dtype)
+                column.extend(np.frombuffer(getattr(self, name), dtype=dtype))
+                self._file_columns[name] = column
+        for name, column in self._file_columns.items():
+            setattr(self, name, column.mapped())
+            column.close()
+        self._file_columns = None
 
     def _materialize(self) -> None:
         """Join the NumPy batches held by append_raw_batch() into the columns."""
@@ -361,9 +546,8 @@ class RawFrameStore:
         arrays; copying those arrays directly keeps CAN Trace construction on
         the bulk path and avoids creating a Python object per CAN frame.
 
-        ``data_rows`` may contain 0..64 payload columns.  RawFrameStore keeps
-        fixed 64-byte records on disk, so narrower classic-CAN rows are padded
-        in bounded chunks rather than allocating one large expanded array.
+        ``data_rows`` may contain 0..64 payload columns; see _Payload for how
+        they are kept. They are written in bounded chunks.
         """
         self._materialize()
         count = len(timestamps)
@@ -375,20 +559,6 @@ class RawFrameStore:
         ):
             raise ValueError("Raw frame NumPy columns have different lengths")
 
-        def extend_column(target, values, dtype) -> None:
-            column = np.ascontiguousarray(values, dtype=dtype).reshape(-1)
-            if len(column) != count:
-                raise ValueError("Raw frame NumPy column has an invalid shape")
-            target.frombytes(column.tobytes())
-
-        extend_column(self.timestamps, timestamps, np.float64)
-        extend_column(self.channels, channels, np.uint8)
-        extend_column(self.arb_ids, arb_ids, np.uint32)
-        extend_column(self.dlcs, dlcs, np.uint8)
-        extend_column(self.directions, directions, np.uint8)
-        extend_column(self.flags, flags, np.uint8)
-        self.name_ids.frombytes(bytes(count * self.name_ids.itemsize))
-
         payload = np.asarray(data_rows, dtype=np.uint8)
         if payload.ndim == 1:
             if len(payload) % count:
@@ -397,14 +567,32 @@ class RawFrameStore:
         if payload.ndim != 2 or payload.shape[0] != count:
             raise ValueError("Raw frame payload array has an invalid shape")
 
+        # The payload first: rows that overflow get FLAG_LONG in their flags.
         width = min(int(payload.shape[1]), _DATA_BYTES)
+        long = np.zeros(count, dtype=bool)
         chunk_size = 16_384
         for start in range(0, count, chunk_size):
             end = min(start + chunk_size, count)
-            block = np.zeros((end - start, _DATA_BYTES), dtype=np.uint8)
-            if width:
-                block[:, :width] = payload[start:end, :width]
-            self._data_file.write(memoryview(block))
+            long[start:end] = self._payload.write(payload[start:end, :width])
+
+        columns = []
+        for (_name, dtype), values in zip(
+            _COLUMN_DTYPES,
+            (timestamps, channels, arb_ids, dlcs, directions, flags),
+        ):
+            column = np.ascontiguousarray(values, dtype=dtype).reshape(-1)
+            if len(column) != count:
+                raise ValueError("Raw frame NumPy column has an invalid shape")
+            columns.append(column)
+        if long.any():
+            columns[5] = columns[5] | (long.astype(np.uint8) * np.uint8(FLAG_LONG))
+        if self._file_columns is not None or not len(self.timestamps):
+            # Straight to the column files, as append_raw_batch() does.
+            self._write_columns(count, columns)
+        else:
+            for (name, _dtype), column in zip(_COLUMN_DTYPES, columns):
+                getattr(self, name).frombytes(column.tobytes())
+            self.name_ids.frombytes(bytes(count * self.name_ids.itemsize))
 
     def sort_by_time(self) -> bool:
         """
@@ -424,6 +612,8 @@ class RawFrameStore:
         """
         if self._sealed:
             raise RuntimeError("sort_by_time() must be called before seal()")
+        if self._file_columns is not None:
+            return self._merge_by_time()
         self._materialize()
         count = len(self.timestamps)
         timestamps = np.frombuffer(self.timestamps, dtype=np.float64)
@@ -432,21 +622,15 @@ class RawFrameStore:
         order = np.argsort(timestamps, kind='stable')
         del timestamps          # a live buffer export would pin the column
 
-        self._data_file.flush()
-        data_file, path = _create_data_file()
+        payload = _Payload()
         try:
-            source = mmap.mmap(self._data_file.fileno(),
-                               length=count * _DATA_BYTES,
-                               access=mmap.ACCESS_READ)
-            rows = None
-            try:
-                rows = np.frombuffer(source, dtype=np.uint8).reshape(count, _DATA_BYTES)
-                chunk_size = 65_536
-                for start in range(0, count, chunk_size):
-                    data_file.write(memoryview(rows[order[start:start + chunk_size]]))
-            finally:
-                del rows        # the view must go before the map can close
-                source.close()
+            self._payload.map()
+            flags = np.frombuffer(self.flags, dtype=np.uint8)
+            chunk_size = 65_536
+            for start in range(0, count, chunk_size):
+                part = order[start:start + chunk_size]
+                payload.write(self._payload.rows(part, flags[part]))
+            del flags           # nor may a view of the flags outlive this
             columns = {}
             for name in ('timestamps', 'channels', 'arb_ids', 'dlcs',
                          'directions', 'flags', 'name_ids'):
@@ -457,14 +641,94 @@ class RawFrameStore:
                 )
                 columns[name] = reordered
         except BaseException:
-            data_file.close()       # which deletes it
+            payload.close()         # which deletes its files
             raise
 
         for name, column in columns.items():
             setattr(self, name, column)
-        self._data_file.close()     # which deletes the unsorted copy
-        self._data_file, self._data_path = data_file, path
+        self._payload.close()       # which deletes the unsorted copy
+        self._payload = payload
         return True
+
+    def _merge_by_time(self) -> bool:
+        """
+        :meth:`sort_by_time` for columns in files, in bounded memory.
+
+        The rows arrive as runs already in time order (one per MDF channel
+        group, typically). The runs are merged a block at a time: each block
+        takes every remaining row up to a time stamp, from every run, and puts
+        them in (time, row) order, which is what a stable sort of the whole
+        column gives. A column with too many runs to merge is sorted whole.
+        """
+        from core.sample_file import AppendColumn
+
+        mapped = {name: column.mapped() for name, column in self._file_columns.items()}
+        timestamps = mapped['timestamps']
+        count = len(timestamps)
+        starts = [0]
+        for start in range(0, max(count - 1, 0), _MERGE_BLOCK_ROWS):
+            stop = min(count, start + _MERGE_BLOCK_ROWS + 1)
+            chunk = timestamps[start:stop]
+            starts.extend((np.flatnonzero(chunk[1:] < chunk[:-1]) + start + 1).tolist())
+        if len(starts) == 1:
+            return False
+        ends = starts[1:] + [count]
+        if len(starts) > _MAX_MERGE_RUNS:
+            # Too fragmented to merge: one sort, the order in memory.
+            blocks = [np.argsort(timestamps, kind='stable')]
+        else:
+            blocks = self._merge_blocks(timestamps, starts, ends)
+
+        payload = _Payload()
+        sorted_columns = {
+            name: AppendColumn(column.dtype) for name, column in mapped.items()
+        }
+        try:
+            self._payload.map()
+            flags = mapped['flags']
+            for block in blocks:
+                for start in range(0, len(block), _MERGE_BLOCK_ROWS):
+                    part = block[start:start + _MERGE_BLOCK_ROWS]
+                    for name, column in mapped.items():
+                        sorted_columns[name].extend(column[part])
+                    payload.write(self._payload.rows(part, flags[part]))
+        except BaseException:
+            payload.close()         # which deletes its files
+            for column in sorted_columns.values():
+                column.close()
+            raise
+
+        del mapped, timestamps, flags
+        for column in self._file_columns.values():
+            column.close()          # its file goes once nothing maps it
+        self._file_columns = sorted_columns
+        self._payload.close()       # which deletes the unsorted copy
+        self._payload = payload
+        return True
+
+    @staticmethod
+    def _merge_blocks(timestamps, starts, ends):
+        """Yield the merged row order of the time-ordered runs, block by block."""
+        heads = list(starts)
+        while True:
+            active = [r for r in range(len(heads)) if heads[r] < ends[r]]
+            if not active:
+                return
+            step = max(1, _MERGE_BLOCK_ROWS // len(active))
+            # No run gives more than *step* rows below this time, unless they
+            # tie with it; every row at this time goes into this block.
+            limit = min(
+                timestamps[min(heads[r] + step, ends[r]) - 1] for r in active
+            )
+            parts = []
+            for r in active:
+                run = timestamps[heads[r]:ends[r]]
+                taken = int(np.searchsorted(run, limit, side='right'))
+                if taken:
+                    parts.append(np.arange(heads[r], heads[r] + taken, dtype=np.int64))
+                    heads[r] += taken
+            block = np.concatenate(parts)
+            yield block[np.argsort(timestamps[block], kind='stable')]
 
     def seal(self) -> None:
         """
@@ -476,23 +740,18 @@ class RawFrameStore:
             return
         self._materialize()
         self._sealed = True
-        if self._data_file:
-            self._data_file.flush()
+        self._map_columns()
         n = len(self.timestamps)
         if n == 0:
             return
-        # Re-open read-only handle for mmap; keep original open for ownership
         try:
-            self._mmap = mmap.mmap(
-                self._data_file.fileno(),
-                length=0,          # map entire file
-                access=mmap.ACCESS_READ,
-            )
+            self._payload.map()
         except Exception:
-            self._mmap = None   # fallback: read via file.seek/read
+            pass    # payload_mapped stays False; the decode falls back
 
     def __len__(self) -> int:
-        return len(self.timestamps) + self._pending_rows
+        written = 0 if self._file_columns is None else self._file_columns['timestamps'].count
+        return len(self.timestamps) + self._pending_rows + written
 
     def close(self) -> None:
         """Release mmap and delete temp file.
@@ -501,19 +760,17 @@ class RawFrameStore:
         because a NumPy view of it is still alive, deletes it once the view
         goes.
         """
-        if self._mmap:
-            try:
-                self._mmap.close()
-            except Exception:
-                pass
-            self._mmap = None
-        if self._data_file:
-            try:
-                self._data_file.close()
-            except Exception:
-                pass
-            self._data_file = None
-        self._data_path = None
+        if self._payload is not None:
+            self._payload.close()
+            self._payload = None
+        # The mapped columns hold their files open; empty ones let them go.
+        for name, typecode in _COLUMN_TYPECODES:
+            if not isinstance(getattr(self, name, None), _array.array):
+                setattr(self, name, _array.array(typecode))
+        if self._file_columns is not None:
+            for column in self._file_columns.values():
+                column.close()
+            self._file_columns = None
 
     def __del__(self) -> None:
         self.close()
@@ -528,28 +785,34 @@ class RawFrameStore:
         """
         result: list[RawFrameRecord] = []
         n = len(self.timestamps)
-        for idx in indices:
-            if idx < 0 or idx >= n:
-                continue
+        indices = [int(idx) for idx in indices if 0 <= idx < n]
+        rows = (
+            self.rows(np.asarray(indices, dtype=np.int64))
+            if indices and self.payload_mapped else None
+        )
+        for position, idx in enumerate(indices):
 
-            # In-memory metadata
-            ts  = self.timestamps[idx]
-            raw_ch = self.channels[idx]
+            # Mapped metadata, as plain Python numbers
+            ts  = float(self.timestamps[idx])
+            raw_ch = int(self.channels[idx])
             ch  = raw_ch if raw_ch != 255 else None
-            aid = self.arb_ids[idx]
-            dlc = self.dlcs[idx]
-            fl  = self.flags[idx]
-            nid = self.name_ids[idx]
+            aid = int(self.arb_ids[idx])
+            dlc = int(self.dlcs[idx])
+            fl  = int(self.flags[idx])
+            nid = int(self.name_ids[idx])
 
             is_extended = bool(fl & FLAG_EXTENDED)
             is_fd       = bool(fl & FLAG_FD)
             decoded     = bool(fl & FLAG_DECODED)
             bus         = BusType.LIN if fl & FLAG_LIN else BusType.CAN
-            direction   = _DIR_STRINGS[min(self.directions[idx], 2)]
+            direction   = _DIR_STRINGS[min(int(self.directions[idx]), 2)]
             name        = self.name_table[nid] if nid < len(self.name_table) else ''
 
             # Disk data
-            data = self._read_data(idx, min(dlc, _DATA_BYTES))
+            data = (
+                rows[position, :min(dlc, _DATA_BYTES)].tobytes()
+                if rows is not None else b''
+            )
 
             result.append(RawFrameRecord(
                 time_s=ts, channel=ch, arbitration_id=aid,
@@ -562,21 +825,26 @@ class RawFrameStore:
 
     def _read_data(self, idx: int, length: int) -> bytes:
         """Read up to `length` raw data bytes for frame `idx`."""
-        offset = idx * _DATA_BYTES
-        if self._mmap:
-            try:
-                return bytes(self._mmap[offset: offset + length])
-            except Exception:
-                pass
-        if self._data_file:
-            try:
-                self._data_file.seek(offset)
-                return self._data_file.read(length)
-            except Exception:
-                pass
-        return b''
+        if not self.payload_mapped or not 0 <= idx < len(self.timestamps):
+            return b''
+        return self.rows(np.asarray([idx], dtype=np.int64))[0, :length].tobytes()
 
-    # ── Vectorised filter ─────────────────────────────────────────────────
+    @property
+    def _data_path(self) -> str | None:
+        """The payload's main file, while the store is open."""
+        return None if self._payload is None else self._payload.short_path
+
+    @property
+    def payload_mapped(self) -> bool:
+        return self._payload is not None and self._payload.mapped
+
+    def rows(self, indices) -> np.ndarray:
+        """
+        The 64-byte payload rows of *indices* (an index array or a slice),
+        zero past each frame's data, as one ``(k, 64)`` uint8 array.
+        """
+        flags = np.frombuffer(self.flags, dtype=np.uint8)[indices]
+        return self._payload.rows(indices, flags)
 
     def channel_keys(self) -> list[BusChannel]:
         """
@@ -613,130 +881,268 @@ class RawFrameStore:
         frames pass the filter.  Returns None when all frames match (no
         filter active) — callers treat None as "full range, zero extra RAM".
 
-        *channel_filter* is a ``(bus, number)`` key: filtering on the number
-        alone would show LIN 1 frames when the user asked for CAN 1.
-
-        Uses numpy vectorised ops on in-memory arrays — no disk access,
-        no Python per-frame loop for the common cases.
+        The matching frames themselves come from :meth:`matching_indices`,
+        which a caller should prefer: this mask is one byte per frame.
         """
         n = len(self.timestamps)
         if n == 0:
             return np.zeros(0, dtype=bool)
+        indices = self.matching_indices(needle, channel_filter)
+        if indices is None:
+            return None
+        mask = np.zeros(n, dtype=bool)
+        mask[indices] = True
+        return mask
 
-        any_filter = (needle != '') or (channel_filter is not None)
-        if not any_filter:
+    def matching_indices(
+        self,
+        needle: str,
+        channel_filter: BusChannel | int | None,
+    ) -> np.ndarray | None:
+        """
+        The indices of the frames that pass the filter, or None for all.
+
+        *channel_filter* is a ``(bus, number)`` key: filtering on the number
+        alone would show LIN 1 frames when the user asked for CAN 1.
+
+        A frame matches *needle* when its ID (exactly, else as a hex
+        substring), frame name, direction, time stamp or — in a store of at
+        most 500 k frames — data bytes do. When no frame matches any of
+        those, the needle is looked for in each frame's text
+        ``"can <channel> <id> <name> <direction> <length>"`` instead.
+
+        Worked out a chunk of frames at a time, and per distinct ID or per
+        distinct (ID, name, channel, direction, length) where it is about
+        text: a log has a few hundred of those and millions of frames, so
+        no Python runs per frame and no array holds one entry per frame
+        besides the matches.
+        """
+        n = len(self.timestamps)
+        if n == 0:
+            return np.zeros(0, dtype=np.int64)
+        if needle == '' and channel_filter is None:
             return None   # sentinel: all match
+        chunks = [(start, min(n, start + _SEARCH_CHUNK)) for start in range(0, n, _SEARCH_CHUNK)]
 
-        mask = np.ones(n, dtype=bool)
-
-        # ── Channel filter (vectorised uint8 comparison) ──────────────────
         if channel_filter is not None:
             # A bare integer filter is read as CAN, matching the raw-CAN
             # formats that have no bus dimension to give.
             bus, number = coerce_channel_key(channel_filter)
-            chs = np.frombuffer(self.channels, dtype=np.uint8)
-            fls = np.frombuffer(self.flags, dtype=np.uint8)
-            is_lin = (fls & np.uint8(FLAG_LIN)) != 0
-            mask &= (chs == number) & (is_lin == (bus is BusType.LIN))
 
-        # ── Text needle filter ────────────────────────────────────────────
-        if needle:
-            needle_lower = needle.lower()
+            def on_channel(start, end):
+                chs = np.frombuffer(self.channels, dtype=np.uint8)[start:end]
+                fls = np.frombuffer(self.flags, dtype=np.uint8)[start:end]
+                is_lin = (fls & np.uint8(FLAG_LIN)) != 0
+                return (chs == number) & (is_lin == (bus is BusType.LIN))
+        else:
+            on_channel = None
 
-            # 1. ID hex match (vectorised)
-            aids = np.frombuffer(self.arb_ids, dtype=np.uint32)
-            # Convert IDs to hex strings in bulk — fast enough for 3M frames
-            # by checking if needle is a valid hex substring
-            id_mask = np.zeros(n, dtype=bool)
-            try:
-                # Try needle as a hex value — match on numeric range
-                hex_val = int(needle_lower.replace(' ', '').lstrip('0x'), 16)
-                id_mask = (aids == hex_val)
-            except ValueError:
-                pass
-            # Also check hex string contains needle (e.g. "FECA")
-            # For large stores: vectorised via format strings is slow;
-            # use byte-level tricks instead
-            if not id_mask.any():
-                # Fallback: check for 4-char hex substrings (fast for short needles)
-                if len(needle_lower) <= 8 and all(c in '0123456789abcdef' for c in needle_lower):
-                    # Vectorised hex digit matching
-                    aid_hex_arr = np.vectorize(lambda x: f'{x:X}'.lower())(aids)
-                    id_mask = np.vectorize(lambda s: needle_lower in s)(aid_hex_arr)
+        if not needle:
+            return np.concatenate([
+                np.flatnonzero(on_channel(start, end)) + start for start, end in chunks
+            ]).astype(np.int64)
 
-            # 2. Name match (vectorised via name_table lookup)
-            name_mask = np.zeros(n, dtype=bool)
-            matching_nids = np.array(
-                [i for i, nm in enumerate(self.name_table)
-                 if needle_lower in nm.lower()],
-                dtype=np.uint16
+        fields = self._field_test(needle.lower(), n)
+        found, any_field = [], False
+        for start, end in chunks:
+            matched = fields(start, end)
+            any_field = any_field or bool(matched.any())
+            if on_channel is not None:
+                matched &= on_channel(start, end)
+            found.append(np.flatnonzero(matched) + start)
+        if not any_field:
+            # No field matched anywhere: look in each frame's text instead.
+            text = self._text_test(needle.lower())
+            found = []
+            for start, end in chunks:
+                matched = text(start, end)
+                if on_channel is not None:
+                    matched &= on_channel(start, end)
+                found.append(np.flatnonzero(matched) + start)
+        return np.concatenate(found).astype(np.int64)
+
+    def _distinct_ids(self) -> np.ndarray:
+        """The sorted distinct arbitration IDs, worked out once per store."""
+        cached = getattr(self, '_distinct_id_cache', None)
+        if cached is not None and cached[0] == len(self.timestamps):
+            return cached[1]
+        aids = np.frombuffer(self.arb_ids, dtype=np.uint32)
+        distinct = np.unique(np.concatenate([
+            np.unique(aids[start:start + _SEARCH_CHUNK])
+            for start in range(0, len(aids), _SEARCH_CHUNK)
+        ] or [np.empty(0, dtype=np.uint32)]))
+        self._distinct_id_cache = (len(self.timestamps), distinct)
+        return distinct
+
+    def _field_test(self, needle_lower: str, n: int):
+        """Return ``test(start, end) -> mask`` of the needle against each field."""
+        # 1. ID: exactly, else as a hex substring when no ID matches exactly.
+        distinct = self._distinct_ids()
+        ids = np.empty(0, dtype=np.uint32)
+        try:
+            hex_val = int(needle_lower.replace(' ', '').lstrip('0x'), 16)
+            if np.isin(np.uint64(hex_val), distinct.astype(np.uint64)):
+                ids = np.array([hex_val], dtype=np.uint32)
+        except (ValueError, OverflowError):
+            pass
+        if not len(ids) and len(needle_lower) <= 8 and all(
+            c in '0123456789abcdef' for c in needle_lower
+        ):
+            ids = np.array(
+                [aid for aid in distinct.tolist() if needle_lower in f'{aid:X}'.lower()],
+                dtype=np.uint32,
             )
-            if len(matching_nids) > 0:
-                nids = np.frombuffer(self.name_ids, dtype=np.uint16)
-                name_mask = np.isin(nids, matching_nids)
 
-            # 3. Direction match
-            dirs_arr = np.frombuffer(self.directions, dtype=np.uint8)
-            dir_mask = np.zeros(n, dtype=bool)
-            if needle_lower in 'rx':
-                dir_mask |= (dirs_arr == _DIR_RX)
-            if needle_lower in 'tx':
-                dir_mask |= (dirs_arr == _DIR_TX)
+        # 2. Name, through the name table.
+        name_ids = np.array(
+            [i for i, nm in enumerate(self.name_table) if needle_lower in nm.lower()],
+            dtype=np.uint16,
+        )
 
-            # 4. Timestamp match (string prefix)
-            ts_mask = np.zeros(n, dtype=bool)
-            try:
-                # Try interpreting needle as a float timestamp prefix
-                ts_val = float(needle_lower)
-                ts_arr = np.frombuffer(self.timestamps, dtype=np.float64)
-                ts_mask = np.abs(ts_arr - ts_val) < 0.001
-            except ValueError:
-                pass
+        # 3. Direction.
+        directions = [d for d, text in ((_DIR_RX, 'rx'), (_DIR_TX, 'tx'))
+                      if needle_lower in text]
 
-            # 5. Data hex — only for small stores (avoids disk scan)
-            data_mask = np.zeros(n, dtype=bool)
-            if n <= _LARGE_STORE_LIMIT and self._mmap and len(needle_lower) >= 2:
-                # Check if needle looks like hex bytes (e.g. "FF 00")
-                hex_needle = needle_lower.replace(' ', '')
-                if all(c in '0123456789abcdef' for c in hex_needle) and len(hex_needle) >= 2:
-                    needle_bytes = bytes.fromhex(hex_needle)
-                    # Scan data file using mmap as a numpy array
-                    try:
-                        data_arr = np.frombuffer(self._mmap, dtype=np.uint8)
-                        data_arr = data_arr[: n * _DATA_BYTES].reshape(n, _DATA_BYTES)
-                        nb = len(needle_bytes)
-                        for offset in range(_DATA_BYTES - nb + 1):
-                            match = np.all(
-                                data_arr[:, offset:offset + nb] ==
-                                np.frombuffer(needle_bytes, dtype=np.uint8),
-                                axis=1
-                            )
-                            data_mask |= match
-                    except Exception:
-                        pass
+        # 4. Time stamp.
+        try:
+            ts_val = float(needle_lower)
+        except ValueError:
+            ts_val = None
 
-            # Combine: frame matches if ANY field matches the needle
-            text_mask = id_mask | name_mask | dir_mask | ts_mask | data_mask
+        # 5. Data bytes, in a small store only.
+        data_needle = None
+        hex_needle = needle_lower.replace(' ', '')
+        if (n <= _LARGE_STORE_LIMIT and self.payload_mapped and len(needle_lower) >= 2
+                and len(hex_needle) >= 2 and len(hex_needle) % 2 == 0
+                and all(c in '0123456789abcdef' for c in hex_needle)):
+            data_needle = np.frombuffer(bytes.fromhex(hex_needle), dtype=np.uint8)
 
-            # If nothing matched at all (e.g. random text), do Python fallback
-            if not text_mask.any():
-                # General Python loop fallback for unrecognised patterns
-                chs = np.frombuffer(self.channels, dtype=np.uint8)
-                aids_py = np.frombuffer(self.arb_ids, dtype=np.uint32)
-                dirs_py = np.frombuffer(self.directions, dtype=np.uint8)
-                dlcs_py = np.frombuffer(self.dlcs, dtype=np.uint8)
-                nids_py = np.frombuffer(self.name_ids, dtype=np.uint16)
-                for i in np.where(mask)[0]:
-                    ch_str    = f'can {chs[i]}' if chs[i] != 255 else 'can ?'
-                    aid_str   = f'{aids_py[i]:x}'
-                    name_str  = (self.name_table[nids_py[i]]
-                                 if nids_py[i] < len(self.name_table) else '').lower()
-                    dir_str   = _DIR_STRINGS[min(dirs_py[i], 2)].lower()
-                    dlc_str   = str(dlcs_py[i])
-                    hay       = f'{ch_str} {aid_str} {name_str} {dir_str} {dlc_str}'
-                    if needle_lower in hay:
-                        text_mask[i] = True
+        def test(start, end):
+            mask = np.zeros(end - start, dtype=bool)
+            if len(ids):
+                aids = np.frombuffer(self.arb_ids, dtype=np.uint32)[start:end]
+                mask |= np.isin(aids, ids)
+            if len(name_ids):
+                nids = np.frombuffer(self.name_ids, dtype=np.uint16)[start:end]
+                mask |= np.isin(nids, name_ids)
+            if directions:
+                dirs = np.frombuffer(self.directions, dtype=np.uint8)[start:end]
+                mask |= np.isin(dirs, directions)
+            if ts_val is not None:
+                ts = np.frombuffer(self.timestamps, dtype=np.float64)[start:end]
+                mask |= np.abs(ts - ts_val) < 0.001
+            if data_needle is not None and len(data_needle) <= _DATA_BYTES:
+                rows = self.rows(slice(start, end))
+                width = len(data_needle)
+                for offset in range(_DATA_BYTES - width + 1):
+                    mask |= np.all(rows[:, offset:offset + width] == data_needle, axis=1)
+            return mask
 
-            mask &= text_mask
+        return test
 
-        return mask
+    def _field_text_test(self, needle_lower: str, distinct: np.ndarray):
+        """:meth:`_text_test` for a needle with no space: field by field."""
+        everything = needle_lower in 'can'
+        channels = [c for c in range(256)
+                    if needle_lower in (str(c) if c != 255 else '?')]
+        ids = np.array([aid for aid in distinct.tolist() if needle_lower in f'{aid:x}'],
+                       dtype=np.uint32)
+        names = np.array([i for i, nm in enumerate(self.name_table)
+                          if needle_lower in nm.lower()], dtype=np.uint16)
+        directions = [d for d in range(3) if needle_lower in _DIR_STRINGS[d].lower()]
+        lengths = [length for length in range(256) if needle_lower in str(length)]
+
+        def test(start, end):
+            if everything:
+                return np.ones(end - start, dtype=bool)
+            mask = np.zeros(end - start, dtype=bool)
+            if channels:
+                mask |= np.isin(np.frombuffer(self.channels, dtype=np.uint8)[start:end], channels)
+            if len(ids):
+                mask |= np.isin(np.frombuffer(self.arb_ids, dtype=np.uint32)[start:end], ids)
+            if len(names):
+                mask |= np.isin(np.frombuffer(self.name_ids, dtype=np.uint16)[start:end], names)
+            if directions:
+                dirs = np.minimum(np.frombuffer(self.directions, dtype=np.uint8)[start:end], 2)
+                mask |= np.isin(dirs, directions)
+            if lengths:
+                mask |= np.isin(np.frombuffer(self.dlcs, dtype=np.uint8)[start:end], lengths)
+            return mask
+
+        return test
+
+    def _combinations(self) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Number each frame's (ID, name, channel, direction, length).
+
+        Returns ``(numbers, keys)``: a number per frame (a file-backed column)
+        and each number's packed key — ``id rank << 34 | name id << 18 |
+        channel << 10 | direction << 8 | length``. A log has a few thousand
+        combinations; worked out once per store, they turn every later text
+        search into a table lookup.
+        """
+        from core.sample_file import AppendColumn
+
+        n = len(self.timestamps)
+        cached = getattr(self, '_combination_cache', None)
+        if cached is not None and cached[0] == n:
+            return cached[1], cached[2]
+        distinct = self._distinct_ids()
+        numbers: dict[int, int] = {}
+        column = AppendColumn(np.uint32)
+        for start in range(0, n, _SEARCH_CHUNK):
+            end = min(n, start + _SEARCH_CHUNK)
+            aids = np.frombuffer(self.arb_ids, dtype=np.uint32)[start:end]
+            keys = (
+                (np.searchsorted(distinct, aids).astype(np.uint64) << np.uint64(34))
+                | (np.frombuffer(self.name_ids, dtype=np.uint16)[start:end].astype(np.uint64)
+                   << np.uint64(18))
+                | (np.frombuffer(self.channels, dtype=np.uint8)[start:end].astype(np.uint64)
+                   << np.uint64(10))
+                | (np.minimum(np.frombuffer(self.directions, dtype=np.uint8)[start:end], 2)
+                   .astype(np.uint64) << np.uint64(8))
+                | np.frombuffer(self.dlcs, dtype=np.uint8)[start:end].astype(np.uint64)
+            )
+            unique, inverse = np.unique(keys, return_inverse=True)
+            chunk_numbers = np.array(
+                [numbers.setdefault(key, len(numbers)) for key in unique.tolist()],
+                dtype=np.uint32,
+            )
+            column.extend(chunk_numbers[inverse.reshape(-1)])
+        frame_numbers = column.mapped()
+        column.close()
+        keys = np.fromiter(numbers, dtype=np.uint64, count=len(numbers))
+        self._combination_cache = (n, frame_numbers, keys)
+        return frame_numbers, keys
+
+    def _text_test(self, needle_lower: str):
+        """
+        Return ``test(start, end) -> mask``: the needle in each frame's text.
+
+        The text is ``"can <channel> <id hex> <name> <direction> <length>"``.
+        A needle without a space cannot reach across the spaces between those
+        fields, so it matches where it is in one of them: each field is tested
+        over its few distinct values. A needle with a space is tested on the
+        text of each distinct combination of the five (_combinations), built
+        once per store, never per frame.
+        """
+        distinct = self._distinct_ids()
+        if ' ' not in needle_lower:
+            return self._field_text_test(needle_lower, distinct)
+        frame_numbers, keys = self._combinations()
+        verdicts = np.zeros(len(keys), dtype=bool)
+        for number, key in enumerate(keys.tolist()):
+            rank, nid, ch, direction, dlc = (
+                key >> 34, (key >> 18) & 0xFFFF, (key >> 10) & 0xFF,
+                (key >> 8) & 0x3, key & 0xFF,
+            )
+            ch_str = f'can {ch}' if ch != 255 else 'can ?'
+            aid_str = f'{int(distinct[rank]):x}'
+            name_str = (self.name_table[nid] if nid < len(self.name_table) else '').lower()
+            dir_str = _DIR_STRINGS[direction].lower()
+            verdicts[number] = needle_lower in f'{ch_str} {aid_str} {name_str} {dir_str} {dlc}'
+
+        def test(start, end):
+            return verdicts[frame_numbers[start:end]]
+
+        return test

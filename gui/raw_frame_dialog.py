@@ -6,10 +6,9 @@
 
 from __future__ import annotations
 
-import array as _array
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QScrollBar, QTreeWidget, QTreeWidgetItem,
@@ -22,6 +21,8 @@ from core.raw_frame_store import RawFrameStore
 _WINDOW = 5_000
 _STEP   = 1_000
 _COL    = 7
+# Typing in Search waits this long after the last key before searching.
+_SEARCH_PAUSE_MS = 250
 
 
 def _fmt_t(t: float | None) -> str:
@@ -69,8 +70,8 @@ class RawFrameDialog(QDialog):
         self._win_start = 0
         self._is_expanded = False
 
-        # _matching: None = all frames; array('I') = filtered indices
-        self._matching: _array.array | None = None
+        # _matching: None = all frames; else the matching frames' indices
+        self._matching: np.ndarray | None = None
 
         # ── Filter controls ───────────────────────────────────────────────
         self.search_edit = QLineEdit()
@@ -173,7 +174,14 @@ class RawFrameDialog(QDialog):
         layout.addWidget(self.tree, 1)
 
         # ── Connections ───────────────────────────────────────────────────
-        self.search_edit.textChanged.connect(self._on_filter_changed)
+        # Typing waits for a pause: each search looks at every frame, and a
+        # word typed letter by letter would otherwise search once per letter.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(_SEARCH_PAUSE_MS)
+        self._search_timer.timeout.connect(self._on_filter_changed)
+        self.search_edit.textChanged.connect(self._search_timer.start)
+        self.search_edit.returnPressed.connect(self._on_filter_changed)
         self.channel_combo.currentIndexChanged.connect(self._on_filter_changed)
         self._nb_start.clicked_connect(self._go_start)
         self._nb_back.clicked_connect(self._go_back)
@@ -191,16 +199,12 @@ class RawFrameDialog(QDialog):
     # ── Filter ────────────────────────────────────────────────────────────
 
     def _on_filter_changed(self) -> None:
+        self._search_timer.stop()
         needle         = self.search_edit.text().strip().lower()
         channel_filter = self.channel_combo.currentData()
 
-        mask = self._raw_store.build_match_mask(needle, channel_filter)
-        if mask is None:
-            # All frames match — use None sentinel (zero extra RAM)
-            self._matching = None
-        else:
-            indices = np.where(mask)[0].astype(np.uint32)
-            self._matching = _array.array('I', indices.tolist())
+        # None when all frames match (zero extra RAM), else their indices.
+        self._matching = self._raw_store.matching_indices(needle, channel_filter)
 
         self._win_start = 0
         self._update_scrollbar()
