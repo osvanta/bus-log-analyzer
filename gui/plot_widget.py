@@ -687,7 +687,7 @@ def _all_finite(values: np.ndarray) -> bool:
 
 
 def _note_finite(curve, x: np.ndarray, x_finite: bool, y_finite: bool) -> None:
-    """Record, for _trust_finite_data(), what this panel checked of *x* and y."""
+    """Record, for _hook_display_dataset(), what this panel checked of *x* and y."""
     curve._finite_data = (_buffer_address(x), x.size, x_finite, y_finite)
 
 
@@ -695,18 +695,60 @@ def _buffer_address(array: np.ndarray) -> int:
     return array.__array_interface__['data'][0]
 
 
-def _trust_finite_data(curve: pg.PlotDataItem) -> None:
+# The most samples a curve draws as steps; see _hook_display_dataset().
+# 100,000 across even a 4K screen is over 25 a pixel.
+_STEP_MAX_POINTS = 100_000
+
+
+def _step_points(x: np.ndarray, y: np.ndarray, connect: np.ndarray | None):
     """
-    Let *curve* take what this panel checked of its data as known.
+    The vertices of a step curve through the samples (x, y), and its mask.
+
+    Each value holds until the next sample, then the curve jumps: sample *i*
+    gives the corner (x[i], y[i]) and the end of its hold (x[i+1], y[i]),
+    2n - 1 vertices in all. Both segments leaving sample *i*, the hold and
+    the jump, are drawn only where *connect* joins it to the next sample
+    (None: everywhere).
+    """
+    n = min(len(x), len(y))
+    if n < 2:
+        return x, y, connect
+    step_x = np.empty(2 * n - 1, dtype=np.float64)
+    step_x[0::2] = x[:n]
+    step_x[1::2] = x[1:n]
+    step_y = np.empty(2 * n - 1, dtype=np.float64)
+    step_y[0::2] = y[:n]
+    step_y[1::2] = y[:n - 1]
+    if connect is None:
+        return step_x, step_y, None
+    step_connect = np.empty(2 * n - 1, dtype=np.bool_)
+    step_connect[0::2] = connect[:n]
+    step_connect[1::2] = connect[:n - 1]
+    return step_x, step_y, step_connect
+
+
+def _hook_display_dataset(curve: pg.PlotDataItem) -> None:
+    """
+    Wrap *curve*'s display step: trust what this panel checked of the data,
+    and draw steps while ``curve._step_lines`` is set.
 
     pyqtgraph's PlotDataItem builds its dataset without finiteness flags, so
     the first display of new data works them out over the whole signal: a
     finite-values-only copy of x for auto-downsampling and a mask for the
     data bounds, about 9 bytes per sample, gigabytes for a long signal. The
-    curve's display step is wrapped to set the flags first from the record
-    _note_finite() left — only while the curve still holds the very array the
-    record describes. It does nothing should pyqtgraph's private
-    ``_getDisplayDataset`` or ``_dataset`` go away.
+    flags are set first from the record _note_finite() left — only while the
+    curve still holds the very array the record describes.
+
+    Steps are made from what pyqtgraph is about to draw, already clipped to
+    the view and down-sampled, so they cost nothing per sample of the signal.
+    Past _STEP_MAX_POINTS (the whole signal, handed over before the view has
+    a size, or samples too dense to down-sample) the lines stay straight: at
+    many samples a pixel steps and lines look the same, and stepping would
+    copy the signal twice over. (pyqtgraph's own stepMode takes no connect
+    mask, which every curve with a gap has.) Both do nothing should
+    pyqtgraph's private
+    ``_getDisplayDataset`` or ``_dataset`` go away: the lines are then
+    straight.
     """
     display = getattr(type(curve), '_getDisplayDataset', None)
     if display is None:
@@ -726,7 +768,20 @@ def _trust_finite_data(curve: pg.PlotDataItem) -> None:
                 dataset.xAllFinite = True
             if known[3] and getattr(dataset, 'yAllFinite', True) is None:
                 dataset.yAllFinite = True
-        return display(item)
+        shown = display(item)
+        if (
+            shown is None or not getattr(item, '_step_lines', False)
+            or len(shown.x) > _STEP_MAX_POINTS
+        ):
+            return shown
+        # Asked for often between redraws: made once per display dataset.
+        cached = getattr(item, '_stepped', None)
+        if cached is None or cached[0] is not shown:
+            step_x, step_y, step_connect = _step_points(shown.x, shown.y, shown.connect)
+            cached = (shown, type(shown)(step_x, step_y, shown.xAllFinite,
+                                         shown.yAllFinite, step_connect))
+            item._stepped = cached
+        return cached[1]
 
     curve._getDisplayDataset = get_display_dataset
 
@@ -779,6 +834,8 @@ class PlotPanel(QWidget):
         self._cursor_label_base = 'Click the plot to place Cursor 1'
         self._show_points = False
         self._hide_lines = False
+        # Each value held until the next sample; off: straight lines between them.
+        self._step_lines = True
         # Adaptive-point machinery: a single-shot debounce timer coalesces the
         # bursts of sigXRangeChanged emitted during a drag-zoom into one
         # recompute, and _xrange_vb tracks which ViewBox we're currently
@@ -1448,6 +1505,27 @@ class PlotPanel(QWidget):
         finally:
             if self._stacked_mode:
                 self.glw.setUpdatesEnabled(True)
+
+    def set_step_lines(self, step: bool) -> None:
+        """Draw each value held until the next sample, or straight lines.
+
+        Only the drawing changes: each curve redraws what is in view from the
+        data it already holds.
+        """
+        self._step_lines = bool(step)
+        if self._stacked_mode:
+            self.glw.setUpdatesEnabled(False)
+        try:
+            for plotted in self._items.values():
+                if plotted.curve is not None:
+                    plotted.curve._step_lines = self._step_lines
+                    plotted.curve.updateItems(styleUpdate=False)
+        finally:
+            if self._stacked_mode:
+                self.glw.setUpdatesEnabled(True)
+
+    def step_lines(self) -> bool:
+        return self._step_lines
 
     def set_hide_lines(self, hide: bool) -> None:
         """Hide curve lines only while point markers are enabled."""
@@ -2365,7 +2443,7 @@ class PlotPanel(QWidget):
         """
         curve.setClipToView(True)
         curve.setDownsampling(auto=True, method='peak')   # kwarg is 'method', not 'mode'
-        _trust_finite_data(curve)
+        _hook_display_dataset(curve)
 
     @staticmethod
     def _curve_connect_mask(ts: np.ndarray, vs: np.ndarray) -> np.ndarray:
@@ -2419,6 +2497,7 @@ class PlotPanel(QWidget):
         """
         if plotted.curve is None:
             return
+        plotted.curve._step_lines = self._step_lines
         if self._hide_lines:
             pen = pg.mkPen(None)
         elif self._show_points:

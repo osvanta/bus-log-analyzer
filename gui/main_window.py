@@ -367,6 +367,9 @@ class MainWindow(QMainWindow):
         self.btn_cursor2 = icon_button('cursor2', 'Cursor 2',
                                        'Cursor 2, or Shift+click the plot to place it')
         self.btn_cursor2.setCheckable(True)
+        # One button for the line mode, showing the mode the plot is in; its
+        # icon, name and tooltip are set by _set_step_lines().
+        self.btn_line_mode = icon_button('step_lines', '', '')
         self.btn_points = icon_button('points', 'Show Data Points', 'Show Data Points')
         self.btn_points.setCheckable(True)
         self.btn_hide_line = icon_button('hide_line', 'Hide Line',
@@ -383,7 +386,8 @@ class MainWindow(QMainWindow):
             self.plot_button_row.add_button(btn)
         self.plot_button_row.add_gap(18)
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
-                    self.btn_cursor2, self.btn_points, self.btn_hide_line, None,
+                    self.btn_cursor2, self.btn_line_mode, self.btn_points,
+                    self.btn_hide_line, None,
                     self.btn_clear_plot):
             if btn is None:
                 self.plot_button_row.add_gap(18)
@@ -400,6 +404,7 @@ class MainWindow(QMainWindow):
         self.btn_multistack.toggled.connect(self._toggle_multistack)
         self.btn_cursor1.toggled.connect(self._toggle_cursor1)
         self.btn_cursor2.toggled.connect(self._toggle_cursor2)
+        self.btn_line_mode.clicked.connect(self._toggle_line_mode)
         self.btn_points.toggled.connect(self._toggle_points)
         self.btn_hide_line.toggled.connect(self._toggle_line)
         self.btn_clear_plot.clicked.connect(self.clear_plot)
@@ -407,6 +412,7 @@ class MainWindow(QMainWindow):
         self.plot_panel.set_stacked(self.btn_stacked.isChecked())
         # The buttons were set before their toggled signals were connected.
         self.plot_panel.set_cursor1_enabled(self.btn_cursor1.isChecked())
+        self._set_step_lines(True, announce=False)   # steps by default
 
         # The plot buttons sit above the plot only, level with the signal
         # table's header, so the table runs the full height of the panel.
@@ -614,6 +620,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence('F'), self, activated=self.plot_panel.fit_to_window)
         QShortcut(QKeySequence('V'), self, activated=self.plot_panel.fit_vertical)
         QShortcut(QKeySequence('Z'), self, activated=self.btn_zoom_rect.toggle)
+        QShortcut(QKeySequence('S'), self, activated=self._toggle_line_mode)
         # Esc leaves Rectangle Zoom; while it is off, Esc is left to others,
         # such as a table cell being edited.
         self._esc_rect_zoom = QShortcut(QKeySequence(Qt.Key.Key_Escape), self,
@@ -1463,6 +1470,31 @@ class MainWindow(QMainWindow):
         self._raw_frame_dialog.raise_()
         self._raw_frame_dialog.activateWindow()
 
+    # The line mode: icon, name and tooltip of the button, by step or not.
+    _LINE_MODES = {
+        True: ('step_lines', 'Step Mode',
+               'Step Mode (S): each value held until the next sample.\n'
+               'Click for Interpolation Mode: straight lines between the samples.'),
+        False: ('interpolated_lines', 'Interpolation Mode',
+                'Interpolation Mode (S): straight lines between the samples.\n'
+                'Click for Step Mode: each value held until the next sample.'),
+    }
+
+    def _toggle_line_mode(self) -> None:
+        self._set_step_lines(not self.plot_panel.step_lines())
+
+    def _set_step_lines(self, step: bool, announce: bool = True) -> None:
+        """Draw the plot in steps or straight lines; the button shows which."""
+        step = bool(step)
+        self.plot_panel.set_step_lines(step)
+        icon, name, tooltip = self._LINE_MODES[step]
+        self.btn_line_mode.setIcon(plot_icon(icon))
+        self.btn_line_mode.setAccessibleName(name)
+        self.btn_line_mode.setToolTip(tooltip)
+        if announce:
+            self._update_status(f'Plot lines: {name}',
+                                'Continue plotting, fit view, or save configuration')
+
     def _toggle_points(self, checked: bool) -> None:
         self.plot_panel.set_show_points(checked)
         if not checked:
@@ -1952,6 +1984,7 @@ class MainWindow(QMainWindow):
                 for k in self.plot_panel.plotted_keys()
             ],
             'generated_signals': self.calculated_signals.to_config(),
+            'step_lines': self.plot_panel.step_lines(),
             'show_data_points': self.btn_points.isChecked(),
             'hide_plot_lines': self.btn_hide_line.isChecked(),
             'plot_background_color': self.plot_panel.background_color(),
@@ -2095,6 +2128,7 @@ class MainWindow(QMainWindow):
             use_current_data = (reply == QMessageBox.StandardButton.Yes)
 
         # Apply visual settings regardless of data source
+        self._set_step_lines(bool(data.get('step_lines', True)), announce=False)
         self.btn_points.setChecked(bool(data.get('show_data_points', False)))
         self.btn_hide_line.setChecked(
             bool(data.get('hide_plot_lines', False)) and self.btn_points.isChecked()
@@ -2643,6 +2677,7 @@ class MainWindow(QMainWindow):
         ('Shift + drag on plot', 'In Rectangle Zoom: zoom out around the box; a smaller box zooms out further'),
         ('Double-click on plot', 'In Rectangle Zoom: fit to window, the whole recording'),
         ('Esc',             'Leave Rectangle Zoom'),
+        ('S',               'Step Mode or Interpolation Mode — each value held until the next sample, or straight lines'),
         ('Space',           'Plot selected signal(s) from the signal tree'),
         ('C',               'Change color of the selected signal'),
         ('R',               'Toggle Cursor 1 and Cursor 2 on/off together'),
