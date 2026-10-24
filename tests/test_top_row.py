@@ -26,7 +26,7 @@ HANDLERS = {
 def _make_window(qapp, monkeypatch, tmp_path):
     from gui.main_window import MainWindow
 
-    monkeypatch.setattr(MainWindow, '_application_root', staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(MainWindow, '_settings_folder', staticmethod(lambda: tmp_path))
     return MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
 
 

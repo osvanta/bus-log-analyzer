@@ -105,7 +105,7 @@ def test_dialog_offers_no_user_name_it_does_not_know(qapp, monkeypatch):
 def settings_dir(tmp_path, monkeypatch):
     from gui.main_window import MainWindow
 
-    monkeypatch.setattr(MainWindow, '_application_root', staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(MainWindow, '_settings_folder', staticmethod(lambda: tmp_path))
     monkeypatch.setattr('gui.plot_widget.current_user_name', lambda: 'tester')
     monkeypatch.setattr('gui.plot_tag.current_user_name', lambda: 'tester')
     return tmp_path
