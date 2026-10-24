@@ -79,7 +79,7 @@ def window(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(QMessageBox, "warning", Mock(return_value=QMessageBox.StandardButton.Ok))
     monkeypatch.setattr(QMessageBox, "critical", Mock(return_value=QMessageBox.StandardButton.Ok))
     monkeypatch.setattr(QMessageBox, "information", Mock(return_value=QMessageBox.StandardButton.Ok))
-    monkeypatch.setattr(MainWindow, '_application_root', staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(MainWindow, '_settings_folder', staticmethod(lambda: tmp_path))
     w = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
     monkeypatch.setattr(w, 'load_data', Mock())
     w.resize(1400, 800)

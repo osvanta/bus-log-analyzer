@@ -20,13 +20,15 @@ survey** asks what you use the tool for, in three or four minutes.
 
 1. The version: **Help ▸ About** shows it.
 2. What you did, step by step, what you expected, and what happened.
-3. The two log files, which are next to `BusLogAnalyzer.exe`:
+3. The two log files. **Help ▸ Open the log folder** shows them:
     - `busloganalyzer_applog.log`: every line of the **Log** panel, and the
       warnings and errors behind them;
     - `BLA_crash.log`: why the application ended, when it crashed or froze.
 
-    If that folder is read-only, the logs are in your temp folder instead: type
-    `%TEMP%` in the Explorer address bar.
+    The folder is `%LOCALAPPDATA%\Osvanta\BusLogAnalyzer\logs`: type that in the
+    Explorer address bar if the application does not start. The logs name the
+    files you opened, so check them before you send them. Versions up to
+    v00.02.02 kept them next to `BusLogAnalyzer.exe`.
 
 !!! tip "If it crashes"
     `appdebugger.exe`, next to `BusLogAnalyzer.exe`, is the same application with

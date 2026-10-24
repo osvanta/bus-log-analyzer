@@ -13,8 +13,8 @@ Python handler sees. An exception in a slot or a worker thread is printed to
 a stderr that does not exist. A native crash leaves only an Event Viewer entry
 with a module offset, and a frozen window leaves nothing at all.
 
-``CrashLog`` appends each of these to ``BLA_crash.log`` next to the
-executable (next to app.py when run from source):
+``CrashLog`` appends each of these to ``BLA_crash.log`` in the user's logs
+folder (gui/app_data.py; next to app.py when run from source):
 
 - Qt fatal and critical messages, a fatal one followed by every thread's
   Python stack. Qt ends the process as soon as the handler returns, so this
@@ -55,6 +55,8 @@ from PySide6.QtCore import (
     qInstallMessageHandler, qVersion,
 )
 
+from gui import app_data
+
 LOG_NAME = 'BLA_crash.log'
 FREEZE_SECONDS = 20.0
 # Rotated at start-up, so a log never grows past this by more than a session.
@@ -71,16 +73,14 @@ _PREAMBLE = (
 
 
 def default_log_path() -> Path:
-    """Next to the executable when packaged, next to app.py from source.
+    """In the user's logs folder when packaged, next to app.py from source.
 
     OSVANTA_CRASH_LOG names another file: tests that start the application
     keep the developer's own log clean with it.
     """
     if os.environ.get('OSVANTA_CRASH_LOG'):
         return Path(os.environ['OSVANTA_CRASH_LOG'])
-    if getattr(sys, 'frozen', False):
-        return Path(sys.executable).resolve().parent / LOG_NAME
-    return Path(__file__).resolve().parents[1] / LOG_NAME
+    return app_data.logs_folder() / LOG_NAME
 
 
 def _os_name() -> str:
@@ -168,8 +168,8 @@ class CrashLog(QObject):
 
     @staticmethod
     def _open(path: Path):
-        # The executable's folder may be read-only (Program Files, a network
-        # share); the temp folder always takes the log.
+        # The logs folder may be unwritable (a locked-down profile); the temp
+        # folder always takes the log.
         for candidate in (path, Path(tempfile.gettempdir()) / LOG_NAME):
             try:
                 if candidate.exists() and candidate.stat().st_size > MAX_BYTES:

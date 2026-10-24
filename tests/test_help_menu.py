@@ -40,7 +40,7 @@ def menu(qapp):
 def window(qapp, monkeypatch, tmp_path):
     from gui.main_window import MainWindow
 
-    monkeypatch.setattr(MainWindow, '_application_root', staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(MainWindow, '_settings_folder', staticmethod(lambda: tmp_path))
     w = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
     yield w
     w.deleteLater()
@@ -58,6 +58,7 @@ def test_the_menu_holds_the_guide_the_ways_to_reach_us_and_about(menu):
         '---',
         'Ask a question or share an idea',
         'Report a problem or request a feature',
+        'Open the log folder',
         'Take the user survey',
         '---',
         'About Osvanta Bus Log Analyzer',
@@ -76,6 +77,19 @@ def test_the_project_pages_open_in_the_browser(menu, opened, action, url):
 
     opened.assert_called_once_with(QUrl(url))
 
+
+def test_the_log_folder_opens_where_the_running_log_is(menu, opened, monkeypatch, tmp_path):
+    from PySide6.QtCore import QUrl
+
+    from gui import app_log
+
+    # The log fell back to another folder: the menu follows it.
+    monkeypatch.setattr(app_log, 'log_path', lambda: tmp_path / app_log.LOG_NAME)
+
+    menu.logs_action.trigger()
+
+    opened.assert_called_once_with(QUrl.fromLocalFile(str(tmp_path)))
+    assert 'File Explorer' in menu.logs_action.toolTip()
 
 def test_the_links_lead_to_pages_that_last():
     # A copy of the application keeps its links for as long as it is used:

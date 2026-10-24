@@ -203,7 +203,7 @@ def test_the_link_is_written_in_the_link_colour_of_the_theme(qapp):
 def settings_path(tmp_path, monkeypatch):
     from gui.main_window import MainWindow
 
-    monkeypatch.setattr(MainWindow, '_application_root', staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(MainWindow, '_settings_folder', staticmethod(lambda: tmp_path))
     monkeypatch.setenv(survey_prompt.DISABLE_VARIABLE, '1')
     monkeypatch.setattr('sys.argv', ['app.py'])
     return tmp_path / 'osvanta_user_settings.json'

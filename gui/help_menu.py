@@ -20,12 +20,17 @@ Discussions front page rather than any one discussion, and the issue list.
 
 The About dialog has the Discussions and issue links. The pages open in the
 web browser, and only when the user picks one.
+
+The logs a problem report needs are in the user's own folder, which Explorer
+hides (gui/app_data.py), so the menu opens it.
 """
 from __future__ import annotations
 
 from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import QMenu, QWidget
+
+from gui import app_data, app_log
 
 GUIDE_URL = 'https://osvanta.github.io/bus-log-analyzer/'
 GETTING_STARTED_URL = GUIDE_URL + 'getting-started/'
@@ -38,6 +43,8 @@ ASK_TEXT = 'Ask a question or share an idea'
 ASK_TIP = 'How-to questions, ideas and anything else about the tool, on GitHub Discussions'
 REPORT_TEXT = 'Report a problem or request a feature'
 REPORT_TIP = 'Problems and feature requests, on GitHub. We read every one.'
+LOGS_TEXT = 'Open the log folder'
+LOGS_TIP = 'The two logs to attach to a problem report, in File Explorer'
 SURVEY_TEXT = 'Take the user survey'
 SURVEY_TIP = '3–4 minutes, in your web browser'
 
@@ -45,6 +52,13 @@ SURVEY_TIP = '3–4 minutes, in your web browser'
 def open_page(url: str) -> None:
     """Open one of the project's pages in the web browser."""
     QDesktopServices.openUrl(QUrl(url))
+
+
+def open_log_folder() -> None:
+    """Open the running log's folder: the temp folder when it fell back there."""
+    running = app_log.log_path()
+    folder = running.parent if running is not None else app_data.logs_folder()
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
 
 class HelpMenu(QMenu):
@@ -67,6 +81,7 @@ class HelpMenu(QMenu):
         self.addSeparator()
         self.ask_action = self._add(ASK_TEXT, lambda: open_page(DISCUSSIONS_URL), ASK_TIP)
         self.report_action = self._add(REPORT_TEXT, lambda: open_page(ISSUES_URL), REPORT_TIP)
+        self.logs_action = self._add(LOGS_TEXT, open_log_folder, LOGS_TIP)
         self.survey_action = self._add(SURVEY_TEXT, self.surveyRequested.emit, SURVEY_TIP)
         self.addSeparator()
         self.about_action = self._add(f'About {app_name}', self.aboutRequested.emit)

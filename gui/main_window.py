@@ -68,7 +68,7 @@ from core.bus_types import (
     sort_key,
 )
 from core.channel_config import ChannelConfig
-from gui import app_log, survey_prompt
+from gui import app_data, app_log, survey_prompt
 from gui.brand_logo import BrandLogo, leave_logo_unframed
 from gui.dbc_manager import DBCManagerDialog
 from gui.edge_tab import EdgeTab
@@ -161,6 +161,45 @@ def _remove_leftover_trace_files() -> None:
             f'Removed {removed} Trace file(s) left in the temp folder, '
             f'{freed / 1_000_000:,.1f} MB.'
         )
+    removed, freed = remove_leftover_recovery_copies()
+    if removed:
+        app_log.record(
+            f'Removed {removed} repaired measurement cop(ies) left in the temp folder, '
+            f'{freed / 1_000_000:,.1f} MB.'
+        )
+
+
+# core.readers.mdf_recovery names its copies so; see make_bounded_mdf4_copy().
+_RECOVERY_COPY_PATTERN = 'osvanta_recovered_*'
+
+
+def remove_leftover_recovery_copies(directory: str | os.PathLike | None = None) -> tuple[int, int]:
+    """Delete repaired MDF copies a crashed or killed session left behind.
+
+    Each is a whole copy of a customer's measurement, and a session removes
+    its own only when the file is closed. Another running copy of the
+    application is not disturbed: Windows refuses to delete a file it still
+    has open. Returns how many files were deleted and the bytes freed.
+    """
+    import tempfile
+
+    removed = freed = 0
+    folder = Path(directory) if directory is not None else Path(tempfile.gettempdir())
+    try:
+        candidates = list(folder.glob(_RECOVERY_COPY_PATTERN))
+    except OSError:
+        return 0, 0
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+        freed += size
+    return removed, freed
 
 
 class MainWindow(QMainWindow):
@@ -236,11 +275,11 @@ class MainWindow(QMainWindow):
         self._pending_plot_type: str | None = None
         self._temporary_plot_handoff: dict | None = None
         self._temporary_plot_config_path = (
-            self._application_root() / 'osvanta_temp_plot_config.json'
+            self._settings_folder() / 'osvanta_temp_plot_config.json'
         )
         # The user's own settings, such as the tag under the signal table.
         self._user_settings_path = (
-            self._application_root() / 'osvanta_user_settings.json'
+            self._settings_folder() / 'osvanta_user_settings.json'
         )
         # Store keys plotted by the most recent plot_finding() call — cleared
         # and replaced (not accumulated) on each subsequent finding click.
@@ -1048,11 +1087,9 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, 'Mixed MDF content detected', message)
 
     @staticmethod
-    def _application_root() -> Path:
-        """Return the source root, or the packaged executable directory."""
-        if getattr(sys, 'frozen', False):
-            return Path(sys.executable).resolve().parent
-        return Path(__file__).resolve().parents[1]
+    def _settings_folder() -> Path:
+        """The user's settings folder: see gui.app_data."""
+        return app_data.folder()
 
     def _save_plot_tag(self, tag: PlotTag) -> None:
         try:

@@ -8,7 +8,8 @@
 
 The application opens no console window: the packaged build is windowed, and
 run_dev.bat starts it with pythonw. ``AppLog`` appends to
-``busloganalyzer_applog.log`` next to the executable (next to app.py when run from source):
+``busloganalyzer_applog.log`` in the user's logs folder (gui/app_data.py; next to app.py
+when run from source):
 
 - Every line of the Log panel.
 - Where the application has no console, everything a console would have
@@ -32,6 +33,8 @@ import threading
 import time
 from pathlib import Path
 
+from gui import app_data
+
 LOG_NAME = 'busloganalyzer_applog.log'
 # Rotated at start-up, so a log never grows past this by more than a session.
 MAX_BYTES = 1_000_000
@@ -49,16 +52,14 @@ _running: AppLog | None = None
 
 
 def default_log_path() -> Path:
-    """Next to the executable when packaged, next to app.py from source.
+    """In the user's logs folder when packaged, next to app.py from source.
 
     OSVANTA_APP_LOG names another file: tests that start the application
     keep the developer's own log clean with it.
     """
     if os.environ.get('OSVANTA_APP_LOG'):
         return Path(os.environ['OSVANTA_APP_LOG'])
-    if getattr(sys, 'frozen', False):
-        return Path(sys.executable).resolve().parent / LOG_NAME
-    return Path(__file__).resolve().parents[1] / LOG_NAME
+    return app_data.logs_folder() / LOG_NAME
 
 
 def record(message: str) -> None:
@@ -131,8 +132,8 @@ class AppLog:
 
     @staticmethod
     def _open(path: Path):
-        # The executable's folder may be read-only (Program Files, a network
-        # share); the temp folder always takes the log.
+        # The logs folder may be unwritable (a locked-down profile); the temp
+        # folder always takes the log.
         for candidate in (path, Path(tempfile.gettempdir()) / LOG_NAME):
             try:
                 if candidate.exists() and candidate.stat().st_size > MAX_BYTES:
