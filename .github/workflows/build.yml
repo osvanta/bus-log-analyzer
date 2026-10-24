@@ -6,8 +6,13 @@ on:
       - 'v*.*.*'
   workflow_dispatch:
 
+# Read-only by default. Only the release job, which builds nothing, may write.
 permissions:
-  contents: write
+  contents: read
+
+# Actions are pinned to a commit, not a tag: a tag can be moved to other code,
+# a commit cannot. The comment names the release; Dependabot updates both
+# (.github/dependabot.yml).
 
 jobs:
   test:
@@ -20,18 +25,21 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
           cache: 'pip'
 
+      # The versions the release is built with, checked against their hashes;
+      # then the test tools, which are not shipped.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
+          pip install --require-hashes -r requirements-release.txt
+          pip install -r requirements-dev.txt
 
       # -rs lists the reason for every skip in the summary, so a suite that
       # quietly stops covering something is visible in the log rather than
@@ -46,10 +54,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -67,11 +75,13 @@ jobs:
             python tools/check_version_consistency.py
           }
 
+      # Exactly the versions in requirements-release.txt, PyInstaller
+      # included, each checked against its hash: a tag always builds with the
+      # same libraries, and THIRD_PARTY_NOTICES.md names what it holds.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          pip install --require-hashes -r requirements-release.txt
 
       - name: Build portable EXE
         run: pyinstaller BusLogAnalyzer.spec
@@ -93,13 +103,72 @@ jobs:
           Compress-Archive -Path "dist\BusLogAnalyzer\*" -DestinationPath $zipName
           Write-Host "Created: $zipName"
 
-      # workflow_dispatch from a branch has no tag — build and zip still run
-      # as a smoke test, but nothing gets published.
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      # A software bill of materials (CycloneDX): every package installed for
+      # the build, with its exact version. A superset of what the application
+      # holds, since PyInstaller and pip are listed too. Customers check it
+      # against vulnerability databases. The generator runs from its own
+      # environment so that it does not list itself.
+      - name: Software bill of materials
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $python = (Get-Command python).Source
+          python -m venv "$env:RUNNER_TEMP\sbom"
+          & "$env:RUNNER_TEMP\sbom\Scripts\python.exe" -m pip install --quiet cyclonedx-bom==7.5.0
+          $sbom = "BusLogAnalyzer_${tag}_sbom.cdx.json"
+          & "$env:RUNNER_TEMP\sbom\Scripts\cyclonedx-py.exe" environment --mc-type application --output-reproducible --of JSON -o $sbom $python
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Name the application itself, which has no PEP 621 metadata.
+          $bom = Get-Content $sbom -Raw | ConvertFrom-Json
+          $component = [pscustomobject]@{ type = 'application'; name = 'Osvanta Bus Log Analyzer'; version = $tag }
+          $bom.metadata | Add-Member -NotePropertyName component -NotePropertyValue $component -Force
+          [IO.File]::WriteAllText("$PWD\$sbom", ($bom | ConvertTo-Json -Depth 100))
+          Write-Host "Created: $sbom"
+
+      # sha256sum format ("<hash>  <file>", LF line ends), so `sha256sum -c`
+      # checks it; on Windows, Get-FileHash prints the same hash.
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "BusLogAnalyzer_${{ github.ref_name }}_*" | Where-Object Name -notlike '*_SHA256SUMS.txt'
+          $lines = foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower(), $f.Name }
+          [IO.File]::WriteAllText("$PWD\BusLogAnalyzer_${{ github.ref_name }}_SHA256SUMS.txt", ($lines -join "`n") + "`n")
+          $lines
+
+      - name: Keep the release files for the release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          files: BusLogAnalyzer_*_Windows.zip
+          name: release-files
+          path: |
+            BusLogAnalyzer_*_Windows.zip
+            BusLogAnalyzer_*_sbom.cdx.json
+            BusLogAnalyzer_*_SHA256SUMS.txt
+          if-no-files-found: error
+
+  # workflow_dispatch from a branch has no tag — build and zip still run
+  # as a smoke test, but nothing gets published.
+  release:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    # The one job that can write to the repository: it publishes the files the
+    # build job made, and runs no code from the repository.
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the release files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: release-files
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
+        with:
+          files: |
+            BusLogAnalyzer_*_Windows.zip
+            BusLogAnalyzer_*_sbom.cdx.json
+            BusLogAnalyzer_*_SHA256SUMS.txt
           generate_release_notes: false
           body: |
             ## Osvanta Bus Log Analyzer ${{ github.ref_name }}
@@ -108,6 +177,12 @@ jobs:
             1. Download `BusLogAnalyzer_${{ github.ref_name }}_Windows.zip`
             2. Unzip anywhere
             3. Run `BusLogAnalyzer.exe` — no Python installation required
+
+            ### Check the download
+            `BusLogAnalyzer_${{ github.ref_name }}_SHA256SUMS.txt` holds the SHA-256 of each file. In PowerShell:
+            `Get-FileHash BusLogAnalyzer_${{ github.ref_name }}_Windows.zip` must print the same hash.
+
+            `BusLogAnalyzer_${{ github.ref_name }}_sbom.cdx.json` is the software bill of materials (CycloneDX): every package the release was built with, and its version.
 
             ### Supported formats
             - Vector BLF (`.blf`) — requires DBC
@@ -120,6 +195,9 @@ jobs:
 
             ### Requirements
             - Windows 10 or later (64-bit)
+
+            ### Security and data handling
+            See [Security and data handling](https://osvanta.github.io/bus-log-analyzer/security-and-data/) in the user guide.
 
             ### Changes
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)

@@ -18,6 +18,8 @@
 /core/blf_reader.py         @dinacaran
 /core/readers/              @dinacaran
 /requirements.txt           @dinacaran
+/requirements-release.in    @dinacaran
+/requirements-release.txt   @dinacaran
 
 # Protected core files
 /core/signal_store.py       @dinacaran

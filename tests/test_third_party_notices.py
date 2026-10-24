@@ -4,7 +4,8 @@
 #
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
-"""THIRD_PARTY_NOTICES.md must agree with requirements.txt and with licenses/.
+"""THIRD_PARTY_NOTICES.md must agree with requirements.txt, with the release
+lock requirements-release.txt, and with licenses/.
 
 Qt is used under the LGPL, which requires the notice and the licence texts to
 travel with the application, for the version actually shipped. These checks
@@ -23,6 +24,17 @@ LICENCES = REPO_ROOT / 'licenses'
 
 # "| `name` | version | licence | project |" rows of the component tables.
 ROWS = re.findall(r'^\| `([^`]+)` \| ([^ |]+) \| ([^|]+) \|', NOTICES, re.MULTILINE)
+
+
+def _normalised(name: str) -> str:
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+
+def _locked() -> dict[str, str]:
+    """Every package a release is built with, and its version."""
+    lock = (REPO_ROOT / 'requirements-release.txt').read_text(encoding='utf-8')
+    return {_normalised(name): version
+            for name, version in re.findall(r'^([A-Za-z0-9_.\-]+)==(\S+)', lock, re.MULTILINE)}
 
 
 def _pinned(package: str) -> str:
@@ -63,3 +75,24 @@ def test_no_component_is_listed_under_a_gpl_only_licence():
     gpl_only = [(name, licence) for name, _, licence in ROWS
                 if 'GPL' in licence and 'LGPL' not in licence]
     assert gpl_only == []
+
+
+def test_every_licence_file_names_the_version_a_release_is_built_with():
+    # A licence file per component and version (see the test above); the
+    # release lock is what CI installs, so it decides which version ships.
+    locked = _locked()
+    assert len(locked) > 20  # the lock was parsed
+    stale = []
+    for path in LICENCES.glob('*.txt'):
+        match = re.fullmatch(r'(.+)-(\d[\w.]*)', path.stem)
+        if match and _normalised(match.group(1)) in locked:
+            name, version = match.groups()
+            if locked[_normalised(name)] != version:
+                stale.append(f'{path.name}: the release lock pins {locked[_normalised(name)]}')
+    assert stale == []
+
+
+def test_every_listed_component_is_in_the_release_lock():
+    locked = _locked()
+    missing = [name for name, _, _ in ROWS if _normalised(name) not in locked]
+    assert missing == []

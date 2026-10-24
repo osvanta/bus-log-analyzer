@@ -1,0 +1,11 @@
+# What a release is built from: requirements.txt plus the build tool.
+# requirements-release.txt is generated from this file and is what CI installs,
+# with --require-hashes, so a tag always builds with the same libraries.
+#
+# Regenerate after changing requirements.txt, on Windows with Python 3.12:
+#   pip install pip-tools
+#   pip-compile --generate-hashes --allow-unsafe requirements-release.in
+# then bring THIRD_PARTY_NOTICES.md and licenses/ to the versions it pins:
+# tests/test_third_party_notices.py fails until they agree.
+-r requirements.txt
+pyinstaller

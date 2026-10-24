@@ -115,7 +115,7 @@ permits applications to redistribute alongside themselves.
 | `pyqtgraph` | 0.14.0 | MIT | [link](https://github.com/pyqtgraph/pyqtgraph) |
 | `python-dateutil` | 2.9.0.post0 | Apache-2.0 AND BSD-3-Clause | [link](https://github.com/dateutil/dateutil) |
 | `PyYAML` | 6.0.3 | MIT | [link](https://github.com/yaml/pyyaml) |
-| `setuptools` | 84.0.0 | MIT | [link](https://github.com/pypa/setuptools) |
+| `setuptools` | 84.1.0 | MIT | [link](https://github.com/pypa/setuptools) |
 | `six` | 1.17.0 | MIT | [link](https://github.com/benjaminp/six) |
 | `textparser` | 0.26.2 | MIT | [link](https://github.com/cantools/textparser) |
 | `typing_extensions` | 4.16.0 | PSF-2.0 | [link](https://github.com/python/typing_extensions) |

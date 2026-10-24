@@ -79,11 +79,15 @@ bus-log-analyzer/
 │   ├── images/                   # Screenshots, light and dark, from a demo measurement
 │   └── requirements.txt          # The guide's build tools, apart from the application's
 ├── mkdocs.yml                    # The guide's site: theme, navigation, address
-├── requirements.txt
+├── requirements.txt              # What the application needs; LGPL libraries pinned
+├── requirements-release.in       # requirements.txt + PyInstaller: the input of the release lock
+├── requirements-release.txt      # The release lock: every package, version and hash CI installs
 ├── BusLogAnalyzer.spec           # PyInstaller spec, bundles resources/, config/ and ldfparser grammars;
 │                                 #   builds BusLogAnalyzer.exe and appdebugger.exe (-X dev)
-├── .github/workflows/build.yml  # Auto-build on v*.*.* tag push
-└── .github/workflows/guide.yml  # Builds the guide on a PR; publishes it to GitHub Pages from main
+├── .github/workflows/build.yml  # On a v*.*.* tag: test, build, SBOM and SHA-256 sums; a separate job publishes
+├── .github/workflows/pr.yml     # On a PR: protected paths, dependency audit, lint, tests, portable build
+├── .github/workflows/guide.yml  # Builds the guide on a PR; publishes it to GitHub Pages from main
+└── .github/dependabot.yml       # Monthly updates of the commit-pinned GitHub Actions
 
 
 ## Validated loading and decoding architecture — protected

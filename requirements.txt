@@ -3,6 +3,9 @@
 # ship those versions. PySide6 pins PySide6_Essentials, PySide6_Addons and
 # shiboken6 to match. Upgrading one means regenerating the notices and its
 # file in licenses/; for asammdf, also rerun tests/test_asammdf_guard.py.
+# A release installs requirements-release.txt, generated from this file with
+# every version and hash fixed: regenerate it after a change here (see
+# requirements-release.in).
 PySide6==6.11.2
 pyqtgraph==0.14.0
 python-can==4.6.1
