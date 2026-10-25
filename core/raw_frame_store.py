@@ -28,10 +28,15 @@ Per frame, 18 bytes total:
     dlcs        uint8    1 B   data length code
     directions  uint8    1 B   0=Rx, 1=Tx, 2=Unknown
     flags       uint8    1 B   bit0=is_extended, bit1=is_fd, bit2=decoded,
-                               bit3=is_lin
+                               bit3=is_lin, bit4=error frame, bit5=remote
+                               frame, bit6=bit rate switch (CAN FD),
+                               bit7=payload kept long
     name_ids    uint16   2 B   index into name_table
 
 name_table: list[str]  — unique message names (~100–500 entries, negligible)
+bus_status: list[BusStatus] — what a logger recorded about the bus rather than
+            a frame: its own statistics, controller state, error counters,
+            overload frames. Rare (none in most files), so a plain list.
 
 Mixed CAN and LIN
 -----------------
@@ -109,6 +114,10 @@ FLAG_EXTENDED = 1
 FLAG_FD       = 2
 FLAG_DECODED  = 4
 FLAG_LIN      = 8      # bus discriminator; absent means CAN
+# Frames that are not messages: kept for what they say about the bus, never decoded.
+FLAG_ERROR    = 0x10   # an error frame, as the logger recorded it
+FLAG_REMOTE   = 0x20   # a remote (RTR) frame: no data, DLC is the length asked for
+FLAG_BRS      = 0x40   # CAN FD frame sent with bit rate switch
 FLAG_LONG     = 0x80   # payload kept whole in the overflow file; see _Payload
 
 
@@ -278,6 +287,23 @@ class _Payload:
                 pass
 
 
+class BusStatus(NamedTuple):
+    """Something a logger recorded about a bus, at one moment.
+
+    *kind* and the *values* it carries:
+
+    ``'statistics'``    the logger's own counts: bus_load (%), std_data,
+                        ext_data, std_remote, ext_remote, error_frames,
+                        overload_frames (any subset)
+    ``'controller'``    controller state: state (text), tec, rec (any subset)
+    ``'overload'``      one overload frame
+    """
+    time_s:  float              # on the frames' time base
+    channel: int                # 255 = unknown
+    kind:    str
+    values:  dict
+
+
 class RawFrameRecord(NamedTuple):
     """Lightweight record returned by get_window() — no heap allocation needed."""
     time_s:        float
@@ -318,6 +344,7 @@ class RawFrameStore:
         self.directions:  _array.array = _array.array('B')   # uint8
         self.flags:       _array.array = _array.array('B')   # uint8
         self.name_ids:    _array.array = _array.array('H')   # uint16
+        self.bus_status:  list[BusStatus] = []
 
         # ── Name table ────────────────────────────────────────────────────
         self.name_table:  list[str] = ['']    # index 0 = no name

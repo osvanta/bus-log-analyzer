@@ -45,11 +45,14 @@ from can.util import CAN_FD_DLC
 
 # The LIN layout is core.blf_reader's, verified there against a real CANoe log.
 from core.blf_reader import (
+    _BUS_STATUS_TYPES, _CAN_ERROR, _CAN_FD_ERROR_64,
     _LIN1_CHANNEL, _LIN1_DATA, _LIN1_DLC, _LIN1_ID, _LIN1_MIN_BODY,
     _LIN2_CHANNEL, _LIN2_DATA, _LIN2_DIR, _LIN2_DLC, _LIN2_ID, _LIN2_MIN_BODY,
-    _LIN_EVENT_TYPES, _LIN_MESSAGE, _LIN_MESSAGE2,
+    _LIN_EVENT_TYPES, _LIN_MESSAGE, _LIN_MESSAGE2, parse_bus_status,
 )
-from core.raw_frame_store import FLAG_EXTENDED, FLAG_FD, FLAG_LIN
+from core.raw_frame_store import (
+    FLAG_BRS, FLAG_ERROR, FLAG_EXTENDED, FLAG_FD, FLAG_LIN, FLAG_REMOTE, BusStatus,
+)
 
 _CAN_MESSAGE = _blf.CAN_MESSAGE
 _CAN_MESSAGE2 = _blf.CAN_MESSAGE2
@@ -112,6 +115,19 @@ _LIN2_BODY = np.dtype({
     "offsets": [_LIN2_CHANNEL, _LIN2_ID, _LIN2_DLC, _LIN2_DIR],
     "itemsize": _LIN2_MIN_BODY,
 })
+# The two error frame objects python-can does not read; see core.blf_reader.
+_ERROR2_BODY = np.dtype({
+    "names": ["channel"],
+    "formats": ["<u2"],
+    "offsets": [0],
+    "itemsize": 2,
+})
+_FD_ERROR_BODY = np.dtype({
+    "names": ["channel", "can_id"],
+    "formats": ["u1", "<u4"],
+    "offsets": [0, 12],
+    "itemsize": 16,
+})
 _LIN1_BODY = np.dtype({
     "names": ["channel", "frame_id", "dlc"],
     "formats": ["<u2", "u1", "u1"],
@@ -132,7 +148,7 @@ _DLC_TO_LENGTH = np.array(list(CAN_FD_DLC) + [64] * (256 - len(CAN_FD_DLC)),
 # What each object is, as a small code, so one lookup replaces a comparison
 # per object type. Codes are only given to objects with a v1 or v2 header;
 # python-can skips every other version unread.
-_NONE, _CAN, _ERROR, _FD, _FD64, _LIN2, _LIN1, _EVENT = range(8)
+_NONE, _CAN, _ERROR, _FD, _FD64, _LIN2, _LIN1, _EVENT, _ERROR2, _FD_ERROR, _STATUS = range(11)
 _KIND_BY_TYPE = np.zeros(256, dtype=np.uint8)
 _KIND_BY_TYPE[[_CAN_MESSAGE, _CAN_MESSAGE2]] = _CAN
 _KIND_BY_TYPE[_CAN_ERROR_EXT] = _ERROR
@@ -141,14 +157,19 @@ _KIND_BY_TYPE[_CAN_FD_MESSAGE_64] = _FD64
 _KIND_BY_TYPE[_LIN_MESSAGE2] = _LIN2
 _KIND_BY_TYPE[_LIN_MESSAGE] = _LIN1
 _KIND_BY_TYPE[list(_LIN_EVENT_TYPES)] = _EVENT
+_KIND_BY_TYPE[_CAN_ERROR] = _ERROR2
+_KIND_BY_TYPE[_CAN_FD_ERROR_64] = _FD_ERROR
+_KIND_BY_TYPE[list(_BUS_STATUS_TYPES)] = _STATUS
 
 # Body bytes python-can unpacks with a struct, by kind. LIN bodies are sliced,
 # which never fails, so they need nothing beyond the object.
-_STRUCT_BYTES = np.zeros(8, dtype=np.int64)
+_STRUCT_BYTES = np.zeros(11, dtype=np.int64)
 _STRUCT_BYTES[_CAN] = _CAN_BODY.itemsize
 _STRUCT_BYTES[_ERROR] = _ERROR_BODY.itemsize
 _STRUCT_BYTES[_FD] = _FD_BODY.itemsize
 _STRUCT_BYTES[_FD64] = _FD64_BODY.itemsize
+# Error and status objects too short for their layout are skipped (set to
+# _NONE in _scan), as the per-object reader skips them, so nothing here.
 
 # Row n keeps the first n payload bytes and clears the rest.
 _PAYLOAD = np.dtype((np.void, 64))
@@ -232,6 +253,7 @@ class _Scan:
     frame_rows: np.ndarray       # candidates before each one that are frames
     events: np.ndarray           # candidate is a LIN bus event
     frames: _Frames              # one row per frame candidate
+    status: dict                 # candidate index -> BusStatus, bus status objects
 
 
 def _find_signatures(data: bytes, limit: int) -> np.ndarray:
@@ -262,6 +284,8 @@ def _scan(data: bytes, start_timestamp: float) -> _Scan:
     body_length = ends - body
     kind[(kind == _LIN2) & (body_length < _LIN2_MIN_BODY)] = _NONE
     kind[(kind == _LIN1) & (body_length < _LIN1_MIN_BODY)] = _NONE
+    kind[(kind == _ERROR2) & (body_length < _ERROR2_BODY.itemsize)] = _NONE
+    kind[(kind == _FD_ERROR) & (body_length < _FD_ERROR_BODY.itemsize)] = _NONE
 
     # The last byte python-can reads for each object: the object's own end,
     # unless a malformed size makes a header or struct read run past it. A
@@ -269,7 +293,7 @@ def _scan(data: bytes, start_timestamp: float) -> _Scan:
     header_end = np.where(versioned, body, starts + _BASE_SIZE)
     complete = np.maximum(ends, header_end + _STRUCT_BYTES[kind]) <= limit
 
-    is_frame = (kind != _NONE) & (kind != _EVENT)
+    is_frame = (kind != _NONE) & (kind != _EVENT) & (kind != _STATUS)
     frame_rows = np.zeros(len(starts) + 1, dtype=np.int64)
     np.cumsum(is_frame, out=frame_rows[1:])
     total = int(frame_rows[-1])
@@ -293,14 +317,31 @@ def _scan(data: bytes, start_timestamp: float) -> _Scan:
             for column, value in zip(columns, values):
                 column[rows] = value
 
-    def can_flags(can_id, fd=None):
+    def can_flags(can_id, fd=None, remote=None, brs=None):
         flag = ((can_id >> 31) * FLAG_EXTENDED).astype(np.uint8)
         if fd is not None:
             flag |= (fd != 0).astype(np.uint8) * np.uint8(FLAG_FD)
+        if remote is not None:
+            flag |= (remote != 0).astype(np.uint8) * np.uint8(FLAG_REMOTE)
+        if brs is not None:
+            flag |= (brs != 0).astype(np.uint8) * np.uint8(FLAG_BRS)
         return flag
 
+    status: dict = {}
     for code in np.unique(kind).tolist():
         if code in (_NONE, _EVENT):
+            continue
+        if code == _STATUS:
+            # A handful per file at most: parsed one at a time.
+            factor = np.where(header["time_flags"] == _blf.TIME_TEN_MICS, 1e-5, 1e-9)
+            for index in np.flatnonzero(kind == _STATUS).tolist():
+                if not complete[index]:
+                    continue
+                stamp = float(header["timestamp"][index]) * float(factor[index]) + start_timestamp
+                record = parse_bus_status(int(header["type"][index]), data,
+                                          int(body[index]), int(ends[index]), stamp)
+                if record is not None:
+                    status[index] = record
             continue
         candidates = np.flatnonzero(kind == code)
         rows = frame_rows[candidates]
@@ -310,20 +351,32 @@ def _scan(data: bytes, start_timestamp: float) -> _Scan:
             can_id = fields["can_id"]
             dlc = fields["dlc"]
             place(rows, fields["channel"], can_id & 0x1FFF_FFFF, dlc,
-                  fields["flags"] & _blf.DIR, can_flags(can_id),
+                  fields["flags"] & _blf.DIR,
+                  can_flags(can_id, remote=fields["flags"] & _blf.REMOTE_FLAG),
                   offsets + _CAN_PAYLOAD, np.minimum(dlc, 8))
         elif code == _ERROR:
             fields = _gather(data, _ERROR_BODY, offsets)
             can_id = fields["can_id"]
             dlc = fields["dlc"]
             place(rows, fields["channel"], can_id & 0x1FFF_FFFF, dlc, 0,
-                  can_flags(can_id), offsets + _ERROR_PAYLOAD, np.minimum(dlc, 8))
+                  can_flags(can_id) | np.uint8(FLAG_ERROR), offsets + _ERROR_PAYLOAD,
+                  np.minimum(dlc, 8))
+        elif code == _ERROR2:
+            fields = _gather(data, _ERROR2_BODY, offsets)
+            place(rows, fields["channel"], 0, 0, 0, FLAG_ERROR, offsets, 0)
+        elif code == _FD_ERROR:
+            fields = _gather(data, _FD_ERROR_BODY, offsets)
+            can_id = fields["can_id"]
+            place(rows, fields["channel"], can_id & 0x1FFF_FFFF, 0, 0,
+                  can_flags(can_id) | np.uint8(FLAG_FD | FLAG_ERROR), offsets, 0)
         elif code == _FD:
             fields = _gather(data, _FD_BODY, offsets)
             can_id = fields["can_id"]
             place(rows, fields["channel"], can_id & 0x1FFF_FFFF,
                   _DLC_TO_LENGTH[fields["dlc"]], fields["flags"] & _blf.DIR,
-                  can_flags(can_id, fields["fd_flags"] & 0x1),
+                  can_flags(can_id, fields["fd_flags"] & 0x1,
+                            remote=fields["flags"] & _blf.REMOTE_FLAG,
+                            brs=fields["fd_flags"] & _blf.BRS),
                   offsets + _FD_PAYLOAD, np.minimum(fields["valid_bytes"], 64))
         elif code == _FD64:
             fields = _gather(data, _FD64_BODY, offsets)
@@ -342,7 +395,9 @@ def _scan(data: bytes, start_timestamp: float) -> _Scan:
                                 limit - start)
             place(rows, fields["channel"], can_id & 0x1FFF_FFFF,
                   _DLC_TO_LENGTH[fields["dlc"]], fields["direction"] != 0,
-                  can_flags(can_id, fields["fd_flags"] & 0x1000),
+                  can_flags(can_id, fields["fd_flags"] & 0x1000,
+                            remote=fields["fd_flags"] & 0x0010,
+                            brs=fields["fd_flags"] & 0x2000),
                   start, np.clip(length, 0, 64))
         elif code == _LIN2:
             fields = _gather(data, _LIN2_BODY, offsets)
@@ -372,15 +427,22 @@ def _scan(data: bytes, start_timestamp: float) -> _Scan:
         arb_ids, dlcs, directions, flags, payload,
     )
     return _Scan(data, limit, starts, ends, sizes, complete, frame_rows,
-                 kind == _EVENT, frames)
+                 kind == _EVENT, frames, status)
 
 
-def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int]:
+def _chain_status(scan: _Scan, indices) -> list[BusStatus]:
+    """The bus status records among the walked candidates *indices*."""
+    if not scan.status:
+        return []
+    return [scan.status[i] for i in indices if i in scan.status]
+
+
+def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int, list[BusStatus]]:
     """Walk the object chain from *pos* the way python-can does.
 
     Returns the frames of every complete object on the chain, the offset the
-    walk stopped at (where the next block's data must be appended), and how
-    many LIN bus events it passed.
+    walk stopped at (where the next block's data must be appended), how many
+    LIN bus events it passed, and the bus status records it passed.
     """
     starts = scan.starts
     count = len(starts)
@@ -408,7 +470,8 @@ def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int]:
             consumed = int(scan.ends[stop - 1]) if stop > first else pos
             rows = slice(int(scan.frame_rows[first]), int(scan.frame_rows[stop]))
             events = int(np.count_nonzero(scan.events[first:stop]))
-            return scan.frames.select(rows), consumed, events
+            status = _chain_status(scan, sorted(i for i in scan.status if first <= i < stop))
+            return scan.frames.select(rows), consumed, events, status
 
     # A candidate inside some payload: follow the chain one object at a time.
     begin = starts.tolist()
@@ -434,7 +497,8 @@ def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int]:
     frame_rows = scan.frame_rows[:-1][chain_array]
     is_frame = scan.frame_rows[chain_array + 1] > frame_rows
     events = int(np.count_nonzero(scan.events[chain_array]))
-    return scan.frames.select(frame_rows[is_frame]), pos, events
+    return (scan.frames.select(frame_rows[is_frame]), pos, events,
+            _chain_status(scan, chain))
 
 
 def _decompress_block(containers: list[tuple[int, memoryview]],
@@ -532,6 +596,8 @@ class BulkBLFReader:
         # LIN bus events (sleep, wakeup, errors, schedule changes) passed by
         # the last complete pass. Counted, not stored: they are not frames.
         self.lin_event_objects = 0
+        # What the logger recorded about the bus, from the same pass.
+        self.bus_status: list[BusStatus] = []
 
     def iter_frames(self) -> Iterator[_Frames]:
         """Yield frame columns block by block, in file order."""
@@ -544,6 +610,7 @@ class BulkBLFReader:
             pending: deque = deque()
             carry = b""
             events = 0
+            status: list[BusStatus] = []
             groups = _container_groups(reader)
             # Start with two blocks in flight and widen to the worker count,
             # so a caller that only wants the first frames (the channel
@@ -567,23 +634,26 @@ class BulkBLFReader:
                 parts: list[_Frames] = []
                 pos = 0
                 if carry:
-                    carry, pos, carried_events, carried = self._straddle(
+                    carry, pos, carried_events, carried, carried_status = self._straddle(
                         carry, scan, start_timestamp
                     )
                     events += carried_events
+                    status += carried_status
                     if len(carried):
                         parts.append(carried)
                     if carry:
                         # One object spans the whole block; keep collecting.
                         continue
-                frames, consumed, block_events = _follow(scan, pos)
+                frames, consumed, block_events, block_status = _follow(scan, pos)
                 events += block_events
+                status += block_status
                 if len(frames):
                     parts.append(frames)
                 carry = scan.data[consumed:scan.limit]
                 if parts:
                     yield _Frames.join(parts)
             self.lin_event_objects = events
+            self.bus_status = status
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
             reader.stop()
@@ -594,7 +664,7 @@ class BulkBLFReader:
 
         Returns what is still carried (non-empty only when the object is not
         finished even with all of *scan*), where the walk resumes in *scan*,
-        the LIN events passed and the frames found.
+        the LIN events passed, the frames found and the bus status records.
         """
         # Enough of this block to finish the object, if its size is readable
         # yet; the signature may follow up to four bytes of padding.
@@ -608,11 +678,11 @@ class BulkBLFReader:
             head = min(head, scan.limit)
             joined = carry + scan.data[:head]
             small = _scan(joined + _PAD_BYTES, start_timestamp)
-            frames, consumed, events = _follow(small, 0)
+            frames, consumed, events, status = _follow(small, 0)
             if consumed > len(carry):
                 # Finished; the walk resumes in this block where it stopped.
-                return b"", consumed - len(carry), events, frames
+                return b"", consumed - len(carry), events, frames, status
             if head == scan.limit:
                 # The object is not finished even by the end of this block.
-                return joined[consumed:], 0, events, frames
+                return joined[consumed:], 0, events, frames, status
             head *= 2

@@ -9,13 +9,80 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterator
 import binascii
+import re
 
 import can
 
 from core.models import RawFrame
 from core.dbc_decoder import DBCDecoder
-from core.raw_frame_store import FLAG_EXTENDED, FLAG_FD, FLAG_LIN
+from core.raw_frame_store import (
+    FLAG_BRS, FLAG_ERROR, FLAG_EXTENDED, FLAG_FD, FLAG_LIN, FLAG_REMOTE, BusStatus,
+)
 from core.models import DecodedSignalSample
+
+
+# The logger's own statistics line, as CANalyzer/CANoe write it:
+#   <time> <channel> Statistic: D <n> R <n> XD <n> XR <n> E <n> O <n> B <load>%
+_STATISTIC_FIELDS = {
+    b'D': 'std_data', b'R': 'std_remote', b'XD': 'ext_data', b'XR': 'ext_remote',
+    b'E': 'error_frames', b'O': 'overload_frames',
+}
+_ERROR_COUNTER = re.compile(rb'([TR])xErr:\s*(\d+)', re.IGNORECASE)
+
+
+def _controller_state(text: bytes) -> str | None:
+    text = text.lower()
+    for marker, state in ((b'bus off', 'bus off'), (b'busoff', 'bus off'),
+                          (b'passive', 'error passive'), (b'warning', 'warning'),
+                          (b'active', 'error active')):
+        if marker in text:
+            return state
+    return None
+
+
+def _parse_bus_line(line: bytes):
+    """An ASC line that is not a frame but says something about the bus.
+
+    Returns ``('error', timestamp, channel, direction, is_fd)`` for an error
+    frame, a BusStatus for a ``Statistic:`` or controller status line, or
+    None for anything else.
+    """
+    tokens = line.split()
+    try:
+        timestamp = float(tokens[0])
+    except (ValueError, IndexError):
+        return None
+    try:
+        if b'ErrorFrame' in tokens:
+            is_fd = tokens[1].upper() == b'CANFD'
+            channel = int(tokens[2] if is_fd else tokens[1])
+            lowered = [token.lower() for token in tokens]
+            direction = 0 if b'rx' in lowered else 1 if b'tx' in lowered else 2
+            return 'error', timestamp, channel, direction, is_fd
+        if b'Statistic:' in tokens:
+            channel = int(tokens[1])
+            fields = tokens[tokens.index(b'Statistic:') + 1:]
+            values = {}
+            for key, value in zip(fields[0::2], fields[1::2]):
+                if key == b'B':
+                    values['bus_load'] = float(value.rstrip(b'%'))
+                elif key in _STATISTIC_FIELDS:
+                    values[_STATISTIC_FIELDS[key]] = int(value)
+            return BusStatus(timestamp, channel, 'statistics', values)
+        status_at = line.find(b'Status:')
+        if status_at >= 0:
+            channel = int(tokens[2] if tokens[1].upper() == b'CAN' else tokens[1])
+            text = line[status_at + len(b'Status:'):]
+            values = {}
+            state = _controller_state(text)
+            if state:
+                values['state'] = state
+            for which, count in _ERROR_COUNTER.findall(text):
+                values['tec' if which.upper() == b'T' else 'rec'] = int(count)
+            return BusStatus(timestamp, channel, 'controller', values) if values else None
+    except (ValueError, IndexError):
+        return None
+    return None
 
 
 class ASCReadError(RuntimeError):
@@ -141,6 +208,9 @@ class ASCCANReader:
     def __init__(self, asc_path: str | Path, decoder: DBCDecoder) -> None:
         self._path    = Path(asc_path)
         self._decoder = decoder
+        # What the logger recorded about the bus, from the last
+        # iter_raw_batches() pass (absolute times).
+        self.bus_status: list[BusStatus] = []
         self.source_description = (
             f"ASC + DBC  ({self._path.name} / {self._decoder.dbc_path.name})"
         )
@@ -237,12 +307,16 @@ class ASCCANReader:
         """Parse Vector ASC directly into column batches.
 
         Supports the standard classic-CAN and CAN-FD layouts written by
-        CANalyzer/CANoe and python-can.  Header, trigger, comment, status and
-        error-event lines are ignored.  Channels in ASC text are already
+        CANalyzer/CANoe and python-can.  Error frames are kept, flagged
+        FLAG_ERROR; remote frames are flagged FLAG_REMOTE with the length they
+        asked for; the CAN FD BRS column sets FLAG_BRS. ``Statistic:`` and
+        controller status lines go to ``bus_status``. Header, trigger and
+        comment lines are ignored.  Channels in ASC text are already
         1-indexed, so no channel conversion is needed.
         """
         if not self._path.exists():
             raise ASCReadError(f"ASC file not found: {self._path}")
+        self.bus_status: list[BusStatus] = []
 
         timestamps: list[float] = []
         channels = bytearray()
@@ -262,13 +336,30 @@ class ASCCANReader:
                         numeric_base = 10 if header[1].lower() == b'dec' else 16
                         continue
 
+                    # Rare lines about the bus rather than a frame. An error
+                    # frame becomes a frame; the rest are BusStatus records.
+                    extra_flags = 0
+                    special = False
+                    if (b'ErrorFrame' in line or b'Statistic:' in line
+                            or b'Status:' in line):
+                        parsed = _parse_bus_line(line)
+                        if isinstance(parsed, BusStatus):
+                            self.bus_status.append(parsed)
+                            continue
+                        if parsed is None:
+                            continue
+                        _, timestamp, channel, direction_value, is_fd = parsed
+                        arb_id, data_len, payload, extended = 0, 0, b'', False
+                        extra_flags = FLAG_ERROR
+                        special = True
+
                     # asammdf/Vector CAN-FD exports use fixed prefix columns.
                     # Read those slices directly so a multi-million-line file
                     # does not allocate and discard every unused trailing
                     # status field.  Non-standard lines use the general parser
                     # below without changing accepted ASC variants.
                     is_lin = False
-                    if b' Li ' in line[:32] or b' LIN ' in line[:32]:
+                    if not special and (b' Li ' in line[:32] or b' LIN ' in line[:32]):
                         parsed = _parse_lin_line(line, numeric_base)
                         if parsed is None:
                             continue
@@ -280,8 +371,8 @@ class ASCCANReader:
                         is_fd = False
                         is_lin = True
 
-                    fixed_canfd = False
-                    if not is_lin and numeric_base == 16 and len(line) >= 79 \
+                    fixed_canfd = special
+                    if not special and not is_lin and numeric_base == 16 and len(line) >= 79 \
                             and line[12:17] == b'CANFD':
                         try:
                             timestamp = float(line[:12])
@@ -305,6 +396,11 @@ class ASCCANReader:
                                 raise ValueError("short fixed-column payload")
                             is_fd = True
                             fixed_canfd = True
+                            # BRS, ESI and DLC are the last three columns
+                            # before the data length, whatever the name's width.
+                            control = line[42:75].split()
+                            if len(control) >= 3 and control[-3] == b'1':
+                                extra_flags = FLAG_BRS
                         except (ValueError, IndexError, binascii.Error):
                             fixed_canfd = False
 
@@ -332,14 +428,18 @@ class ASCCANReader:
                                 # Some CANalyzer exports include a symbolic
                                 # message name after the ID.
                                 if fields[5].isdigit():
+                                    brs = fields[5]
                                     data_len = min(int(fields[8]), 64)
                                     payload_tail = fields[9]
                                 else:
+                                    brs = fields[6]
                                     length_and_payload = fields[9].split(None, 1)
                                     if len(length_and_payload) != 2:
                                         continue
                                     data_len = min(int(length_and_payload[0]), 64)
                                     payload_tail = length_and_payload[1]
+                                if brs == b'1':
+                                    extra_flags = FLAG_BRS
                             else:
                                 # ts channel id [symbolic-name] Rx d|r dlc data...
                                 classic = line.split(None, 6)
@@ -353,8 +453,14 @@ class ASCCANReader:
                                 if frame_kind not in (b'd', b'r'):
                                     continue
                                 if frame_kind == b'r':
+                                    # No data; the DLC, if written, is the
+                                    # length the remote frame asked for.
+                                    asked = b' '.join(classic[direction_index + 2:]).split()[:1]
+                                    remote_dlc = (int(asked[0]) if asked and asked[0].isdigit()
+                                                  else 0)
                                     data_len = 0
                                     payload_tail = b''
+                                    extra_flags = FLAG_REMOTE
                                 elif direction_index == 3:
                                     data_len = min(int(classic[5]), 64)
                                     payload_tail = classic[6] if len(classic) > 6 else b''
@@ -381,6 +487,8 @@ class ASCCANReader:
                             else 1 if direction_token == b'tx'
                             else 2
                         )
+                        if extra_flags & FLAG_REMOTE:
+                            data_len = min(remote_dlc, 15)
 
                     if base_ts is None:
                         base_ts = timestamp
@@ -396,6 +504,7 @@ class ASCCANReader:
                         (FLAG_EXTENDED if extended else 0)
                         | (FLAG_FD if is_fd else 0)
                         | (FLAG_LIN if is_lin else 0)
+                        | extra_flags
                     )
                     offset = slot * 64
                     if payload:

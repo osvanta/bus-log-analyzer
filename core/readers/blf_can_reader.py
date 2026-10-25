@@ -89,7 +89,15 @@ class BLFCANReader:
 
     def iter_raw_batches(self, batch_size: int = 16_384):
         """Yield packed BLF column batches without per-frame tuples."""
-        yield from BLFReaderService(self._path).iter_raw_batches(batch_size)
+        self._service = BLFReaderService(self._path)
+        yield from self._service.iter_raw_batches(batch_size)
+
+    @property
+    def bus_status(self) -> list:
+        """What the logger recorded about the bus (BusStatus, absolute
+        times), from the last iter_raw_batches() pass."""
+        service = getattr(self, '_service', None)
+        return service.bus_status if service is not None else []
 
     @property
     def decoder(self) -> DBCDecoder:

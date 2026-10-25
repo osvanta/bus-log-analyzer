@@ -43,7 +43,7 @@ from core.dbc_decoder import (
     multi_sender_messages,
     source_address_message_name,
 )
-from core.raw_frame_store import FLAG_LIN
+from core.raw_frame_store import FLAG_BRS, FLAG_ERROR, FLAG_LIN, FLAG_REMOTE
 from core.readers.mdf_reader import MDFReader, MDFSampleSource, _channel_failure_text
 from core.readers.mdf_recovery import (
     make_bounded_mdf4_copy,
@@ -54,6 +54,13 @@ from core.readers.mdf_recovery import (
 class MDFCANReadError(RuntimeError):
     pass
 
+
+# The ASAM MDF bus-logging groups of CAN frames, and the flag each sets.
+_CAN_FRAME_ROOTS = {
+    "CAN_DataFrame": 0,
+    "CAN_ErrorFrame": FLAG_ERROR,
+    "CAN_RemoteFrame": FLAG_REMOTE,
+}
 
 #: Raw frame records read per get(): a CAN FD record is up to about 80 bytes.
 _TRACE_CHUNK_RECORDS = 1 << 20
@@ -752,16 +759,23 @@ class MDFCANReader:
 
     @staticmethod
     def _emit_raw_frame_arrays(source, callback, channel_error=None) -> int:
-        """Read each MDF ``CAN_DataFrame`` group as one structured array."""
+        """Read each MDF ``CAN_DataFrame`` group as one structured array.
+
+        ``CAN_ErrorFrame`` and ``CAN_RemoteFrame`` groups (ASAM MDF bus
+        logging) are read the same way, their frames flagged FLAG_ERROR and
+        FLAG_REMOTE; neither carries data, and either may lack the ID.
+        """
         total = 0
         for group_idx, group in enumerate(source.groups):
-            parent_idx = None
+            parent_idx = root = None
             for channel_idx, channel in enumerate(group.channels):
-                if (getattr(channel, "name", "") or "") == "CAN_DataFrame":
-                    parent_idx = channel_idx
+                name = getattr(channel, "name", "") or ""
+                if name in _CAN_FRAME_ROOTS:
+                    parent_idx, root = channel_idx, name
                     break
             if parent_idx is None:
                 continue
+            kind_flag = _CAN_FRAME_ROOTS[root]
             group_name = MDFReader._group_name(source, group_idx)
             try:
                 # A chunk of records at a time: a group can hold every
@@ -771,7 +785,7 @@ class MDFCANReader:
                     field_names = samples.dtype.names or ()
 
                     def field(suffix, required=True):
-                        exact = f"CAN_DataFrame.{suffix}"
+                        exact = f"{root}.{suffix}"
                         name = exact if exact in field_names else next(
                             (item for item in field_names if item.endswith(f".{suffix}")),
                             None,
@@ -786,12 +800,20 @@ class MDFCANReader:
                         return samples[name]
 
                     timestamps = np.asarray(signal.timestamps, dtype=np.float64)
+                    count = len(timestamps)
+                    data_frame = kind_flag == 0
                     channels = field("BusChannel")
-                    arb_ids = field("ID")
-                    data_rows = field("DataBytes")
+                    arb_ids = field("ID", required=data_frame)
+                    if arb_ids is None:
+                        arb_ids = np.zeros(count, dtype=np.uint32)
+                    data_rows = field("DataBytes", required=data_frame)
+                    if data_rows is None or kind_flag == FLAG_REMOTE:
+                        data_rows = np.zeros((count, 8), dtype=np.uint8)
                     data_lengths = field("DataLength", required=False)
                     if data_lengths is None:
-                        data_lengths = field("DLC")
+                        data_lengths = field("DLC", required=data_frame)
+                    if data_lengths is None:
+                        data_lengths = np.zeros(count, dtype=np.uint8)
                     directions = field("Dir", required=False)
                     if directions is None:
                         directions = np.full(len(samples), 2, dtype=np.uint8)
@@ -804,7 +826,11 @@ class MDFCANReader:
                     flags = (
                         (np.asarray(ide, dtype=np.uint8) & np.uint8(1))
                         | ((np.asarray(edl, dtype=np.uint8) & np.uint8(1)) << np.uint8(1))
+                        | np.uint8(kind_flag)
                     )
+                    brs = field("BRS", required=False)
+                    if brs is not None:
+                        flags |= (np.asarray(brs, dtype=np.uint8) & np.uint8(1)) * np.uint8(FLAG_BRS)
 
                     callback(
                         timestamps,
@@ -819,7 +845,7 @@ class MDFCANReader:
             except Exception as exc:
                 if channel_error is None:
                     raise
-                channel_error(group_name, "CAN_DataFrame", exc)
+                channel_error(group_name, root, exc)
         return total
 
     @staticmethod
