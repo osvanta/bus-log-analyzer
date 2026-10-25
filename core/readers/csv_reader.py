@@ -16,6 +16,7 @@ from typing import Iterator
 import numpy as np
 
 from core.models import DecodedSignalSample, RawFrame
+from core.raw_frame_store import FLAG_BRS, FLAG_REMOTE
 
 
 class CSVReadError(RuntimeError):
@@ -580,6 +581,10 @@ class CSVRawCANReader:
         direction_index = positions.get("dir")
         ide_index = positions.get("ide")
         edl_index = positions.get("edl")
+        # Where present, BRS marks a CAN FD frame sent with bit rate switch
+        # and RTR a remote frame (ASAM data-frame column names).
+        brs_index = positions.get("brs")
+        rtr_index = positions.get("rtr")
         delimiter_bytes = delimiter.encode("ascii")
 
         timestamps: list[float] = []
@@ -645,6 +650,17 @@ class CSVRawCANReader:
                             is_fd = bool(int(fields[edl_index]))
                         except (IndexError, ValueError):
                             pass
+                    brs = remote = False
+                    if brs_index is not None:
+                        try:
+                            brs = bool(int(fields[brs_index]))
+                        except (IndexError, ValueError):
+                            pass
+                    if rtr_index is not None:
+                        try:
+                            remote = bool(int(fields[rtr_index]))
+                        except (IndexError, ValueError):
+                            pass
 
                     if base_ts is None:
                         base_ts = timestamp
@@ -654,7 +670,8 @@ class CSVRawCANReader:
                     arb_ids.append(arbitration_id & 0xFFFF_FFFF)
                     dlcs.append(data_length)
                     directions.append(direction)
-                    flags.append((1 if is_extended else 0) | (2 if is_fd else 0))
+                    flags.append((1 if is_extended else 0) | (2 if is_fd else 0)
+                                 | (FLAG_BRS if brs else 0) | (FLAG_REMOTE if remote else 0))
                     offset = slot * 64
                     if data_length:
                         data_block[offset:offset + data_length] = payload[:data_length]

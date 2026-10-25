@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from core.models import RawFrame  # noqa: F401 — re-exported
 
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -15,7 +16,9 @@ from typing import Iterable, Iterator
 import can
 from can.io import blf as _blf
 
-from core.raw_frame_store import FLAG_EXTENDED, FLAG_FD, FLAG_LIN
+from core.raw_frame_store import (
+    FLAG_BRS, FLAG_ERROR, FLAG_EXTENDED, FLAG_FD, FLAG_LIN, FLAG_REMOTE, BusStatus,
+)
 
 
 # ── LIN object types ──────────────────────────────────────────────────────
@@ -58,6 +61,75 @@ _LIN_EVENT_TYPES = frozenset(
     {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 42, 43, 46, 58, 59, 60, 61, 62, 63, 64}
 )
 
+# ── CAN error frames and bus status ───────────────────────────────────────
+#
+# python-can reads CAN_ERROR_EXT only. These are the other objects a Vector
+# logger writes about the bus, from Vector's BLF object definitions (as the
+# vector_blf library documents them). NOT checked against a real file: no
+# sample here holds one.
+#
+# Error frames, kept as frames flagged FLAG_ERROR:
+#   CAN_ERROR (2)          channel(H) length(H) reserved(L)
+#   CAN_FD_ERROR_64 (104)  channel(B) dlc(B) validDataBytes(B) ecc(B) flags(H)
+#                          errorCodeExt(H) extFlags(H) extDataOffset(B)
+#                          reserved(B) id(L) ...
+_CAN_ERROR = 2
+_CAN_ERROR_STRUCT = struct.Struct("<H")
+_CAN_FD_ERROR_64 = 104
+_CAN_FD_ERROR_64_STRUCT = struct.Struct("<B11xL")
+
+# Bus status, kept as BusStatus records:
+#   CAN_OVERLOAD (3)            channel(H) reserved(H) reserved(L)
+#   CAN_DRIVER_ERROR (31)       channel(H) txErrors(B) rxErrors(B) errorCode(L)
+#   CAN_DRIVER_STATISTIC (72)   channel(H) busLoad(H, 1/100 %) stdData(L)
+#                               extData(L) stdRemote(L) extRemote(L)
+#                               errorFrames(L) overloadFrames(L) reserved(L)
+#   CAN_DRIVER_ERROR_EXT (74)   channel(H) txErrors(B) rxErrors(B) errorCode(L)
+#                               flags(L) state(B) ...
+_BUS_STATUS_STRUCTS = {
+    3: struct.Struct("<H"),
+    31: struct.Struct("<HBBL"),
+    72: struct.Struct("<HHLLLLLL"),
+    74: struct.Struct("<HBBLLB"),
+}
+_BUS_STATUS_TYPES = frozenset(_BUS_STATUS_STRUCTS)
+
+
+def controller_state(tec: int, rec: int) -> str:
+    """A CAN controller's state from its error counters (ISO 11898-1)."""
+    if tec >= 256:
+        return 'bus off'
+    if tec >= 128 or rec >= 128:
+        return 'error passive'
+    if tec >= 96 or rec >= 96:
+        return 'warning'
+    return 'error active'
+
+
+def parse_bus_status(obj_type: int, data: bytes, pos: int, end: int,
+                     timestamp: float) -> BusStatus | None:
+    """The BusStatus record of a bus status object whose body is
+    ``data[pos:end]``, or None if the body is too short for its layout."""
+    layout = _BUS_STATUS_STRUCTS[obj_type]
+    if end - pos < layout.size:
+        return None
+    fields = layout.unpack_from(data, pos)
+    channel = fields[0] if 0 <= fields[0] < 255 else 255
+    if obj_type == 3:
+        return BusStatus(timestamp, channel, 'overload', {})
+    if obj_type == 72:
+        names = ('std_data', 'ext_data', 'std_remote', 'ext_remote',
+                 'error_frames', 'overload_frames')
+        values = dict(zip(names, fields[2:]))
+        values['bus_load'] = fields[1] / 100.0
+        return BusStatus(timestamp, channel, 'statistics', values)
+    tec, rec = fields[1], fields[2]
+    values = {'tec': tec, 'rec': rec, 'state': controller_state(tec, rec),
+              'error_code': fields[3]}
+    if obj_type == 74:
+        values['state_code'] = fields[5]
+    return BusStatus(timestamp, channel, 'controller', values)
+
 
 class _PackedBLFReader(can.BLFReader):
     """python-can BLF container reader that yields raw columns, not Messages.
@@ -66,14 +138,17 @@ class _PackedBLFReader(can.BLFReader):
     than rejecting — the reason a LIN-only log used to read as an empty file.
 
     Yields ``(timestamp, channel, arb_id, dlc, direction, is_extended, is_fd,
-    is_lin, payload)``. LIN channel numbers are used exactly as stored: BLF
-    holds them 1-indexed, and unlike the CAN path there is no python-can
-    ``channel - 1`` to undo.
+    flags, payload)``, *flags* being the other RawFrameStore flag bits: LIN,
+    error frame, remote frame, bit rate switch. LIN channel numbers are used
+    exactly as stored: BLF holds them 1-indexed, and unlike the CAN path there
+    is no python-can ``channel - 1`` to undo. Bus status objects are not
+    frames; they are collected in ``bus_status``.
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.lin_event_objects = 0
+        self.bus_status: list[BusStatus] = []
 
     def _parse_data(self, data: bytes):
         unpack_base = _blf.OBJ_HEADER_BASE_STRUCT.unpack_from
@@ -127,21 +202,24 @@ class _PackedBLFReader(can.BLFReader):
                 yield (
                     timestamp, channel, can_id & 0x1FFF_FFFF, dlc,
                     1 if msg_flags & _blf.DIR else 0,
-                    bool(can_id & _blf.CAN_MSG_EXT), False, False, payload[:dlc],
+                    bool(can_id & _blf.CAN_MSG_EXT), False,
+                    FLAG_REMOTE if msg_flags & _blf.REMOTE_FLAG else 0, payload[:dlc],
                 )
             elif obj_type == _blf.CAN_ERROR_EXT:
                 members = unpack_error(data, pos)
                 channel, dlc, can_id, payload = members[0], members[5], members[7], members[9]
                 yield (
                     timestamp, channel, can_id & 0x1FFF_FFFF, dlc, 0,
-                    bool(can_id & _blf.CAN_MSG_EXT), False, False, payload[:dlc],
+                    bool(can_id & _blf.CAN_MSG_EXT), False, FLAG_ERROR, payload[:dlc],
                 )
             elif obj_type == _blf.CAN_FD_MESSAGE:
                 channel, msg_flags, dlc, can_id, _, _, fd_flags, valid_bytes, payload = unpack_fd(data, pos)
                 yield (
                     timestamp, channel, can_id & 0x1FFF_FFFF, dlc2len(dlc),
                     1 if msg_flags & _blf.DIR else 0,
-                    bool(can_id & _blf.CAN_MSG_EXT), bool(fd_flags & 0x1), False,
+                    bool(can_id & _blf.CAN_MSG_EXT), bool(fd_flags & 0x1),
+                    (FLAG_REMOTE if msg_flags & _blf.REMOTE_FLAG else 0)
+                    | (FLAG_BRS if fd_flags & _blf.BRS else 0),
                     payload[:valid_bytes],
                 )
             elif obj_type == _blf.CAN_FD_MESSAGE_64:
@@ -160,7 +238,9 @@ class _PackedBLFReader(can.BLFReader):
                 yield (
                     timestamp, channel, can_id & 0x1FFF_FFFF, dlc2len(dlc),
                     1 if direction else 0,
-                    bool(can_id & _blf.CAN_MSG_EXT), bool(fd_flags & 0x1000), False,
+                    bool(can_id & _blf.CAN_MSG_EXT), bool(fd_flags & 0x1000),
+                    (FLAG_REMOTE if fd_flags & 0x0010 else 0)
+                    | (FLAG_BRS if fd_flags & 0x2000 else 0),
                     payload,
                 )
             elif obj_type == _LIN_MESSAGE2:
@@ -179,7 +259,7 @@ class _PackedBLFReader(can.BLFReader):
                         body[_LIN2_ID] & 0x3F,
                         dlc,
                         0 if direction == 0 else 1 if direction == 1 else 2,
-                        False, False, True,
+                        False, False, FLAG_LIN,
                         body[_LIN2_DATA:_LIN2_DATA + dlc],
                     )
             elif obj_type == _LIN_MESSAGE:
@@ -194,11 +274,26 @@ class _PackedBLFReader(can.BLFReader):
                         body[_LIN1_ID] & 0x3F,
                         dlc,
                         2,      # the v1 object carries no direction field
-                        False, False, True,
+                        False, False, FLAG_LIN,
                         body[_LIN1_DATA:_LIN1_DATA + dlc],
                     )
             elif obj_type in _LIN_EVENT_TYPES:
                 self.lin_event_objects += 1
+            elif obj_type == _CAN_ERROR:
+                if next_pos - pos >= _CAN_ERROR_STRUCT.size:
+                    (channel,) = _CAN_ERROR_STRUCT.unpack_from(data, pos)
+                    yield (timestamp, channel, 0, 0, 0, False, False, FLAG_ERROR, b"")
+            elif obj_type == _CAN_FD_ERROR_64:
+                if next_pos - pos >= _CAN_FD_ERROR_64_STRUCT.size:
+                    channel, can_id = _CAN_FD_ERROR_64_STRUCT.unpack_from(data, pos)
+                    yield (
+                        timestamp, channel, can_id & 0x1FFF_FFFF, 0, 0,
+                        bool(can_id & _blf.CAN_MSG_EXT), True, FLAG_ERROR, b"",
+                    )
+            elif obj_type in _BUS_STATUS_TYPES:
+                record = parse_bus_status(obj_type, data, pos, next_pos, timestamp)
+                if record is not None:
+                    self.bus_status.append(record)
 
             pos = next_pos
 
@@ -217,6 +312,9 @@ class BLFReaderService:
         # the last iter_raw_batches() pass. They are not frames, so they
         # are counted rather than stored.
         self.lin_event_objects = 0
+        # What the logger recorded about the bus (BusStatus, absolute times),
+        # from the same pass.
+        self.bus_status: list[BusStatus] = []
 
     def __iter__(self) -> Iterator[RawFrame]:
         """Yield RawFrame objects. **CAN only** — python-can skips LIN.
@@ -342,6 +440,7 @@ class BLFReaderService:
             if pending is not None:
                 yield batch(pending)
             self.lin_event_objects = reader.lin_event_objects
+            self.bus_status = reader.bus_status
         except Exception as exc:
             raise BLFReadError(f"Failed to read BLF file '{self.path}': {exc}") from exc
 
@@ -369,7 +468,7 @@ class BLFReaderService:
             with _PackedBLFReader(str(self.path)) as reader:
                 for (
                     timestamp, channel, arb_id, dlc, direction,
-                    is_extended, is_fd, is_lin, data,
+                    is_extended, is_fd, other_flags, data,
                 ) in reader:
                     if base_ts is None:
                         base_ts = timestamp
@@ -385,7 +484,7 @@ class BLFReaderService:
                     flags.append(
                         (FLAG_EXTENDED if is_extended else 0)
                         | (FLAG_FD if is_fd else 0)
-                        | (FLAG_LIN if is_lin else 0)
+                        | other_flags
                     )
                     offset = slot * 64
                     data_len = min(len(data), 64)
@@ -406,6 +505,7 @@ class BLFReaderService:
                         data_block = bytearray(batch_size * 64)
 
                 self.lin_event_objects = reader.lin_event_objects
+                self.bus_status = reader.bus_status
 
             if timestamps:
                 yield (

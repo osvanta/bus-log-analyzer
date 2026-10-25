@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 from core.readers import reader_factory
 from core.readers.base import MeasurementReader
 from core.signal_store import ChoiceLabels, SampleCache, SignalStore
-from core.raw_frame_store import FLAG_LIN, RawFrameStore
+from core.raw_frame_store import FLAG_ERROR, FLAG_LIN, FLAG_REMOTE, RawFrameStore
 from core.bus_types import (
     ALL_CHANNELS_NUMBER,
     BusChannel,
@@ -185,11 +185,15 @@ def _frame_keys(flags, channels, arb_ids):
     CAN 1 and LIN 1 are different channels that happen to share a number, so
     grouping on the number alone would decode one bus's frames against the
     other's database. Bit 41 is already spoken for by the trace-name encoding.
+    Bit 42 marks error and remote frames, which carry an ID but no message:
+    they group apart from the data frames of that ID and are never decoded.
     """
     import numpy as np
     is_lin = (flags & np.uint8(FLAG_LIN)) != 0
+    not_message = (flags & np.uint8(FLAG_ERROR | FLAG_REMOTE)) != 0
     return (
-        (is_lin.astype(np.uint64) << np.uint64(40))
+        (not_message.astype(np.uint64) << np.uint64(42))
+        | (is_lin.astype(np.uint64) << np.uint64(40))
         | (channels.astype(np.uint64) << np.uint64(32))
         | arb_ids.astype(np.uint64)
     )
@@ -578,6 +582,13 @@ class LoadWorker(QObject):
                     self.progress.emit(f"Reading frames: {index:,}...")
 
         rfs.seal()
+        # What the logger recorded about the bus, on the frames' time base.
+        statuses = getattr(reader, 'bus_status', None)
+        if isinstance(statuses, list):
+            rfs.bus_status = [
+                record._replace(time_s=record.time_s - (base_ts or 0.0))
+                for record in statuses
+            ]
         read_elapsed = time.perf_counter() - read_started
         self.progress.emit(
             f"Bulk frame-array read/store complete: {index:,} frames in {read_elapsed:.1f} s"
@@ -650,6 +661,10 @@ class LoadWorker(QObject):
             bus      = BusType.LIN if flags_np[first] & FLAG_LIN else BusType.CAN
             ch       = None if ch_byte == 255 else ch_byte
             ch_key   = as_channel_key(ch, bus)
+            if flags_np[first] & (FLAG_ERROR | FLAG_REMOTE):
+                # An error or remote frame: an ID, but no data to decode.
+                group_matches.append(None)
+                continue
 
             decoder = (
                 _decoder_map.get(ch_key)

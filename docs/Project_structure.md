@@ -9,7 +9,7 @@ bus-log-analyzer/
 │   ├── bus_types.py              # BusType (CAN/LIN), (bus, channel) identity, label/sort/encode helpers
 │   ├── channel_config.py         # ChannelConfig: {(bus, channel) → DBC/ARXML/LDF}, decoder cache, save/load .osvanta_ch (v3)
 │   ├── signal_store.py           # SignalStore, SignalSeries (array.array storage)
-│   ├── raw_frame_store.py        # Batched CAN+LIN Trace store: compact metadata + 64 B/frame mmap payload
+│   ├── raw_frame_store.py        # Batched CAN+LIN Trace store: compact metadata + 64 B/frame mmap payload; error/remote/BRS flags, BusStatus records
 │   ├── dbc_decoder.py            # DBCDecoder with 3-level cache — .dbc, .arxml, .ldf (via DBC conversion)
 │   ├── vectorized_decoder.py     # NumPy DBC decode, sparse multiplex filtering, cantools fallback
 │   ├── blf_reader.py             # BLF decompression into packed column batches; CAN + LIN objects
@@ -218,6 +218,19 @@ empty measurement with no error and nothing to point at.
    separate explicit permission.
 4. The final tree payload and partial/completion signals are delivered to the
    GUI only through the existing LoadWorker signal wiring.
+5. Frames that are not messages are kept, flagged, and never decoded:
+   `FLAG_ERROR` (error frame) and `FLAG_REMOTE` (remote frame; its DLC is the
+   length it asked for) group apart from the data frames of their ID
+   (`_frame_keys()` bit 42) and are skipped by the decode. `FLAG_BRS` marks a
+   CAN FD frame sent with bit rate switch. Readers set them where the file
+   records them: BLF (RTR bit, BRS bit, `CAN_ERROR`, `CAN_ERROR_EXT`,
+   `CAN_FD_ERROR_64`), ASC (`ErrorFrame`, `r` frames, the CAN FD BRS column),
+   MF4 bus logging (`CAN_ErrorFrame`, `CAN_RemoteFrame`, `CAN_DataFrame.BRS`)
+   and raw CAN CSV (`BRS`, `RTR` columns).
+6. What a logger records about the bus rather than a frame becomes a
+   `BusStatus` record on `RawFrameStore.bus_status`, on the frames' time base:
+   BLF driver statistics, driver errors (TEC/REC) and overload frames; ASC
+   `Statistic:` and controller status lines. Rare, so a plain list.
 
 ### Accepted behavioral invariants
 
