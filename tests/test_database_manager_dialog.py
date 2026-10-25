@@ -15,6 +15,7 @@ the only place the failure shows.
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import Qt
 
 from core.bus_types import BusType, encode_key
 from core.channel_config import ChannelConfig
@@ -246,5 +247,196 @@ def test_a_wrong_length_lowers_the_score_rather_than_hiding_it(
         pct, text, _best = dialog._compute_match(str(sample_ldf_path))
         assert pct == 0.0
         assert text == "0 / 2 IDs"
+    finally:
+        dialog.close()
+
+
+# ── Refresh Match ──────────────────────────────────────────────────────────
+
+def _assign(row, channel) -> None:
+    row.channel_combo.setCurrentIndex(
+        row.channel_combo.findData(encode_key(channel))
+    )
+
+
+def _two_can_dialog(qapp, sample_dbc_path, data_provider=None):
+    """sample.dbc's three IDs are on CAN 1, sample_lowid.dbc's one on CAN 2."""
+    lowid = sample_dbc_path.with_name("sample_lowid.dbc")
+    ids = {CAN1: {0x100, 0x200, 0x300}, CAN2: {0x20}}
+    dialog = DBCManagerDialog(
+        channel_config=ChannelConfig(channels={
+            CAN1: str(sample_dbc_path),
+            CAN2: str(lowid),
+        }),
+        channels_in_file=[CAN1, CAN2],
+        ids_per_channel=ids,
+        data_provider=data_provider or (lambda: ([CAN1, CAN2], ids)),
+    )
+    return dialog
+
+
+def _match_texts(dialog) -> list[str]:
+    return [row._match_lbl.text() for row in dialog._rows]
+
+
+def test_refresh_scores_each_database_against_its_assigned_channel(
+    qapp, sample_dbc_path
+):
+    """Regression (TODO bug 2): swapping databases left the match unchanged.
+
+    Every row was scored against whichever channel in the file suited it
+    best, never the one it was assigned to, so after the two databases traded
+    channels Refresh Match recomputed the very same numbers.
+    """
+    dialog = _two_can_dialog(qapp, sample_dbc_path)
+    try:
+        assert _match_texts(dialog) == ["100%  3 / 3 IDs", "100%  1 / 1 IDs"]
+
+        dbc_row, lowid_row = dialog._rows
+        _assign(dbc_row, CAN2)
+        _assign(lowid_row, CAN1)
+        dialog._refresh_all_matches()
+
+        assert _match_texts(dialog) == ["0%  0 / 3 IDs", "0%  0 / 1 IDs"]
+
+        # And back again: the score follows the assignment both ways.
+        _assign(dbc_row, CAN1)
+        _assign(lowid_row, CAN2)
+        dialog._refresh_all_matches()
+
+        assert _match_texts(dialog) == ["100%  3 / 3 IDs", "100%  1 / 1 IDs"]
+    finally:
+        dialog.close()
+
+
+def test_all_channels_is_scored_on_its_own_bus_only(qapp, sample_ldf_path):
+    """"All CAN" must not borrow a LIN channel's score, nor the reverse."""
+    dialog = DBCManagerDialog(
+        channel_config=ChannelConfig(),
+        channels_in_file=[CAN1, LIN1],
+        ids_per_channel={CAN1: {0x100}, LIN1: {0x20, 0x21}},
+    )
+    try:
+        pct, text, best = dialog._compute_match(
+            str(sample_ldf_path), (BusType.CAN, 0)
+        )
+        assert (pct, text) == (0.0, "0 / 2 IDs")
+        assert best == LIN1
+
+        pct, text, _best = dialog._compute_match(
+            str(sample_ldf_path), (BusType.LIN, 0)
+        )
+        assert (pct, text) == (1.0, "2 / 2 IDs")
+    finally:
+        dialog.close()
+
+
+def test_refresh_rereads_a_database_replaced_on_disk(qapp, tmp_path):
+    """A copied-in database can keep the old file's size and timestamp.
+
+    Windows copies preserve the modified time, so a cache keyed on path,
+    mtime and size served the old file's IDs. Refresh is the user's explicit
+    request to look again, so it reads every database afresh.
+    """
+    import os
+
+    template = (
+        'VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: ECU\n\n'
+        'BO_ {id} Msg: 8 ECU\n SG_ Value : 0|16@1+ (1,0) [0|65535] "" ECU\n'
+    )
+    path = tmp_path / "swapped.dbc"
+    path.write_text(template.format(id=256))
+    stamp = path.stat()
+    ids = {CAN1: {0x100}}
+    dialog = DBCManagerDialog(
+        channel_config=ChannelConfig(channels={CAN1: str(path)}),
+        channels_in_file=[CAN1],
+        ids_per_channel=ids,
+        data_provider=lambda: ([CAN1], ids),
+    )
+    try:
+        assert _match_texts(dialog) == ["100%  1 / 1 IDs"]
+
+        path.write_text(template.format(id=512))   # same length
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        assert path.stat().st_size == stamp.st_size
+        dialog._refresh_all_matches()
+
+        assert _match_texts(dialog) == ["0%  0 / 1 IDs"]
+    finally:
+        dialog.close()
+
+
+def test_refresh_shows_it_is_busy_while_it_runs(qapp, sample_dbc_path):
+    from PySide6.QtWidgets import QApplication
+
+    seen = {}
+    ids = {CAN1: {0x100, 0x200, 0x300}, CAN2: {0x20}}
+
+    def provider():
+        button = dialog._refresh_btn
+        cursor = QApplication.overrideCursor()
+        seen["enabled"] = button.isEnabled()
+        seen["text"] = button.text()
+        seen["cursor"] = cursor.shape() if cursor is not None else None
+        seen["result"] = dialog._refresh_result.text()
+        return [CAN1, CAN2], ids
+
+    dialog = _two_can_dialog(qapp, sample_dbc_path, data_provider=provider)
+    try:
+        idle_text = dialog._refresh_btn.text()
+        # Twice, so the second press has an earlier result line to clear.
+        dialog._refresh_all_matches()
+        assert dialog._refresh_result.text()
+        dialog._refresh_all_matches()
+
+        assert seen["enabled"] is False
+        assert seen["text"] == "Refreshing…"
+        assert seen["cursor"] == Qt.CursorShape.WaitCursor
+        assert seen["result"] == ""
+        # Restored afterwards.
+        assert dialog._refresh_btn.isEnabled()
+        assert dialog._refresh_btn.text() == idle_text
+        assert QApplication.overrideCursor() is None
+    finally:
+        dialog.close()
+
+
+def test_refresh_reports_what_it_found(qapp, sample_dbc_path):
+    dialog = _two_can_dialog(qapp, sample_dbc_path)
+    try:
+        dialog._refresh_all_matches()
+        assert dialog._refresh_result.text().startswith("No change")
+
+        dbc_row, lowid_row = dialog._rows
+        _assign(dbc_row, CAN2)
+        _assign(lowid_row, CAN1)
+        dialog._refresh_all_matches()
+        assert dialog._refresh_result.text().startswith(
+            "Match updated: 2 of 2 databases changed"
+        )
+
+        dialog._refresh_all_matches()
+        assert dialog._refresh_result.text().startswith("No change")
+    finally:
+        dialog.close()
+
+
+def test_refresh_restores_the_button_when_it_fails(
+    qapp, sample_dbc_path, monkeypatch
+):
+    from PySide6.QtWidgets import QApplication
+
+    dialog = _two_can_dialog(qapp, sample_dbc_path)
+    try:
+        def boom(_path, _channel=None):
+            raise RuntimeError("scoring failed")
+
+        monkeypatch.setattr(dialog, "_compute_match", boom)
+        with pytest.raises(RuntimeError):
+            dialog._refresh_all_matches()
+
+        assert dialog._refresh_btn.isEnabled()
+        assert QApplication.overrideCursor() is None
     finally:
         dialog.close()
