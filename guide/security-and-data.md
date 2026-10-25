@@ -97,6 +97,15 @@ describes.
 - Each release is built by GitHub Actions from a version tag, after the test
   suite passes, and published on the repository's Releases page. Download it only
   from there.
+- Every library is installed at a fixed version and checked against its
+  published hash, so a release contains exactly the library versions it lists.
+  Each change to the source is scanned for known-vulnerable libraries, security
+  bugs (CodeQL) and leaked credentials.
+- Releases after v00.02.02 come with a `SHA256SUMS.txt` file: in PowerShell,
+  `Get-FileHash` on the downloaded zip must print the hash it lists.
+- They also come with a software bill of materials (`sbom.cdx.json`,
+  CycloneDX): every library the release was built with, and its version, for
+  your vulnerability management.
 - **The executable is not code-signed yet**, so Windows SmartScreen warns on
   first start.
 - The third-party libraries it ships, and their versions and licences, are in

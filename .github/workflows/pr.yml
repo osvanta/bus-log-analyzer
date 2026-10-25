@@ -37,12 +37,12 @@ jobs:
     # check in an ambiguous state instead of a clean pass.
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0        # need both sides of the diff
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
 
@@ -60,15 +60,39 @@ jobs:
           fi
           python tools/check_protected_paths.py "$BASE_SHA" "$HEAD_SHA"
 
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit
+        run: pip install pip-audit==2.10.1
+
+      # Every package a release is built with, against the Python Packaging
+      # Advisory and OSV databases. --disable-pip reads the pinned versions
+      # without installing them. Report-only for now: a vulnerability
+      # published upstream must not block an unrelated PR. Flip
+      # continue-on-error to false to make it a required gate.
+      - name: Audit requirements-release.txt
+        continue-on-error: true
+        run: pip-audit -r requirements-release.txt --require-hashes --disable-pip --progress-spinner off
+
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
 
@@ -91,10 +115,10 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -102,7 +126,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
+          pip install --require-hashes -r requirements-release.txt
+          pip install -r requirements-dev.txt
 
       # -rs lists the reason for every skip in the summary, so a suite that
       # quietly stops covering something is visible in the log rather than
@@ -115,19 +140,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
           cache: 'pip'
 
+      # The versions a release is built with, each checked against its hash.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          pip install --require-hashes -r requirements-release.txt
 
       - name: Build portable EXE
         run: pyinstaller BusLogAnalyzer.spec
