@@ -406,9 +406,13 @@ class _CheckDelegate(QStyledItemDelegate):
             if font is not None:
                 painter.setFont(font)
             text_rect = option.rect.adjusted(2, 0, -18, 0)
-            painter.drawText(text_rect,
-                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                             str(text))
+            if text in self._ARROWS:
+                self._paint_arrow(painter, text_rect, painter.pen().color(),
+                                  down=text == self._ARROWS[0])
+            else:
+                painter.drawText(text_rect,
+                                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                                 str(text))
 
         box = self._BOX
         rect = self.box_rect(option.rect, index)
@@ -447,6 +451,25 @@ class _CheckDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         return QSize(22, 22)
+
+    # A group's arrow, open and closed. Drawn, not written: in Segoe UI the
+    # two glyphs differ in size, so the closed arrow looked half the size.
+    _ARROWS = ('▼', '▶')
+    _ARROW = 8  # its width and height
+
+    @classmethod
+    def _paint_arrow(cls, painter: QPainter, rect, color: QColor, down: bool) -> None:
+        a = cls._ARROW
+        x, y = rect.x() + 1, rect.center().y() - a / 2
+        points = ([QPointF(x, y + 1), QPointF(x + a, y + 1), QPointF(x + a / 2, y + a - 1)]
+                  if down else
+                  [QPointF(x + 1, y), QPointF(x + a - 1, y + a / 2), QPointF(x + 1, y + a)])
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(color))
+        painter.drawPolygon(points)
+        painter.restore()
 
     _BOX = 14
     # A click this close outside the box still hits it.
@@ -495,6 +518,9 @@ class _ReorderTable(QTableWidget):
     are distinguishable from external SignalTree drops."""
 
     _ROW_REORDER_MIME = 'application/x-osvanta-row-reorder'
+    # Present when the drag started on a group's row: the groups that move
+    # whole, keeping their names, while _ROW_REORDER_MIME lists their signals.
+    _GROUP_REORDER_MIME = 'application/x-osvanta-group-reorder'
 
     def __init__(self, rows: int, cols: int, parent=None) -> None:
         super().__init__(rows, cols, parent)
@@ -509,14 +535,19 @@ class _ReorderTable(QTableWidget):
             super().startDrag(supported_actions)
             return
         # Collect selected signal keys in their current _items order so that
-        # multi-row drags preserve the existing relative ordering.
+        # multi-row drags preserve the existing relative ordering. A selected
+        # group's row brings every signal of the group, shown or closed.
+        groups = panel.selected_groups()
         sel_set = set(panel.selected_keys())
-        keys = [k for k in panel._items if k in sel_set]
+        keys = [k for k, p in panel._items.items() if k in sel_set or p.group in groups]
         if not keys:
             return
         mime = QMimeData()
         mime.setData(self._ROW_REORDER_MIME,
                      QByteArray('\n'.join(keys).encode('utf-8')))
+        if groups:
+            mime.setData(self._GROUP_REORDER_MIME,
+                         QByteArray('\n'.join(groups).encode('utf-8')))
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.MoveAction)
@@ -881,6 +912,7 @@ class PlotPanel(QWidget):
         self._name_show_channel: bool = False
         self._name_show_message: bool = False
         self._collapsed_groups: dict[str, bool] = {}
+        self._group_colors: dict[str, str] = {}  # name → '#rrggbb'; absent = theme
         self._cursor2_enabled: bool = False
         self._rect_zoom: bool = False           # Rectangle Zoom: a left drag zooms to a box
         # In Rectangle Zoom a click on the plot waits to see whether it is the
@@ -3554,6 +3586,19 @@ class PlotPanel(QWidget):
                         keys.append(str(key))
         return keys
 
+    def selected_groups(self) -> list[str]:
+        """Names of the groups whose own row is selected, top to bottom."""
+        groups: list[str] = []
+        for index in sorted(self.table.selectionModel().selectedRows(),
+                            key=lambda index: index.row()):
+            item = self.table.item(index.row(), 0)
+            key = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if isinstance(key, str) and key.startswith('__group__'):
+                name = key[len('__group__'):]
+                if name not in groups:
+                    groups.append(name)
+        return groups
+
     def plotted_series(self) -> list[SignalSeries]:
         return [item.series for item in self._items.values()]
 
@@ -3631,6 +3676,42 @@ class PlotPanel(QWidget):
         else:
             return drop_row + 1  # bottom half → insert after this row
 
+    def _group_drop_row(self, insert_row: int, moving: list[str]) -> int:
+        """Where whole groups land when dropped at *insert_row*.
+
+        Never inside another group: in its upper half they land above it, in
+        its lower half below it, and below a closed group's row, below it.
+        """
+        for header in range(self.table.rowCount()):
+            item = self.table.item(header, 0)
+            key = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if not (isinstance(key, str) and key.startswith('__group__')):
+                continue
+            name = key[len('__group__'):]
+            if name in moving:
+                continue
+            end = header  # the group's last row, shown or not
+            while end + 1 < self.table.rowCount():
+                below = self.table.item(end + 1, 0)
+                below_key = below.data(Qt.ItemDataRole.UserRole) if below else None
+                plotted = self._items.get(below_key) if isinstance(below_key, str) else None
+                if plotted is None or plotted.group != name:
+                    break
+                end += 1
+            if header < insert_row <= end:
+                if self._collapsed_groups.get(name, False):
+                    return end + 1
+                return header if insert_row - header <= end + 1 - insert_row else end + 1
+        return insert_row
+
+    def _drop_row(self, mime, vp_y: int) -> int:
+        """The insert row for a reorder drag carrying *mime* at *vp_y*."""
+        insert_row = self._reorder_insert_row(vp_y)
+        if mime.hasFormat(_ReorderTable._GROUP_REORDER_MIME):
+            moving = bytes(mime.data(_ReorderTable._GROUP_REORDER_MIME)).decode('utf-8')
+            insert_row = self._group_drop_row(insert_row, moving.splitlines())
+        return insert_row
+
     # ── Indicator show / hide ─────────────────────────────────────────────
 
     def _show_drop_indicator(self, insert_row: int) -> None:
@@ -3692,7 +3773,7 @@ class PlotPanel(QWidget):
             # event.position() is already in viewport coordinates (the
             # monkey-patch receives events forwarded from the viewport).
             vp_y = event.position().toPoint().y()
-            self._show_drop_indicator(self._reorder_insert_row(vp_y))
+            self._show_drop_indicator(self._drop_row(mime, vp_y))
         elif mime.hasFormat(SignalTreeWidget.MIME_TYPE):
             event.acceptProposedAction()
             self._hide_drop_indicator()
@@ -3737,7 +3818,8 @@ class PlotPanel(QWidget):
         # (The monkey-patch receives the event that Qt forwards from the viewport,
         # so the position is already relative to the viewport widget.)
         vp_y = event.position().toPoint().y()
-        insert_row = self._reorder_insert_row(vp_y)
+        whole_groups = event.mimeData().hasFormat(_ReorderTable._GROUP_REORDER_MIME)
+        insert_row = self._drop_row(event.mimeData(), vp_y)
 
         # ── Build list of (row, type, key) for visible rows ───────────────
         rows_info: list[tuple[int, str, str]] = []
@@ -3794,8 +3876,11 @@ class PlotPanel(QWidget):
         self._push_undo()
 
         # ── Apply group assignment ─────────────────────────────────────────
-        for k in dragged_keys:
-            self._items[k].group = target_group
+        # Whole groups keep their names; they land beside other groups, never
+        # inside one (_group_drop_row).
+        if not whole_groups:
+            for k in dragged_keys:
+                self._items[k].group = target_group
 
         # ── Reorder _items (dict order = display order) ────────────────────
         self._items = {k: self._items[k] for k in new_order}
@@ -3852,9 +3937,14 @@ class PlotPanel(QWidget):
     # ── Group header rows ────────────────────────────────────────────────
 
     def _set_group_header_row(self, row_idx: int, group_name: str) -> None:
-        """Render a collapsible group header row spanning all columns."""
-        collapsed = self._collapsed_groups.get(group_name, False)
-        arrow = '▶' if collapsed else '▼'
+        """Render a collapsible group header row spanning all columns.
+
+        Every cell of the row can be dragged: a drag from anywhere on it moves
+        the whole group (_ReorderTable.startDrag).
+        """
+        arrow = self._group_arrow(self._collapsed_groups.get(group_name, False))
+        draggable = (Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                     | Qt.ItemFlag.ItemIsDragEnabled)
 
         # Group visibility state for checkbox (right side)
         keys_in_group = [k for k, p in self._items.items() if p.group == group_name]
@@ -3866,7 +3956,7 @@ class PlotPanel(QWidget):
         else:
             grp_cs = Qt.CheckState.Unchecked
 
-        row_bg, row_text = self._group_row_colors()
+        row_bg, row_text = self._group_colors_of(group_name)
         bg = QBrush(QColor(row_bg))
         fg = QBrush(QColor(row_text))
 
@@ -3874,11 +3964,7 @@ class PlotPanel(QWidget):
         arrow_item = QTableWidgetItem(arrow)
         arrow_item.setData(Qt.ItemDataRole.UserRole, f'__group__{group_name}')
         arrow_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        arrow_item.setFlags(
-            Qt.ItemFlag.ItemIsEnabled |
-            Qt.ItemFlag.ItemIsSelectable |
-            Qt.ItemFlag.ItemIsUserCheckable
-        )
+        arrow_item.setFlags(draggable | Qt.ItemFlag.ItemIsUserCheckable)
         arrow_item.setCheckState(grp_cs)
         arrow_item.setBackground(bg)
         arrow_item.setForeground(fg)
@@ -3893,10 +3979,7 @@ class PlotPanel(QWidget):
         # Not editable: a double-click renames through a dialog
         # (_on_table_item_double_clicked); an editor in the cell would follow
         # it and change nothing.
-        name_item.setFlags(
-            Qt.ItemFlag.ItemIsEnabled |
-            Qt.ItemFlag.ItemIsSelectable
-        )
+        name_item.setFlags(draggable)
         name_item.setBackground(bg)
         f2 = name_item.font()
         f2.setBold(True)
@@ -3907,24 +3990,36 @@ class PlotPanel(QWidget):
         # Cols 2-6: empty, same background
         for col in (2, 3, 4, 5, 6):
             cell = QTableWidgetItem('')
-            cell.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            cell.setFlags(draggable)
             cell.setBackground(bg)
             self.table.setItem(row_idx, col, cell)
 
+    @staticmethod
+    def _group_arrow(collapsed: bool) -> str:
+        opened, closed = _CheckDelegate._ARROWS
+        return closed if collapsed else opened
+
     def _apply_collapse_state(self) -> None:
-        """Show/hide signal rows according to _collapsed_groups state."""
-        for row in range(self.table.rowCount()):
-            item0 = self.table.item(row, 0)
-            if not item0:
-                continue
-            key = item0.data(Qt.ItemDataRole.UserRole)
-            if isinstance(key, str) and key.startswith('__group__'):
-                self.table.setRowHidden(row, False)
-            else:
-                plotted = self._items.get(key)
-                row_group = plotted.group if plotted else ''
-                hidden = bool(row_group and self._collapsed_groups.get(row_group, False))
-                self.table.setRowHidden(row, hidden)
+        """Show/hide signal rows according to _collapsed_groups state, and
+        point each group's arrow right while it is closed."""
+        was_blocked = self.table.blockSignals(True)  # the arrow shares a cell with the box
+        try:
+            for row in range(self.table.rowCount()):
+                item0 = self.table.item(row, 0)
+                if not item0:
+                    continue
+                key = item0.data(Qt.ItemDataRole.UserRole)
+                if isinstance(key, str) and key.startswith('__group__'):
+                    self.table.setRowHidden(row, False)
+                    item0.setText(self._group_arrow(
+                        self._collapsed_groups.get(key[len('__group__'):], False)))
+                else:
+                    plotted = self._items.get(key)
+                    row_group = plotted.group if plotted else ''
+                    hidden = bool(row_group and self._collapsed_groups.get(row_group, False))
+                    self.table.setRowHidden(row, hidden)
+        finally:
+            self.table.blockSignals(was_blocked)
 
     # ── Visibility toggle ─────────────────────────────────────────────────
 
@@ -4115,19 +4210,7 @@ class PlotPanel(QWidget):
         key = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not isinstance(key, str) or not key.startswith('__group__'):
             return
-        old_name = key[len('__group__'):]
-        new_name, ok = QInputDialog.getText(
-            self.parent(), 'Rename Group', 'Group name:', text=old_name
-        )
-        if not ok or not new_name.strip() or new_name.strip() == old_name:
-            return
-        new_name = new_name.strip()
-        for p in self._items.values():
-            if p.group == old_name:
-                p.group = new_name
-        if old_name in self._collapsed_groups:
-            self._collapsed_groups[new_name] = self._collapsed_groups.pop(old_name)
-        self._rebuild_curves(preserve_selection=True)
+        self._rename_group_dialog(key[len('__group__'):])
 
     def _on_table_cell_clicked(self, row: int, col: int) -> None:
         """Click on a group header → close or open the group.
@@ -4170,6 +4253,7 @@ class PlotPanel(QWidget):
             if p.group == group_name:
                 p.group = ''
         self._collapsed_groups.pop(group_name, None)
+        self._group_colors.pop(group_name, None)
         self._rebuild_curves(preserve_selection=True)
 
     def _show_table_menu(self, position) -> None:
@@ -4190,6 +4274,9 @@ class PlotPanel(QWidget):
 
     def _show_group_header_menu(self, group_name: str, global_pos) -> None:
         """Context menu shown when right-clicking a group header row."""
+        self._group_header_menu(group_name).exec(global_pos)
+
+    def _group_header_menu(self, group_name: str) -> QMenu:
         menu = self._make_menu()
         rename_act = QAction(f'Rename "{group_name}"…', menu)
         rename_act.triggered.connect(lambda: self._rename_group_dialog(group_name))
@@ -4197,7 +4284,15 @@ class PlotPanel(QWidget):
         ungroup_act = QAction('Ungroup', menu)
         ungroup_act.triggered.connect(lambda: self.ungroup_selected(group_name))
         menu.addAction(ungroup_act)
-        menu.exec(global_pos)
+        menu.addSeparator()
+        color_act = QAction('Change group color...', menu)
+        color_act.triggered.connect(lambda: self._choose_group_color(group_name))
+        menu.addAction(color_act)
+        default_act = QAction('Default group color', menu)
+        default_act.setEnabled(group_name in self._group_colors)
+        default_act.triggered.connect(lambda: self.set_group_color(group_name, None))
+        menu.addAction(default_act)
+        return menu
 
     def _rename_group_dialog(self, old_name: str) -> None:
         new_name, ok = QInputDialog.getText(
@@ -4211,6 +4306,8 @@ class PlotPanel(QWidget):
                 p.group = new_name
         if old_name in self._collapsed_groups:
             self._collapsed_groups[new_name] = self._collapsed_groups.pop(old_name)
+        if old_name in self._group_colors:
+            self._group_colors[new_name] = self._group_colors.pop(old_name)
         self._rebuild_curves(preserve_selection=True)
 
     def _show_signal_menu(self, selected_keys: list, global_pos) -> None:
@@ -4467,6 +4564,32 @@ class PlotPanel(QWidget):
         if chosen.isValid():
             self.set_background_color(chosen.name())
 
+    def _choose_group_color(self, group_name: str) -> None:
+        chosen = QColorDialog.getColor(
+            QColor(self._group_colors_of(group_name)[0]), self, 'Choose group color')
+        if chosen.isValid():
+            self.set_group_color(group_name, chosen.name())
+
+    def group_colors(self) -> dict[str, str]:
+        """The colours chosen for groups, by name; the rest follow the theme."""
+        return dict(self._group_colors)
+
+    def set_group_color(self, group_name: str, color: str | None) -> None:
+        """Give a group's row *color*, or with None the theme's colour again."""
+        if color:
+            self._group_colors[group_name] = QColor(color).name()
+        else:
+            self._group_colors.pop(group_name, None)
+        self._recolor_group_rows()
+
+    def set_group_colors(self, colors: dict[str, str]) -> None:
+        """Replace every chosen group colour, as a configuration loads."""
+        self._group_colors = {
+            str(name): QColor(color).name() for name, color in colors.items()
+            if QColor(color).isValid()
+        }
+        self._recolor_group_rows()
+
     def _show_plot_menu(self, position) -> None:
         menu = self._make_menu()
         act  = QAction('Set Plot Background Color...', menu)
@@ -4510,10 +4633,17 @@ class PlotPanel(QWidget):
         window, text, _border = cls._header_colors()
         return _mix(QColor(window), QColor(text), _GROUP_ROW_SHADE).name(), text
 
+    def _group_colors_of(self, group_name: str) -> tuple[str, str]:
+        """Background and text of *group_name*'s row: its chosen colour, with
+        black or white text, whichever reads on it; else the theme's."""
+        chosen = self._group_colors.get(group_name)
+        if chosen is None:
+            return self._group_row_colors()
+        return chosen, '#ffffff' if _is_dark(chosen) else '#000000'
+
     def _recolor_group_rows(self) -> None:
-        """Give every group's row the theme's colours, after a switch between
-        light and dark mode."""
-        bg, fg = (QBrush(QColor(color)) for color in self._group_row_colors())
+        """Give every group's row its colours, after a switch between light
+        and dark mode or a colour chosen for the group."""
         was_blocked = self.table.blockSignals(True)
         try:
             for row in range(self.table.rowCount()):
@@ -4521,6 +4651,8 @@ class PlotPanel(QWidget):
                 key = first.data(Qt.ItemDataRole.UserRole) if first else None
                 if not (isinstance(key, str) and key.startswith('__group__')):
                     continue
+                bg, fg = (QBrush(QColor(color))
+                          for color in self._group_colors_of(key[len('__group__'):]))
                 for col in range(self.table.columnCount()):
                     item = self.table.item(row, col)
                     if item is not None:

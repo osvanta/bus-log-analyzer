@@ -2026,6 +2026,7 @@ class MainWindow(QMainWindow):
             'hide_plot_lines': self.btn_hide_line.isChecked(),
             'plot_background_color': self.plot_panel.background_color(),
             'signal_colors': self.plot_panel.series_colors(),
+            'group_colors': self.plot_panel.group_colors(),
             'multi_axis': self.btn_multi_axis.isChecked(),
             'stacked': self.btn_stacked.isChecked(),
             'multistack': self.btn_multistack.isChecked(),
@@ -2173,6 +2174,7 @@ class MainWindow(QMainWindow):
         bg = data.get('plot_background_color')
         if bg:
             self.plot_panel.set_background_color(str(bg))
+        self.plot_panel.set_group_colors(dict(data.get('group_colors') or {}))
         multi_axis = bool(data.get('multi_axis', False))
         multistack = bool(data.get('multistack', False))
         stacked = bool(data.get('stacked', not multi_axis and not multistack))
