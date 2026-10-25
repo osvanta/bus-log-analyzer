@@ -31,9 +31,9 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTime
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QProgressBar, QScrollArea,
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
@@ -287,17 +287,22 @@ class DBCManagerDialog(QDialog):
         add_btn.clicked.connect(self._on_add_dbc)
         add_btn.setFixedWidth(130)
 
-        refresh_btn = QPushButton("↻ Refresh Match")
-        refresh_btn.clicked.connect(self._refresh_all_matches)
-        refresh_btn.setFixedWidth(120)
-        refresh_btn.setToolTip(
-            'Re-compute match quality for all DBC rows\n'
-            '(useful after loading a measurement file)'
+        self._refresh_btn = QPushButton("↻ Refresh Match")
+        self._refresh_btn.clicked.connect(self._refresh_all_matches)
+        self._refresh_btn.setFixedWidth(120)
+        self._refresh_btn.setToolTip(
+            'Re-compute match quality for every database\n'
+            'against the channel it is assigned to'
         )
+        # Outcome of the last Refresh Match. The time is part of the text so
+        # that a second press with nothing to change still visibly answers.
+        self._refresh_result = QLabel()
+        self._refresh_result.setStyleSheet("color: #80b0a0; font-size: 11px;")
 
         add_row = QHBoxLayout()
         add_row.addWidget(add_btn)
-        add_row.addWidget(refresh_btn)
+        add_row.addWidget(self._refresh_btn)
+        add_row.addWidget(self._refresh_result)
         add_row.addStretch()
 
         # ── Bottom buttons ────────────────────────────────────────────────
@@ -390,7 +395,7 @@ class DBCManagerDialog(QDialog):
         self, dbc_path: str, preferred_channel: BusChannel | None = None
     ) -> None:
         """Add a database row, compute match quality, auto-suggest channel."""
-        pct, text, best_ch = self._compute_match(dbc_path)
+        pct, text, best_ch = self._compute_match(dbc_path, preferred_channel)
 
         # Use preferred_channel if given, otherwise auto-suggest best match
         assigned = preferred_channel if preferred_channel is not None else best_ch
@@ -415,10 +420,43 @@ class DBCManagerDialog(QDialog):
 
     def _refresh_all_matches(self) -> None:
         """
-        Recompute match quality for every DBC row.
-        First calls data_provider() to fetch fresh channel/ID data
-        so the refresh works even if decode finished after dialog opened.
+        Recompute match quality for every database row.
+
+        Scores follow the channel each row is assigned to *now*, and every
+        database is read afresh, so a swap between channels or a file
+        replaced on disk both show. The button reads "Refreshing…" under a
+        busy cursor while it runs, and the line beside it reports the result.
         """
+        self._refresh_btn.setEnabled(False)
+        idle_text = self._refresh_btn.text()
+        self._refresh_btn.setText("Refreshing…")
+        self._refresh_result.clear()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        # Paint now: the work below runs on this thread, and a full scan of a
+        # large measurement can take seconds before the event loop returns.
+        self._refresh_btn.repaint()
+        self._refresh_result.repaint()
+        try:
+            outcome = self._recompute_matches()
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._refresh_btn.setText(idle_text)
+            self._refresh_btn.setEnabled(True)
+        if outcome is None:
+            self._refresh_result.setText("No measurement data")
+            QMessageBox.information(
+                self, 'No measurement data',
+                'Load and decode a BLF/ASC measurement first,\n'
+                'then click Refresh Match to see match quality.'
+            )
+            return
+        stamp = QTime.currentTime().toString("HH:mm:ss")
+        self._refresh_result.setText(f"{outcome} · {stamp}")
+
+    def _recompute_matches(self) -> str | None:
+        """Do Refresh Match's work; return its result line, or None if no data."""
+        new_chs: list[BusChannel] = []
+        scan_failed = False
         # Pull fresh data from the main window
         if self._data_provider is not None:
             try:
@@ -451,29 +489,53 @@ class DBCManagerDialog(QDialog):
                                     )
                         self._update_channel_info()
             except Exception:
-                pass
+                scan_failed = True
 
         if not self._ids_per_channel:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(
-                self, 'No measurement data',
-                'Load and decode a BLF/ASC measurement first,\n'
-                'then click Refresh Match to see match quality.'
-            )
-            return
+            return None
 
+        # Refresh is the user asking to look again. A database copied over
+        # another keeps its timestamp on Windows and often its size, which is
+        # all the parse cache can see, so it is emptied rather than trusted.
+        _load_database_match_data.cache_clear()
+
+        changed = 0
         for row in self._rows:
-            pct, text, best_ch = self._compute_match(row.dbc_path)
-            row.update_match(pct, text)
+            assigned = row.assigned_channel()
+            before = (assigned, row._match_lbl.text())
+            pct, text, best_ch = self._compute_match(row.dbc_path, assigned)
             # Auto-suggest best channel if user hasn't changed it
-            if row.assigned_channel() == all_channels_key(BusType.CAN):
+            if assigned == all_channels_key(BusType.CAN) and best_ch != assigned:
                 idx = row.channel_combo.findData(encode_key(best_ch))
                 if idx >= 0:
                     row.channel_combo.setCurrentIndex(idx)
+                    pct, text, _best = self._compute_match(row.dbc_path, best_ch)
+            row.update_match(pct, text)
+            if (row.assigned_channel(), row._match_lbl.text()) != before:
+                changed += 1
 
-    def _compute_match(self, dbc_path: str) -> tuple[float, str, BusChannel]:
+        parts = []
+        if changed:
+            parts.append(f"{changed} of {len(self._rows)} databases changed")
+        if new_chs:
+            plural = "s" if len(new_chs) != 1 else ""
+            parts.append(f"{len(new_chs)} new channel{plural} found")
+        result = "Match updated: " + ", ".join(parts) if parts else "No change"
+        if scan_failed:
+            result += " (measurement could not be re-read; earlier scan used)"
+        return result
+
+    def _compute_match(
+        self, dbc_path: str, channel: BusChannel | None = None
+    ) -> tuple[float, str, BusChannel]:
         """
-        Return (pct, label_text, best_channel_int) for a DBC file.
+        Return (pct, label_text, best_channel) for a DBC file.
+
+        ``pct`` and ``label_text`` score the database against ``channel``, the
+        one it is assigned to: a concrete channel on its own IDs, "All <bus>"
+        by its best channel on that bus. ``best_channel`` is the channel in
+        the file it suits best, for auto-suggesting an assignment; with no
+        ``channel`` the score is that best channel's.
 
         Matching strategy (match quality display only — decode stays exact):
         1. Exact 29-bit ID match
@@ -507,6 +569,7 @@ class DBCManagerDialog(QDialog):
         best_ch    = default_ch
         best_count = 0
         best_total = len(dbc_ids)
+        hits_by_channel: dict[BusChannel, int] = {}
 
         for ch, (
             file_ids_norm, file_pgns, file_lengths,
@@ -530,12 +593,23 @@ class DBCManagerDialog(QDialog):
             pgn_hits = len(unmatched_dbc_pgns & file_pgns)
 
             hits = exact_hits + pgn_hits
+            hits_by_channel[ch] = hits
             if hits > best_count:
                 best_count = hits
                 best_ch    = ch
 
-        pct  = best_count / best_total if best_total else 0.0
-        text = f"{best_count} / {best_total} IDs"
+        if channel is None:
+            count = best_count
+        elif channel[1] == 0:
+            count = max(
+                (hits for ch, hits in hits_by_channel.items()
+                 if ch[0] == channel[0]),
+                default=0,
+            )
+        else:
+            count = hits_by_channel.get(channel, 0)
+        pct  = count / best_total if best_total else 0.0
+        text = f"{count} / {best_total} IDs"
         return pct, text, best_ch
 
     @staticmethod
