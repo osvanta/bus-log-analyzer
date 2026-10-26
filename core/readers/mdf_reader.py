@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,11 @@ _COPY_CHUNK_BYTES = 4 * 1024 * 1024
 #: drawing and reading keep going while it runs.
 _COPY_DELAY_S = 0.5
 _COPY_REST_S = 0.002
+
+
+#: The structure channel of an ASAM bus logging event group: the bus, then
+#: the event, as in CAN_ErrorFrame or LIN_ChecksumError.
+_BUS_EVENT_NAME = re.compile(r"(?:CAN|LIN|FLX|ETH|MOST)_[A-Za-z]+")
 
 
 class MDFImportError(RuntimeError):
@@ -407,12 +413,35 @@ class MDFReader:
         return MDFReader._has_frame_channel(group, "LIN_Frame")
 
     @staticmethod
+    def _is_bus_event_group(group) -> bool:
+        """Return whether *group* is an ASAM bus logging event group of any
+        kind: CAN_DataFrame, CAN_ErrorFrame, CAN_RemoteFrame, LIN_Frame,
+        LIN_ChecksumError, FLX_…, ETH_… — a structure channel named after
+        the event with its fields as ``<event>.<field>`` members."""
+        names = [str(getattr(channel, "name", "") or "")
+                 for channel in getattr(group, "channels", ())]
+        for name in names:
+            if _BUS_EVENT_NAME.fullmatch(name) and any(
+                    other.startswith(f"{name}.") for other in names):
+                return True
+        return False
+
+    @staticmethod
+    def _group_has_samples(group) -> bool:
+        cycles = getattr(getattr(group, "channel_group", None), "cycles_nr", None)
+        return cycles is None or cycles > 0
+
+    @staticmethod
     def _group_has_decoded_signals(group) -> bool:
         # A raw bus group is structure, not engineering data. Its members
         # (LIN_Frame.ID, LIN_Frame.DataBytes, …) are ordinary channels and
         # would otherwise be counted as decoded signals, which is what made a
-        # LIN-only file look pre-decoded and load without a database.
-        if MDFReader._is_raw_can_group(group) or MDFReader._is_raw_lin_group(group):
+        # LIN-only file look pre-decoded and load without a database. The
+        # same holds for every other bus event group: a logger writes empty
+        # CAN_ErrorFrame, CAN_RemoteFrame and LIN error groups beside its
+        # frames, and they made a raw-only file look mixed. A group with no
+        # samples has nothing to show either.
+        if MDFReader._is_bus_event_group(group) or not MDFReader._group_has_samples(group):
             return False
         for channel in getattr(group, "channels", ()):
             if getattr(channel, "channel_type", -1) == 1:
