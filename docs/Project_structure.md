@@ -18,6 +18,7 @@ bus-log-analyzer/
 │   ├── converter.py              # Tools ▸ Convert files: join / cut / keep signals / resample; MF4·MDF via asammdf, BLF·ASC frames via python-can
 │   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line
 │   ├── signal_statistics.py      # Min / max / mean / RMS / samples of a signal over a time range
+│   ├── formula_catalog.py        # Insert Function's list: every formula function, operator and constant, by category, with argument help and examples
 │   ├── readers/
 │   │   ├── __init__.py           # reader_factory(), dbc_required_for(), bus-tagged prescan_measurement()
 │   │   ├── db_format.py          # SUPPORTED_DB_SUFFIXES (.dbc/.arxml/.ldf), LDF→DBC conversion, message lengths
@@ -64,6 +65,7 @@ bus-log-analyzer/
 │   ├── crash_log.py              # BLA_crash.log: Qt fatal errors, native crashes, freezes, uncaught exceptions
 │   ├── survey_prompt.py          # User survey request on the 10th start, and the top row's link after "Remind me later"; state in osvanta_user_settings.json
 │   ├── top_row.py                # The top row's File and Tools menus and its Decode button: bold, its icon beside the word
+│   ├── insert_function_dialog.py # Calculated Signal ▸ Insert function (Shift+F3): categories, functions, how to use each
 │   ├── help_menu.py              # The top row's Help menu: Getting started (F1), keyboard shortcuts, GitHub Discussions and issues, the log folder, the survey, About
 │   ├── release_test/             # Hidden --release-test: drives the built app through real measurements; --known-good adds timing against fixed limits (timing.py)
 │   │   ├── plan.py               # Folder layout → measurements, databases, scenarios

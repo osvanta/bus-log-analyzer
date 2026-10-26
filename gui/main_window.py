@@ -2869,6 +2869,7 @@ class MainWindow(QMainWindow):
         ('Delete',          'Remove selected signal from plot'),
         ('Ctrl + Z',        'Undo last plot action (up to 3 levels)'),
         ('Ctrl + Shift + R','Open the Trace — the raw CAN and LIN frames'),
+        ('Shift + F3',      'In Calculated Signal: Insert function — every function, with how to use each'),
     ]
 
     def show_shortcuts(self) -> None:

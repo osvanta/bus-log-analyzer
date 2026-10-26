@@ -13,6 +13,12 @@
 | ++ctrl+e++ | Export plotted signals |
 | ++ctrl+shift+r++ | Open the Trace: the raw CAN and LIN frames |
 
+## Calculated Signal
+
+| Key | Action |
+|---|---|
+| ++shift+f3++ | Insert function: every function, operator and constant, with how to use each |
+
 ## Signal tree
 
 | Key | Action |
