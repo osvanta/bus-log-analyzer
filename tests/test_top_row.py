@@ -70,7 +70,7 @@ def _row(window):
 
 def test_the_row_reads_in_the_order_of_the_work(window):
     assert _row(window) == ['File', '|', 'Open Measurement', 'Databases', 'Decode', '|',
-                            'Calculated Signal', 'Trace', '|', 'Help']
+                            'Calculated Signal', 'Trace', 'Tools', '|', 'Help']
 
 
 def test_the_file_menu_holds_what_is_done_now_and_then(window):
@@ -78,7 +78,8 @@ def test_the_file_menu_holds_what_is_done_now_and_then(window):
 
     menu = window.file_menu
     items = ['---' if a.isSeparator() else a.text() for a in menu.actions()]
-    assert items == ['Open configuration', 'Save configuration', '---', 'Export plotted signals']
+    assert items == ['Open configuration', 'Save configuration', '---', 'Export plotted signals',
+                     'Save decoded measurement as MF4', '---', 'Measurement info']
     button = window.title_row.toolbar.widgetForAction(menu.menuAction())
     assert button.popupMode() == QToolButton.ToolButtonPopupMode.InstantPopup
 
