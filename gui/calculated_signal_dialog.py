@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -49,6 +50,10 @@ from gui.insert_function_dialog import InsertFunctionDialog
 
 
 _FORMULA_HELP_SIGNAL = "CH1::Message1::Signal1"
+#: Signal name and Unit are this much taller than a plain line edit.
+_FIELD_HEIGHT_SCALE = 1.5
+#: The formula box shows this many lines; a longer formula scrolls.
+_FORMULA_LINES = 4
 
 
 def _function_example(spec: FunctionSpec) -> str:
@@ -289,24 +294,32 @@ class CalculatedSignalDialog(QDialog):
 
         self.unit_edit = QLineEdit(existing.unit if existing else "")
         self.unit_edit.setPlaceholderText("Optional, for example rpm")
+        for edit in (self.name_edit, self.unit_edit):
+            edit.setFixedHeight(round(edit.sizeHint().height() * _FIELD_HEIGHT_SCALE))
 
         self.formula_edit = QPlainTextEdit(existing.formula if existing else "")
         self.formula_edit.setPlaceholderText("Select a measurement signal, then add an expression")
-        self.formula_edit.setMinimumHeight(100)
+        # A few lines tall, leaving the height to the signal picker.
+        self.formula_edit.setFixedHeight(
+            self.formula_edit.fontMetrics().lineSpacing() * _FORMULA_LINES
+            + round(self.formula_edit.document().documentMargin() * 2)
+            + self.formula_edit.frameWidth() * 2
+            + 4
+        )
 
         self.insert_function_button = QPushButton("ƒx Insert function…")
         self.insert_function_button.setShortcut(QKeySequence("Shift+F3"))
         self.insert_function_button.setToolTip(
             "List every function, operator and constant, with how to use each (Shift+F3)"
         )
+        bold = self.insert_function_button.font()
+        bold.setBold(True)
+        self.insert_function_button.setFont(bold)
         self.help_button = QPushButton("Help")
-        formula_label = QWidget()
-        formula_label_layout = QVBoxLayout(formula_label)
-        formula_label_layout.setContentsMargins(0, 0, 0, 0)
-        formula_label_layout.addWidget(QLabel("Formula:"))
-        formula_label_layout.addWidget(self.insert_function_button)
-        formula_label_layout.addWidget(self.help_button)
-        formula_label_layout.addStretch(1)
+        formula_tools = QHBoxLayout()
+        formula_tools.addWidget(self.insert_function_button)
+        formula_tools.addWidget(self.help_button)
+        formula_tools.addStretch(1)
 
         self.load_library_button = QPushButton("Load...")
         self.save_library_button = QPushButton("Save...")
@@ -317,16 +330,17 @@ class CalculatedSignalDialog(QDialog):
             self.load_library_button.setToolTip(tooltip)
             self.save_library_button.setEnabled(False)
             self.save_library_button.setToolTip(tooltip)
-        library_buttons = QHBoxLayout()
+        self.library_box = QGroupBox("Load and Save Formula for Calculated Signal")
+        library_buttons = QHBoxLayout(self.library_box)
         library_buttons.addWidget(self.load_library_button)
         library_buttons.addWidget(self.save_library_button)
         library_buttons.addStretch(1)
 
         form = QFormLayout()
-        form.addRow("Signal name:", self.name_edit)
-        form.addRow("Unit:", self.unit_edit)
-        form.addRow(library_buttons)
-        form.addRow(formula_label, self.formula_edit)
+        form.addRow(self._field_label("Signal name:", self.name_edit), self.name_edit)
+        form.addRow(self._field_label("Unit:", self.unit_edit), self.unit_edit)
+        form.addRow("", formula_tools)
+        form.addRow("Formula:", self.formula_edit)
 
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search signals...")
@@ -335,11 +349,12 @@ class CalculatedSignalDialog(QDialog):
         self._add_signal_section("Measurement signals", self._signal_keys)
         self._add_signal_section("Calculated signals", self._generated_keys)
 
-        self.insert_button = QPushButton("Insert Signal")
+        self.insert_button = QPushButton("Add signal")
+        self.insert_button.setToolTip("Add the selected signal to the formula (or double-click it)")
         self.insert_button.setEnabled(bool(self._available_keys))
-        picker_buttons = QHBoxLayout()
-        picker_buttons.addStretch(1)
-        picker_buttons.addWidget(self.insert_button)
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search_edit, stretch=1)
+        search_row.addWidget(self.insert_button)
 
         self.validation_label = QLabel()
         self.validation_label.setWordWrap(True)
@@ -352,11 +367,11 @@ class CalculatedSignalDialog(QDialog):
         self.save_button.setText("Update" if existing else "Create")
 
         layout = QVBoxLayout(self)
+        layout.addWidget(self.library_box)
         layout.addLayout(form)
         layout.addWidget(QLabel("Signal picker:"))
-        layout.addWidget(self.search_edit)
+        layout.addLayout(search_row)
         layout.addWidget(self.signal_list, stretch=1)
-        layout.addLayout(picker_buttons)
         layout.addWidget(self.validation_label)
         layout.addWidget(self.button_box)
 
@@ -375,6 +390,15 @@ class CalculatedSignalDialog(QDialog):
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         self._validate()
+
+    @staticmethod
+    def _field_label(text: str, field: QWidget) -> QLabel:
+        """A form label as tall as its field, so its text sits level with
+        the field's."""
+        label = QLabel(text)
+        label.setFixedHeight(field.minimumHeight() or field.sizeHint().height())
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        return label
 
     def _add_signal_section(self, title: str, keys: list[str]) -> None:
         header = QListWidgetItem(title)
@@ -402,7 +426,7 @@ class CalculatedSignalDialog(QDialog):
     @Slot(object)
     def insert_catalog_entry(self, entry: CatalogEntry) -> None:
         """Write entry into the formula at the cursor, with its arguments as
-        placeholders and the first one to fill selected, so Insert Signal
+        placeholders and the first one to fill selected, so Add signal
         replaces it. Text selected in the formula becomes the first argument."""
         cursor = self.formula_edit.textCursor()
         # Qt gives a line break in the selection as U+2029.
