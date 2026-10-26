@@ -230,3 +230,51 @@ def test_the_dialog_says_what_is_wrong_before_starting(qapp, tmp_path):
         assert dialog._job is None and 'overwrite' in dialog.status.text()
     finally:
         dialog.close()
+
+
+# ── Signals to keep: search ─────────────────────────────────────────────
+
+
+@pytest.fixture()
+def picker(qapp):
+    from gui.converter_dialog import SignalPicker
+    signals = [('B_0_0', 1, 1, 'BRaster_0'), ('B_0_1', 1, 2, 'BRaster_0'),
+               ('B_1_0', 2, 1, 'BRaster_1'), ('EngSpeed', 3, 1, 'Engine')]
+    p = SignalPicker(signals, chosen=[('EngSpeed', 3, 1)])
+    yield p
+    p.close()
+
+
+def _shown(picker):
+    return [item.text() for item in picker._shown()]
+
+
+def test_search_narrows_the_list_ignoring_case(picker):
+    picker.search.setText('b_0')
+    assert _shown(picker) == ['BRaster_0 · B_0_0', 'BRaster_0 · B_0_1']
+    picker.search.setText('ENGINE')
+    assert _shown(picker) == ['Engine · EngSpeed']
+    picker.search.clear()
+    assert len(_shown(picker)) == 4
+
+
+def test_search_takes_wildcards(picker):
+    picker.search.setText('b_?_0')
+    assert _shown(picker) == ['BRaster_0 · B_0_0', 'BRaster_1 · B_1_0']
+    picker.search.setText('*raster_1*')
+    assert _shown(picker) == ['BRaster_1 · B_1_0']
+
+
+def test_tick_shown_ticks_only_what_the_search_shows_and_keeps_other_ticks(picker):
+    picker.search.setText('B_0')
+    picker.tick_shown.click()
+    picker.search.clear()
+    assert sorted(picker.chosen()) == [('B_0_0', 1, 1), ('B_0_1', 1, 2), ('EngSpeed', 3, 1)]
+    assert picker.count.text() == '3 of 4 ticked'
+    picker.untick_all.click()
+    assert picker.chosen() == [] and picker.count.text() == '0 of 4 ticked'
+
+
+def test_the_count_says_how_many_are_shown(picker):
+    picker.search.setText('raster')
+    assert picker.count.text() == '1 of 4 ticked · 3 shown'
