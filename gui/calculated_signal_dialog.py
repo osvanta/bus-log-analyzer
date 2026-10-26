@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtGui import QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -41,8 +42,10 @@ from core.calculated_signals import (
     parse_formula,
     validate_name,
 )
+from core.formula_catalog import CATEGORY_ORDER, CatalogEntry
 from core.formula_library import load_formula_library, save_formula_library
 from core.signal_store import SignalSeries
+from gui.insert_function_dialog import InsertFunctionDialog
 
 
 _FORMULA_HELP_SIGNAL = "CH1::Message1::Signal1"
@@ -54,6 +57,10 @@ def _function_example(spec: FunctionSpec) -> str:
     fillers = ["2", "3", "4"]
     args = [signal, *fillers[: spec.max_args - 1]]
     return f"{spec.name}({', '.join(args)})"
+
+
+def _category_rank(category: str) -> int:
+    return CATEGORY_ORDER.index(category) if category in CATEGORY_ORDER else len(CATEGORY_ORDER)
 
 
 def _formula_help_examples() -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -117,7 +124,8 @@ def _formula_help_examples() -> tuple[tuple[str, tuple[str, ...]], ...]:
             f"    Example: {_function_example(spec)}\n"
         )
         by_category.setdefault(spec.category, []).append(entry)
-    for category in sorted(by_category):
+    # The Insert Function window's order, everyday first.
+    for category in sorted(by_category, key=_category_rank):
         sections.append((category, tuple(by_category[category])))
 
     return tuple(sections)
@@ -268,6 +276,7 @@ class CalculatedSignalDialog(QDialog):
         self._library_definitions = library_definitions
         self._import_definitions = import_definitions
         self._help_dialog: FormulaHelpDialog | None = None
+        self._insert_function_dialog: InsertFunctionDialog | None = None
         self._library_picker: FormulaLibraryPickerDialog | None = None
         self.setWindowTitle("Edit Calculated Signal" if existing else "New Calculated Signal")
         self.resize(760, 560)
@@ -285,11 +294,17 @@ class CalculatedSignalDialog(QDialog):
         self.formula_edit.setPlaceholderText("Select a measurement signal, then add an expression")
         self.formula_edit.setMinimumHeight(100)
 
+        self.insert_function_button = QPushButton("ƒx Insert function…")
+        self.insert_function_button.setShortcut(QKeySequence("Shift+F3"))
+        self.insert_function_button.setToolTip(
+            "List every function, operator and constant, with how to use each (Shift+F3)"
+        )
         self.help_button = QPushButton("Help")
         formula_label = QWidget()
         formula_label_layout = QVBoxLayout(formula_label)
         formula_label_layout.setContentsMargins(0, 0, 0, 0)
         formula_label_layout.addWidget(QLabel("Formula:"))
+        formula_label_layout.addWidget(self.insert_function_button)
         formula_label_layout.addWidget(self.help_button)
         formula_label_layout.addStretch(1)
 
@@ -347,6 +362,7 @@ class CalculatedSignalDialog(QDialog):
 
         self.search_edit.textChanged.connect(self._filter_signals)
         self.help_button.clicked.connect(self._show_formula_help)
+        self.insert_function_button.clicked.connect(self._show_insert_function)
         self.load_library_button.clicked.connect(self._on_load_library)
         self.save_library_button.clicked.connect(self._on_save_library)
         self.insert_button.clicked.connect(self._insert_selected_signal)
@@ -376,6 +392,32 @@ class CalculatedSignalDialog(QDialog):
             items.append(item)
         header.setHidden(not items)
         self._section_headers.append((header, items))
+
+    @Slot()
+    def _show_insert_function(self) -> None:
+        self._insert_function_dialog = InsertFunctionDialog(self)
+        self._insert_function_dialog.insertRequested.connect(self.insert_catalog_entry)
+        self._insert_function_dialog.open()
+
+    @Slot(object)
+    def insert_catalog_entry(self, entry: CatalogEntry) -> None:
+        """Write entry into the formula at the cursor, with its arguments as
+        placeholders and the first one to fill selected, so Insert Signal
+        replaces it. Text selected in the formula becomes the first argument."""
+        cursor = self.formula_edit.textCursor()
+        # Qt gives a line break in the selection as U+2029.
+        selected = cursor.selectedText().replace("\u2029", "\n")
+        start = cursor.selectionStart()
+        text, select_from, select_to = entry.insertion(selected)
+        before = self.formula_edit.toPlainText()
+        if (not selected and start > 0 and not before[start - 1].isspace()
+                and before[start - 1] not in "(,"):
+            text, select_from, select_to = " " + text, select_from + 1, select_to + 1
+        cursor.insertText(text)
+        cursor.setPosition(start + select_from)
+        cursor.setPosition(start + select_to, QTextCursor.MoveMode.KeepAnchor)
+        self.formula_edit.setTextCursor(cursor)
+        self.formula_edit.setFocus()
 
     @Slot()
     def _show_formula_help(self) -> None:
@@ -503,7 +545,10 @@ class CalculatedSignalDialog(QDialog):
         cursor = self.formula_edit.textCursor()
         before = self.formula_edit.toPlainText()
         token = f"`{key}`"
-        if before and cursor.position() > 0 and not before[cursor.position() - 1].isspace():
+        # Measured before the selection: a placeholder selected by Insert
+        # Function is replaced as it stands, as in abs(x) → abs(`key`).
+        start = cursor.selectionStart()
+        if before and start > 0 and not before[start - 1].isspace() and before[start - 1] != "(":
             token = " " + token
         cursor.insertText(token)
         self.formula_edit.setTextCursor(cursor)
