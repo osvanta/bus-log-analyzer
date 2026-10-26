@@ -14,6 +14,10 @@ bus-log-analyzer/
 │   ├── vectorized_decoder.py     # NumPy DBC decode, sparse multiplex filtering, cantools fallback
 │   ├── blf_reader.py             # BLF decompression into packed column batches; CAN + LIN objects
 │   ├── export.py                 # CSV export
+│   ├── mf4_writer.py             # Decoded signals → MF4 (asammdf); marks each group's bus channel so the file reopens with the same keys
+│   ├── converter.py              # Tools ▸ Convert files: join / cut / keep signals / resample; MF4·MDF via asammdf, BLF·ASC frames via python-can
+│   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line
+│   ├── signal_statistics.py      # Min / max / mean / RMS / samples of a signal over a time range
 │   ├── formula_catalog.py        # Insert Function's list: every formula function, operator and constant, by category, with argument help and examples
 │   ├── readers/
 │   │   ├── __init__.py           # reader_factory(), dbc_required_for(), bus-tagged prescan_measurement()
@@ -45,7 +49,11 @@ bus-log-analyzer/
 ├── gui/
 │   ├── main_window.py            # MainWindow, top row, config save/load, plot_finding()
 │   ├── load_worker.py            # LoadWorker (QThread): native MDF arrays + batched CAN-raw vectorized decode paths
-│   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time()
+│   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Δ C2−C1, statistics), Table view, measurement events
+│   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
+│   ├── measurement_info.py       # File ▸ Measurement info dialog
+│   ├── converter_dialog.py       # Tools ▸ Convert files dialog (runs core.converter off the GUI thread)
+│   ├── user_settings.py          # One setting at a time in the user's settings file
 │   ├── overflow_row.py           # OverflowButtonRow: plot buttons that do not fit move into a "»" menu
 │   ├── plot_icons.py             # Monochrome plot button icons, drawn from SVG in the palette's text colour
 │   ├── brand_logo.py             # BrandLogo: the Osvanta logo at the status bar's right end, in the light or dark theme's colours
@@ -56,7 +64,7 @@ bus-log-analyzer/
 │   ├── app_data.py               # Where logs and settings live: %LOCALAPPDATA%\Osvanta\BusLogAnalyzer when packaged, next to app.py from source
 │   ├── crash_log.py              # BLA_crash.log: Qt fatal errors, native crashes, freezes, uncaught exceptions
 │   ├── survey_prompt.py          # User survey request on the 10th start, and the top row's link after "Remind me later"; state in osvanta_user_settings.json
-│   ├── top_row.py                # The top row's File menu and its Decode button: bold, its icon beside the word
+│   ├── top_row.py                # The top row's File and Tools menus and its Decode button: bold, its icon beside the word
 │   ├── insert_function_dialog.py # Calculated Signal ▸ Insert function (Shift+F3): categories, functions, how to use each
 │   ├── help_menu.py              # The top row's Help menu: Getting started (F1), keyboard shortcuts, GitHub Discussions and issues, the log folder, the survey, About
 │   ├── release_test/             # Hidden --release-test: drives the built app through real measurements; --known-good adds timing against fixed limits (timing.py)
@@ -233,6 +241,12 @@ empty measurement with no error and nothing to point at.
    `BusStatus` record on `RawFrameStore.bus_status`, on the frames' time base:
    BLF driver statistics, driver errors (TEC/REC) and overload frames; ASC
    `Statistic:` and controller status lines. Rare, so a plain list.
+7. An MF4 written by this application (`core.mf4_writer`) names each channel
+   group's bus channel in its acquisition source ("CAN1"), with the application
+   as the source's name. `MDFSampleSource.group_channels` reads it back and the
+   load worker gives those signals their channel, so the keys
+   (`CH1::Message::Signal`) are the original ones. MDF files from any other
+   tool keep the `CH?` keys they always had.
 
 ### Accepted behavioral invariants
 

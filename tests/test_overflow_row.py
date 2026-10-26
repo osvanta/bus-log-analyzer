@@ -241,14 +241,14 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
     window.resize(1600, 800)
     qapp.processEvents()
     row = window.plot_button_row
-    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack]
+    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack, window.btn_table]
     icons = [window.btn_fit, window.btn_fit_v, window.btn_zoom_rect, window.btn_cursor1,
              window.btn_cursor2, window.btn_line_mode, window.btn_points, window.btn_hide_line]
 
     clear = window.btn_clear_plot
 
     assert row._buttons == modes + icons + [clear]
-    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack']
+    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack', 'Table']
     assert [b.accessibleName() for b in icons + [clear]] == [
         'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
         'Step Mode', 'Show Data Points', 'Hide Line', 'Clear Plot']

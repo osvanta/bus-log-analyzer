@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QButtonGroup,
@@ -73,6 +74,7 @@ from gui.brand_logo import BrandLogo, leave_logo_unframed
 from gui.dbc_manager import DBCManagerDialog
 from gui.edge_tab import EdgeTab
 from gui.help_menu import HelpMenu
+from gui.user_settings import read_setting, write_setting
 from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button, plot_icon
@@ -82,7 +84,7 @@ from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
 from gui.raw_frame_dialog import RawFrameDialog
 from gui.load_debug_window import LoadDebugWindow, LoadDebugWorker
-from gui.top_row import FileMenu, MainStepButton
+from gui.top_row import FileMenu, MainStepButton, ToolsMenu
 from gui.window_frame import CaptionlessWindow, TitleRow, captionless_frame_supported
 from core.debug_inspector import (
     format_runtime_failure,
@@ -383,6 +385,10 @@ class MainWindow(QMainWindow):
         self.plot_panel.plotAreaShiftClicked.connect(self._place_cursor2)
         self.plot_panel.set_tag(load_plot_tag(self._user_settings_path))
         self.plot_panel.tagChanged.connect(self._save_plot_tag)
+        columns = read_setting(self._user_settings_path, 'signal_table_columns', {})
+        self.plot_panel.set_column_choices(columns if isinstance(columns, dict) else {})
+        self.plot_panel.columnChoicesChanged.connect(self._save_column_choices)
+        self.plot_panel.eventsToggled.connect(self._toggle_measurement_events)
 
         self.plot_button_row = OverflowButtonRow()
         self.btn_fit = icon_button('fit_window', 'Fit to Window', 'Fit to Window (F)')
@@ -399,6 +405,11 @@ class MainWindow(QMainWindow):
         self.btn_stacked.setChecked(True)  # default plot mode on app startup
         self.btn_multistack = QPushButton('MultiStack')
         self.btn_multistack.setCheckable(True)
+        # Not a plot mode: the plotted signals as a table, in place of the plot.
+        self.btn_table = QPushButton('Table')
+        self.btn_table.setCheckable(True)
+        self.btn_table.setToolTip('Table: the plotted signals as a table, a row per sample time.\n'
+                                  'Click a row to put Cursor 1 there. Click again for the plot.')
         self.btn_cursor1 = icon_button('cursor1', 'Cursor 1',
                                        'Cursor 1, or click the plot to place it')
         self.btn_cursor1.setCheckable(True)
@@ -421,7 +432,7 @@ class MainWindow(QMainWindow):
         self.btn_clear_plot.setEnabled(False)  # enabled after decode
         # The plot modes, which keep their text, then the icon buttons, and
         # Clear Plot apart from them.
-        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack):
+        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack, self.btn_table):
             self.plot_button_row.add_button(btn)
         self.plot_button_row.add_gap(18)
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
@@ -441,6 +452,7 @@ class MainWindow(QMainWindow):
         self.btn_multi_axis.toggled.connect(self._toggle_multi_axis)
         self.btn_stacked.toggled.connect(self._toggle_stacked)
         self.btn_multistack.toggled.connect(self._toggle_multistack)
+        self.btn_table.toggled.connect(self.plot_panel.set_table_view)
         self.btn_cursor1.toggled.connect(self._toggle_cursor1)
         self.btn_cursor2.toggled.connect(self._toggle_cursor2)
         self.btn_line_mode.clicked.connect(self._toggle_line_mode)
@@ -593,6 +605,8 @@ class MainWindow(QMainWindow):
             (self.file_menu.open_configuration_action, self.load_configuration),
             (self.file_menu.save_configuration_action, self.save_configuration),
             (self.file_menu.export_action, self.export_selected),
+            (self.file_menu.save_decoded_action, self.save_decoded_as_mf4),
+            (self.file_menu.info_action, self.show_measurement_info),
         ]:
             act.triggered.connect(slot)
             # Also the window's, so that its shortcut works with the menu closed.
@@ -630,6 +644,10 @@ class MainWindow(QMainWindow):
         self._act_can_trace.triggered.connect(self.show_raw_frames)
         self._act_can_trace.setEnabled(False)  # enabled after decode
         toolbar.addAction(self._act_can_trace)
+        # Jobs on files that need not be open.
+        self.tools_menu = ToolsMenu(self)
+        self.tools_menu.convert_action.triggered.connect(self.show_converter)
+        self._add_menu_button(toolbar, self.tools_menu)
         toolbar.addSeparator()
 
         # Last, where a menu bar has its Help menu.
@@ -1090,6 +1108,70 @@ class MainWindow(QMainWindow):
     def _settings_folder() -> Path:
         """The user's settings folder: see gui.app_data."""
         return app_data.folder()
+
+    # ── What the open measurement is ──────────────────────────────────────
+
+    def _measurement_file(self) -> str | None:
+        return self.measurement_path or self.blf_path or None
+
+    def _read_measurement_info(self):
+        from core.measurement_info import read_file_info
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            return read_file_info(self._measurement_file())
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def show_measurement_info(self) -> None:
+        """File ▸ Measurement info."""
+        from gui.measurement_info import MeasurementInfoDialog
+        if not self._measurement_file():
+            QMessageBox.information(self, 'Measurement info', 'Open a measurement first.')
+            return
+        try:
+            info = self._read_measurement_info()
+        except OSError as exc:
+            QMessageBox.warning(self, 'Measurement info', f'The file cannot be read: {exc}')
+            return
+        self._info_dialog = MeasurementInfoDialog(info, self.store, self.channel_config, self)
+        self._info_dialog.show()
+
+    def _toggle_measurement_events(self, on: bool) -> None:
+        """Plot menu ▸ Show measurement events: read them from the file."""
+        if not on:
+            return
+        path = self._measurement_file()
+        events = []
+        if path and Path(path).suffix.lower() in ('.mf4', '.mdf', '.dat'):
+            try:
+                events = self._read_measurement_info().events
+            except OSError:
+                events = []
+        base = float(getattr(self.store, 'base_ts', 0.0) or 0.0) if self.store else 0.0
+        self.plot_panel.set_events([(e.time_s - base, e.name) for e in events])
+        if not events:
+            QMessageBox.information(
+                self, 'No measurement events',
+                'This measurement holds no events. Events are stored in MF4 and MDF files.')
+
+    def show_converter(self) -> None:
+        """Tools ▸ Convert files."""
+        from gui.converter_dialog import ConverterDialog
+        dialog = getattr(self, '_converter_dialog', None)
+        if dialog is None:
+            dialog = self._converter_dialog = ConverterDialog(self)
+            source = self._measurement_file()
+            if source:
+                dialog.set_inputs([Path(source)])
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _save_column_choices(self, choices: dict) -> None:
+        try:
+            write_setting(self._user_settings_path, 'signal_table_columns', dict(choices))
+        except OSError as exc:
+            self._log(f'Settings save warning: {exc}')
 
     def _save_plot_tag(self, tag: PlotTag) -> None:
         try:
@@ -2519,6 +2601,10 @@ class MainWindow(QMainWindow):
         return [
             ('CAN CSV',      'CSV Files (*.csv)',   '.csv',  self._write_export_csv),
             ('Excel (.xlsx)', 'Excel Files (*.xlsx)', '.xlsx', self._write_export_xlsx),
+            # Each signal keeps its own timestamps: the timestamp source below
+            # applies to CSV and Excel only.
+            ('MF4 (each signal keeps its timestamps)', 'MF4 Files (*.mf4)', '.mf4',
+             self._write_export_mf4),
         ]
 
     @staticmethod
@@ -2668,6 +2754,64 @@ class MainWindow(QMainWindow):
                 recurrence_value.value() * seconds_per_unit
             )
         return formats[format_group.checkedId()], timebase
+
+    def _write_export_mf4(self, series_items, path, timebase=None) -> bool:
+        return self._write_mf4(series_items, path, 'Exporting to MF4')
+
+    def _write_mf4(self, series_items, path, title: str) -> bool:
+        """Write *series_items* to MF4 at *path*, with a progress dialog
+        that can cancel. False when cancelled."""
+        from core.mf4_writer import Cancelled, write_mf4
+
+        series_items = list(series_items)
+        dialog = QProgressDialog(title + '...', 'Cancel', 0, 100, self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumDuration(400)
+        dialog.setValue(0)
+
+        def progress(done: int, total: int) -> None:
+            dialog.setValue(int(100 * done / total) if total else 100)
+            QApplication.processEvents()
+            if dialog.wasCanceled():
+                raise Cancelled
+
+        base = float(getattr(self.store, 'base_ts', 0.0) or 0.0) if self.store else 0.0
+        try:
+            count = write_mf4(series_items, path, base_ts=base, progress=progress)
+        except Cancelled:
+            self._log(f'{title}: cancelled; nothing was written.')
+            return False
+        finally:
+            dialog.close()
+        self._log(f'{title}: {count:,} signals written to {path}')
+        return True
+
+    def save_decoded_as_mf4(self) -> None:
+        """File ▸ Save decoded measurement as MF4: every decoded signal."""
+        if self.store is None or not self.store.all_keys():
+            QMessageBox.information(self, 'Nothing decoded',
+                                    'Decode a measurement first.')
+            return
+        source = self._measurement_file()
+        stem = Path(source).stem if source else 'measurement'
+        folder = str(Path(source).parent) if source else ''
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Save decoded measurement as MF4',
+            str(Path(folder) / f'{stem}_decoded.mf4'), 'MF4 Files (*.mf4)')
+        if not path:
+            return
+        if not path.lower().endswith('.mf4'):
+            path += '.mf4'
+        if source and Path(path).resolve() == Path(source).resolve():
+            QMessageBox.warning(self, 'Not saved',
+                                'Choose another name: this is the measurement that is open.')
+            return
+        series = [self.store.get_series(key) for key in self.store.all_keys()]
+        try:
+            self._write_mf4([s for s in series if s is not None], path,
+                            'Saving decoded measurement')
+        except Exception as exc:
+            QMessageBox.critical(self, 'Save failed', str(exc))
 
     def _write_export_csv(self, series_items, path, timebase=None) -> bool:
         ExportService.export_series_to_csv(
@@ -3097,7 +3241,8 @@ class MainWindow(QMainWindow):
     # needs_store = requires decode to have completed
     _ACTS_ALWAYS_ENABLED = {'Open Measurement', 'Open configuration'}
     _ACTS_NEEDS_FILE  = {'Decode'}
-    _ACTS_NEEDS_STORE = {'Save configuration', 'Calculated Signal', 'Export plotted signals'}
+    _ACTS_NEEDS_STORE = {'Save configuration', 'Calculated Signal', 'Export plotted signals',
+                         'Save decoded measurement as MF4', 'Measurement info'}
 
     def _update_action_states(self) -> None:
         """Grey out toolbar actions that are not yet usable."""
