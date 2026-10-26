@@ -141,6 +141,8 @@ class TabularView(QWidget):
         self.go_to.setMaximumWidth(140)
         self.go_to.returnPressed.connect(self._on_go_to)
         self.summary = QLabel()
+        # It wraps, so a narrow table beside the plot is not held wider by it.
+        self.summary.setWordWrap(True)
         top = QHBoxLayout()
         top.setContentsMargins(4, 2, 4, 2)
         top.addWidget(self.go_to)

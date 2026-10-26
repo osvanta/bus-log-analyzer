@@ -11,11 +11,12 @@ the output file, whose extension picks the format. Runs off the GUI thread.
 """
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QSignalBlocker, QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
+    QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QProgressBar, QPushButton, QVBoxLayout,
 )
 
@@ -60,12 +61,16 @@ class _Job(QThread):
 
 
 class SignalPicker(QDialog):
-    """The signals of an MDF file, ticked to keep."""
+    """The signals of an MDF file, ticked to keep, with a search that
+    narrows the list; ticks outside the search are kept."""
 
     def __init__(self, signals, chosen, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle('Signals to keep')
         self.resize(420, 480)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('Search signals… (* and ? wildcards)')
+        self.search.setClearButtonEnabled(True)
         self.list = QListWidget()
         chosen = set(chosen)
         for name, group, index, group_name in signals:
@@ -74,12 +79,66 @@ class SignalPicker(QDialog):
             item.setCheckState(Qt.CheckState.Checked if (name, group, index) in chosen
                                else Qt.CheckState.Unchecked)
             self.list.addItem(item)
+        self.tick_shown = QPushButton('Tick shown')
+        self.tick_shown.setToolTip('Tick every signal the search shows')
+        self.untick_all = QPushButton('Untick all')
+        self.count = QLabel()
         ok = QPushButton('OK')
         ok.clicked.connect(self.accept)
+        self.tick_shown.clicked.connect(lambda: self._set_checked(self._shown(), True))
+        self.untick_all.clicked.connect(lambda: self._set_checked(self._items(), False))
+        self.search.textChanged.connect(self._filter)
+        self.list.itemChanged.connect(self._show_count)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.tick_shown)
+        buttons.addWidget(self.untick_all)
+        buttons.addWidget(self.count, 1)
+        buttons.addWidget(ok)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel('Tick the signals to keep; none ticked keeps them all.'))
+        layout.addWidget(self.search)
         layout.addWidget(self.list)
-        layout.addWidget(ok, alignment=Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(buttons)
+        self._show_count()
+        self.search.setFocus()
+
+    def _items(self) -> list[QListWidgetItem]:
+        return [self.list.item(i) for i in range(self.list.count())]
+
+    def _shown(self) -> list[QListWidgetItem]:
+        return [item for item in self._items() if not item.isHidden()]
+
+    def _filter(self, text: str) -> None:
+        """Show the signals whose name contains the text, ignoring case;
+        with * or ?, the signals the pattern matches."""
+        needle = text.strip().casefold()
+        wildcard = any(c in needle for c in '*?')
+        for item in self._items():
+            name = item.text().casefold()
+            if not needle:
+                hidden = False
+            elif wildcard:
+                hidden = not (fnmatchcase(name, needle) or fnmatchcase(name, f'*{needle}*'))
+            else:
+                hidden = needle not in name
+            item.setHidden(hidden)
+        self._show_count()
+
+    def _set_checked(self, items, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        with QSignalBlocker(self.list):
+            for item in items:
+                item.setCheckState(state)
+        self._show_count()
+
+    def _show_count(self, *_args) -> None:
+        ticked = sum(item.checkState() == Qt.CheckState.Checked for item in self._items())
+        shown = len(self._shown())
+        total = self.list.count()
+        text = f'{ticked} of {total} ticked'
+        if shown != total:
+            text += f' · {shown} shown'
+        self.count.setText(text)
 
     def chosen(self) -> list[tuple[str, int, int]]:
         return [self.list.item(i).data(Qt.ItemDataRole.UserRole)

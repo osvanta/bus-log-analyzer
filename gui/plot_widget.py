@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
@@ -1162,16 +1163,22 @@ class PlotPanel(QWidget):
         # ── Root layout ───────────────────────────────────────────────────
         _root = QVBoxLayout(self)
         _root.setContentsMargins(4, 4, 4, 4)
-        # The plots, or the plotted signals as a table (set_table_view). Apart
-        # from view_stack, which rebuilds switch between its two plot layouts.
+        # The plots, and right of them the plotted signals as a table
+        # (set_table_view). Apart from view_stack, which rebuilds switch
+        # between its two plot layouts.
         self.tabular = TabularView()
-        # It takes the plots' place and size, never sets them: hidden, its
-        # table's minimum height would make the plot area taller.
-        self.tabular.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        # The plots set the height, never the table: its minimum height would
+        # make the plot area taller.
+        self.tabular.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         self.tabular.timeClicked.connect(self.plotAreaClicked.emit)
-        self.area_stack = QStackedWidget()
-        self.area_stack.addWidget(self.view_stack)   # index 0 – the plots
-        self.area_stack.addWidget(self.tabular)      # index 1 – the table
+        self.area_stack = QSplitter(Qt.Orientation.Horizontal)
+        self.area_stack.setChildrenCollapsible(False)
+        self.area_stack.addWidget(self.view_stack)   # the plots
+        self.area_stack.addWidget(self.tabular)      # the table, while Table is on
+        self.area_stack.setStretchFactor(0, 1)       # a wider window widens the plots
+        self.tabular.hide()
+        self._table_view_on = False
+        self._table_view_width = 0                   # the user's last width for it
         _root.addWidget(self.area_stack, stretch=1)
         # The cursor line keeps a line's height under the empty plot, but no
         # width. Plotting the first signals then resizes neither the plot nor
@@ -2966,19 +2973,30 @@ class PlotPanel(QWidget):
     # ── Table view ────────────────────────────────────────────────────────
 
     def table_view_active(self) -> bool:
-        stack = getattr(self, 'area_stack', None)   # None while being built
-        return stack is not None and stack.currentIndex() == 1
+        return getattr(self, '_table_view_on', False)   # False while being built
+
+    #: The table's share of the width the first time it is shown.
+    _TABLE_VIEW_SHARE = 0.38
 
     def set_table_view(self, on: bool) -> None:
-        """Show the plotted signals as a table in place of the plots, or the
-        plots again."""
+        """Show the plotted signals as a table right of the plots, or hide it.
+        The table keeps the width the user last dragged it to."""
+        on = bool(on)
+        if on == self._table_view_on:
+            return
+        self._table_view_on = on
         if on:
             self._fill_tabular()
-            self.area_stack.setCurrentIndex(1)
+            self.tabular.show()
+            total = sum(self.area_stack.sizes()) or self.area_stack.width()
+            width = self._table_view_width or int(total * self._TABLE_VIEW_SHARE)
+            width = min(width, int(total * 0.8))
+            self.area_stack.setSizes([max(1, total - width), width])
             if self._cursor1_enabled:
                 self.tabular.select_time(self.v_line.value())
         else:
-            self.area_stack.setCurrentIndex(0)
+            self._table_view_width = self.area_stack.sizes()[1]
+            self.tabular.hide()
 
     def _fill_tabular(self) -> None:
         self.tabular.set_series(
@@ -3099,6 +3117,9 @@ class PlotPanel(QWidget):
                 texts = ([''] * len(STAT_COLUMNS) if stats is None else
                          [f'{stats.minimum:.3f}', f'{stats.maximum:.3f}',
                           f'{stats.mean:.3f}', f'{stats.rms:.3f}', f'{stats.samples:,}'])
+                # In the signal's colour, as its name and cursor values are.
+                brush = QBrush(QColor(plotted.color if plotted is not None and plotted.visible
+                                      else '#606060'))
                 for offset, text in enumerate(texts):
                     col = _STAT_FIRST + offset
                     item = self.table.item(row, col)
@@ -3108,6 +3129,7 @@ class PlotPanel(QWidget):
                         item.setData(Qt.ItemDataRole.UserRole, key)
                         self.table.setItem(row, col, item)
                     item.setText(text)
+                    item.setForeground(brush)
         finally:
             self.table.setUpdatesEnabled(True)
             self.table.blockSignals(was_blocked)
@@ -4971,7 +4993,7 @@ class PlotPanel(QWidget):
         # The table and this panel both reach the bottom of the main
         # window's splitter, so the space under the plot here is the space
         # to leave under the table.
-        plot = self.area_stack.geometry()   # the plots, or the table in their place
+        plot = self.area_stack.geometry()   # the plots, and the table beside them
         self._table_bottom_gap.setFixedHeight(max(0, self.height() - plot.y() - plot.height()))
         # The tag lies as far under the table as the cursor line under the
         # plot, and as tall, so the two read as one line.

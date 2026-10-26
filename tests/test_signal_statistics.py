@@ -133,6 +133,18 @@ def test_a_range_between_two_samples_shows_the_held_value(shown, monkeypatch):
     assert _stats_row(shown, 'Speed') == ['10.000', '10.000', '10.000', '10.000', '0']
 
 
+def test_they_are_in_the_signals_colour(shown):
+    from PySide6.QtGui import QColor
+    from gui.plot_widget import STAT_COLUMNS, _STAT_FIRST
+    row = shown._row_lookup['Speed']
+    colour = QColor(shown._items['Speed'].color)
+    assert shown.table.item(row, 1).foreground().color() == colour     # its name
+    for i in range(len(STAT_COLUMNS)):
+        assert shown.table.item(row, _STAT_FIRST + i).foreground().color() == colour
+    hidden_row = shown._row_lookup['Temp']
+    assert shown.table.item(hidden_row, _STAT_FIRST).foreground().color() == QColor('#606060')
+
+
 def test_label_and_hidden_signals_stay_blank(shown):
     assert _stats_row(shown, 'Gear') == [''] * 5
     assert _stats_row(shown, 'Temp') == [''] * 5

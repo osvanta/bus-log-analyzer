@@ -123,13 +123,40 @@ def window(qapp, monkeypatch, tmp_path):
     qapp.processEvents()
 
 
-def test_the_table_button_swaps_the_plot_for_the_table(window):
+def test_the_table_button_puts_the_table_right_of_the_plot(window, qapp):
     panel = window.plot_panel
+    window.resize(1400, 800)
+    window.show()
+    qapp.processEvents()
+    assert not panel.tabular.isVisible()
     window.btn_table.setChecked(True)
-    assert panel.table_view_active() and panel.area_stack.currentWidget() is panel.tabular
+    qapp.processEvents()
+    assert panel.table_view_active()
+    assert panel.view_stack.isVisible() and panel.tabular.isVisible()      # both shown
+    assert panel.area_stack.indexOf(panel.view_stack) == 0                 # plot left
+    assert panel.area_stack.indexOf(panel.tabular) == 1                    # table right
+    plot, table = panel.area_stack.sizes()
+    assert plot > table > 0
     assert panel.tabular.model.columnCount() == 3
     window.btn_table.setChecked(False)
-    assert not panel.table_view_active()
+    qapp.processEvents()
+    assert not panel.table_view_active() and not panel.tabular.isVisible()
+    assert panel.view_stack.isVisible()
+
+
+def test_the_table_keeps_the_width_it_was_dragged_to(window, qapp):
+    panel = window.plot_panel
+    window.resize(1400, 800)
+    window.show()
+    qapp.processEvents()
+    window.btn_table.setChecked(True)
+    qapp.processEvents()
+    total = sum(panel.area_stack.sizes())
+    panel.area_stack.setSizes([total - 300, 300])
+    window.btn_table.setChecked(False)
+    window.btn_table.setChecked(True)
+    qapp.processEvents()
+    assert panel.area_stack.sizes()[1] == 300
 
 
 def test_hidden_signals_are_left_out_and_changes_follow(window, qapp):
