@@ -1556,11 +1556,14 @@ class LoadWorker(QObject):
             except BaseException:
                 source.close()
                 raise
+            # An MF4 this application wrote names each group's bus channel.
+            group_channels = getattr(source, "group_channels", None) or {}
             for group_idx, grp_name, channels, cycles in source.groups:
                 for _ch_idx, ch_name, unit in channels:
                     ch_count += 1
                     store.add_lazy_series(
-                        channel=None, message_name=grp_name, message_id=0,
+                        channel=group_channels.get(group_idx),
+                        message_name=grp_name, message_id=0,
                         signal_name=ch_name, unit=unit,
                         group=group_idx, sample_count=cycles,
                     )

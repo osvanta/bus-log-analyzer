@@ -47,7 +47,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
+from gui.tabular_view import TabularView
 from gui.edge_tab import _mix
 from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
@@ -650,6 +652,27 @@ class _ElidedLabel(QLabel):
 #: Samples a windowed range looks at per step, bounding its temporary arrays.
 _RANGE_CHUNK = 1 << 20
 
+#: The signal table's statistics columns, after its seven others; hidden
+#: until turned on from the table header's menu.
+STAT_COLUMNS = ('Min', 'Max', 'Mean', 'RMS', 'Samples')
+_STAT_FIRST = 7
+#: Cursor 2 minus Cursor 1, per signal. Last by index, shown after Cursor 2.
+DELTA_COLUMN = 'Δ C2−C1'
+_DELTA_COL = _STAT_FIRST + len(STAT_COLUMNS)
+#: The columns the table header's menu shows and hides: name → (columns,
+#: shown by default). Cursor columns also need their cursors on, and Axis
+#: multi-axis mode; ☑ and Signal are always shown.
+OPTIONAL_COLUMNS = {
+    'Cursor 1': ((2,), True),
+    'Cursor 2': ((3,), True),
+    DELTA_COLUMN: ((_DELTA_COL,), True),
+    'Unit': ((4,), True),
+    'Axis': ((5, 6), True),
+    **{name: ((_STAT_FIRST + i,), False) for i, name in enumerate(STAT_COLUMNS)},
+}
+#: Statistics wait for the view or a cursor to stop moving this long.
+_STATS_DEBOUNCE_MS = 120
+
 
 def _value_range(values) -> tuple[float, float] | None:
     """
@@ -841,6 +864,10 @@ class PlotPanel(QWidget):
     plotAreaShiftClicked = Signal(float)
     # The user changed or removed the tag under the signal table (a PlotTag).
     tagChanged = Signal(object)
+    # A column was shown or hidden from the table header: {name: shown}.
+    columnChoicesChanged = Signal(dict)
+    # "Show measurement events" was ticked or unticked in a plot's menu.
+    eventsToggled = Signal(bool)
     # "Remove all signals" in the signal table's menu: the main window clears
     # the plot, as its Clear Plot button does.
     clearRequested = Signal()
@@ -874,6 +901,9 @@ class PlotPanel(QWidget):
         self._points_timer = QTimer(self)
         self._points_timer.setSingleShot(True)
         self._points_timer.timeout.connect(self._update_adaptive_points)
+        self._stats_timer = QTimer(self)
+        self._stats_timer.setSingleShot(True)
+        self._stats_timer.timeout.connect(self._update_statistics)
         self._xrange_vb: Any = None
         self._multi_axis = False
         self._stacked_mode = False
@@ -934,6 +964,13 @@ class PlotPanel(QWidget):
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setLabel('bottom', 'Time (seconds)')
         self.plot.setBackground(self._background_color)
+        # Measurement events (MF4): (time on the plot's time base, name), and
+        # the markers drawn for them while the plot menu's action is ticked.
+        self._events: list[tuple[float, str]] = []
+        self._event_lines: list[tuple[object, object]] = []
+        self.events_action = QAction('Show measurement events', self)
+        self.events_action.setCheckable(True)
+        self.events_action.toggled.connect(self._on_events_toggled)
         self._install_plot_background_menu()
         self._install_plot_click_deselect()
 
@@ -1013,9 +1050,11 @@ class PlotPanel(QWidget):
         # v_line2 not added to plot until cursor 2 is enabled
 
         # ── Signal table ──────────────────────────────────────────────────
-        self.table = _ReorderTable(0, 7)
+        self.table = _ReorderTable(0, _DELTA_COL + 1)
         self.table.setHorizontalHeaderLabels(
-            ['☑', 'Signal', 'Cursor 1', 'Cursor 2', 'Unit', 'Ax', 'Axis'])
+            ['☑', 'Signal', 'Cursor 1', 'Cursor 2', 'Unit', 'Ax', 'Axis', *STAT_COLUMNS,
+             DELTA_COLUMN])
+        self._column_choices = {name: shown for name, (_c, shown) in OPTIONAL_COLUMNS.items()}
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.itemSelectionChanged.connect(self._emit_selection)
@@ -1043,9 +1082,16 @@ class PlotPanel(QWidget):
         self.table.setColumnWidth(4, 55)    # Unit
         self.table.setColumnWidth(5, 16)    # Ax swatch (multi-axis mode only)
         self.table.setColumnWidth(6, 36)    # Axis checkbox (multi-axis mode only)
-        self.table.setColumnHidden(3, True) # hidden until cursor 2 enabled
-        self.table.setColumnHidden(5, True) # hidden until multi-axis mode enabled
-        self.table.setColumnHidden(6, True) # hidden until multi-axis mode enabled
+        for col in range(_STAT_FIRST, self.table.columnCount()):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+            self.table.setColumnWidth(col, 70)
+        self.table.setColumnWidth(_DELTA_COL, 90)
+        hdr.moveSection(hdr.visualIndex(_DELTA_COL), hdr.visualIndex(3) + 1)
+        self.table.horizontalHeaderItem(_DELTA_COL).setToolTip(
+            'Cursor 2 value minus Cursor 1 value.')
+        self._apply_column_visibility()
+        hdr.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        hdr.customContextMenuRequested.connect(self._show_table_header_menu)
 
         self.table_panel = QWidget()
         _tbl_layout = QVBoxLayout(self.table_panel)
@@ -1116,7 +1162,17 @@ class PlotPanel(QWidget):
         # ── Root layout ───────────────────────────────────────────────────
         _root = QVBoxLayout(self)
         _root.setContentsMargins(4, 4, 4, 4)
-        _root.addWidget(self.view_stack, stretch=1)
+        # The plots, or the plotted signals as a table (set_table_view). Apart
+        # from view_stack, which rebuilds switch between its two plot layouts.
+        self.tabular = TabularView()
+        # It takes the plots' place and size, never sets them: hidden, its
+        # table's minimum height would make the plot area taller.
+        self.tabular.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.tabular.timeClicked.connect(self.plotAreaClicked.emit)
+        self.area_stack = QStackedWidget()
+        self.area_stack.addWidget(self.view_stack)   # index 0 – the plots
+        self.area_stack.addWidget(self.tabular)      # index 1 – the table
+        _root.addWidget(self.area_stack, stretch=1)
         # The cursor line keeps a line's height under the empty plot, but no
         # width. Plotting the first signals then resizes neither the plot nor
         # the table beside it, which would draw every stacked row once more.
@@ -1575,8 +1631,7 @@ class PlotPanel(QWidget):
         if enabled:
             self._stacked_mode = False
             self._multistack_mode = False
-        self.table.setColumnHidden(5, not self._multi_axis)  # Ax swatch
-        self.table.setColumnHidden(6, not self._multi_axis)  # Axis checkbox
+        self._apply_column_visibility()   # Ax swatch and Axis checkbox
         self._rebuild_curves(
             preserve_selection=True,
             preserved_x_range=saved_x_range,
@@ -1620,7 +1675,7 @@ class PlotPanel(QWidget):
         """Show/hide Cursor 1 and its table column. When turned ON, always
         centres it in the current view."""
         self._cursor1_enabled = bool(enabled)
-        self.table.setColumnHidden(2, not enabled)
+        self._apply_column_visibility()
         self._show_cursor1_lines()
         if enabled:
             self.move_cursor1(self._current_view_centre())
@@ -1708,7 +1763,7 @@ class PlotPanel(QWidget):
             else:
                 try: self.plot.addItem(self.v_line2, ignoreBounds=True)
                 except Exception: pass
-            self.table.setColumnHidden(3, False)
+            self._apply_column_visibility()
             if self._items:
                 self._update_table_values(cx2, col=3)
         else:
@@ -1719,7 +1774,7 @@ class PlotPanel(QWidget):
             else:
                 try: self.plot.removeItem(self.v_line2)
                 except Exception: pass
-            self.table.setColumnHidden(3, True)
+            self._apply_column_visibility()
         self._update_cursor_labels()
 
     def set_stacked(self, enabled: bool) -> None:
@@ -2440,6 +2495,9 @@ class PlotPanel(QWidget):
                 p.addItem(c2, ignoreBounds=True)
                 self._stacked_c2_lines.append(c2)
 
+            stacked_menu = getattr(p, 'ctrlMenu', None)
+            if stacked_menu is not None:
+                stacked_menu.addAction(self.events_action)
             self._stacked_plots.append(p)
 
         # Each cursor's row lines light up together under the mouse.
@@ -2631,6 +2689,7 @@ class PlotPanel(QWidget):
         once the view stops moving, never during an interactive drag-zoom."""
         if self._show_points:
             self._points_timer.start(self._POINTS_DEBOUNCE_MS)
+        self._schedule_statistics()
 
     def _connect_xrange_signals(self) -> None:
         """Listen to the current driving ViewBox's sigXRangeChanged.
@@ -2833,6 +2892,9 @@ class PlotPanel(QWidget):
         self._update_cursor_labels()
 
     def _update_cursor_labels(self) -> None:
+        self._schedule_statistics()   # between the cursors, they may have moved
+        if self.table_view_active() and self._cursor1_enabled:
+            self.tabular.select_time(self.v_line.value())
         x1 = self.v_line.value()
         x2 = self.v_line2.value()
         if self._cursor1_enabled and self._cursor2_enabled:
@@ -2861,6 +2923,195 @@ class PlotPanel(QWidget):
         mp = self.plot.plotItem.vb.mapSceneToView(pos)
         self.h_line.setPos(mp.y())
 
+    # ── Measurement events ────────────────────────────────────────────────
+
+    def set_events(self, events: list[tuple[float, str]]) -> None:
+        """The measurement's events, as (time on the plot's time base, name).
+        An empty list also unticks "Show measurement events"."""
+        self._events = list(events)
+        if not self._events and self.events_action.isChecked():
+            was_blocked = self.events_action.blockSignals(True)
+            self.events_action.setChecked(False)
+            self.events_action.blockSignals(was_blocked)
+        self._draw_events()
+
+    def events(self) -> list[tuple[float, str]]:
+        return list(self._events)
+
+    def _on_events_toggled(self, on: bool) -> None:
+        self._draw_events()
+        self.eventsToggled.emit(bool(on))
+
+    def _draw_events(self) -> None:
+        for plot_item, line in self._event_lines:
+            try:
+                plot_item.removeItem(line)
+            except Exception:
+                pass   # its plot was rebuilt away
+        self._event_lines = []
+        if not (self.events_action.isChecked() and self._events):
+            return
+        targets = (self._stacked_plots if self._stacked_mode and self._stacked_plots
+                   else [self.plot.plotItem])
+        color = _cursor_color_on(self._background_color)
+        pen = pg.mkPen(color=color, width=1, style=Qt.PenStyle.DashLine)
+        for plot_item in targets:
+            for time_s, name in self._events:
+                line = pg.InfiniteLine(
+                    pos=time_s, angle=90, movable=False, pen=pen, label=name or None,
+                    labelOpts={'position': 0.92, 'color': color, 'movable': False})
+                plot_item.addItem(line, ignoreBounds=True)
+                self._event_lines.append((plot_item, line))
+
+    # ── Table view ────────────────────────────────────────────────────────
+
+    def table_view_active(self) -> bool:
+        stack = getattr(self, 'area_stack', None)   # None while being built
+        return stack is not None and stack.currentIndex() == 1
+
+    def set_table_view(self, on: bool) -> None:
+        """Show the plotted signals as a table in place of the plots, or the
+        plots again."""
+        if on:
+            self._fill_tabular()
+            self.area_stack.setCurrentIndex(1)
+            if self._cursor1_enabled:
+                self.tabular.select_time(self.v_line.value())
+        else:
+            self.area_stack.setCurrentIndex(0)
+
+    def _fill_tabular(self) -> None:
+        self.tabular.set_series(
+            [p.series for p in self._items.values() if p.visible])
+
+    # ── Column choice (table header menu) ─────────────────────────────────
+
+    def column_choices(self) -> dict[str, bool]:
+        """Which optional columns the user wants shown, by name."""
+        return dict(self._column_choices)
+
+    def set_column_choices(self, choices: dict) -> None:
+        """Show or hide optional columns by name; unknown names are ignored.
+        A cursor column still waits for its cursor, Axis for multi-axis."""
+        changed = False
+        for name, shown in (choices or {}).items():
+            if name in self._column_choices and self._column_choices[name] != bool(shown):
+                self._column_choices[name] = bool(shown)
+                changed = True
+        if not changed:
+            return
+        self._apply_column_visibility()
+        self._update_statistics()
+        self._update_delta()
+        self.columnChoicesChanged.emit(self.column_choices())
+
+    def set_column_shown(self, name: str, shown: bool) -> None:
+        self.set_column_choices({name: shown})
+
+    def _column_available(self, name: str) -> bool:
+        if name == 'Cursor 1':
+            return self._cursor1_enabled
+        if name == 'Cursor 2':
+            return self._cursor2_enabled
+        if name == DELTA_COLUMN:
+            return self._cursor1_enabled and self._cursor2_enabled
+        if name == 'Axis':
+            return self._multi_axis
+        return True
+
+    def _apply_column_visibility(self) -> None:
+        for name, (columns, _default) in OPTIONAL_COLUMNS.items():
+            hidden = not (self._column_choices[name] and self._column_available(name))
+            for col in columns:
+                self.table.setColumnHidden(col, hidden)
+
+    def _show_table_header_menu(self, position) -> None:
+        self._table_header_menu().exec(self.table.horizontalHeader().mapToGlobal(position))
+
+    def _table_header_menu(self) -> QMenu:
+        menu = self._make_menu()
+        menu.setToolTipsVisible(True)
+        needs = {'Cursor 1': 'Shown while Cursor 1 is on.',
+                 'Cursor 2': 'Shown while Cursor 2 is on.',
+                 DELTA_COLUMN: 'Cursor 2 value minus Cursor 1 value; '
+                               'shown while both cursors are on.',
+                 'Axis': 'Shown in Multi-Axis mode.'}
+        for name in OPTIONAL_COLUMNS:
+            if name == STAT_COLUMNS[0]:
+                menu.addSeparator()
+            act = QAction(name, menu)
+            act.setCheckable(True)
+            act.setChecked(self._column_choices[name])
+            if name in needs:
+                act.setToolTip(needs[name])
+            elif name in STAT_COLUMNS:
+                act.setToolTip('Sample-based, between the cursors when both are on, '
+                               'else in the visible range.')
+            act.toggled.connect(lambda shown, n=name: self.set_column_shown(n, shown))
+            menu.addAction(act)
+        return menu
+
+    # ── Statistics columns ────────────────────────────────────────────────
+
+    def statistics_columns_visible(self) -> bool:
+        """Whether any of Min / Max / Mean / RMS / Samples is shown."""
+        return any(not self.table.isColumnHidden(_STAT_FIRST + i)
+                   for i in range(len(STAT_COLUMNS)))
+
+    def statistics_range(self) -> tuple[float, float, str] | None:
+        """The range the statistics are over: between the cursors when both
+        are on, else the visible range; with its name. None before anything
+        is shown."""
+        if self._cursor1_enabled and self._cursor2_enabled:
+            a, b = self.v_line.value(), self.v_line2.value()
+            return min(a, b), max(a, b), 'between the cursors'
+        visible = self._visible_x_range()
+        if not visible:
+            return None
+        return float(visible[0]), float(visible[1]), 'in the visible range'
+
+    def _schedule_statistics(self) -> None:
+        if self.statistics_columns_visible():
+            self._stats_timer.start(_STATS_DEBOUNCE_MS)
+
+    def _update_statistics(self) -> None:
+        """Fill the statistics columns for every shown signal. Signals with
+        text labels and hidden signals stay blank."""
+        if not self.statistics_columns_visible():
+            return
+        span = self.statistics_range()
+        tip = ('Sample-based, ' + span[2] if span else 'Sample-based') + '.'
+        for col in range(_STAT_FIRST, _STAT_FIRST + len(STAT_COLUMNS)):
+            header = self.table.horizontalHeaderItem(col)
+            if header is not None:
+                header.setToolTip(tip)
+        was_blocked = self.table.blockSignals(True)
+        self.table.setUpdatesEnabled(False)
+        try:
+            for key, row in self._row_lookup.items():
+                plotted = self._items.get(key)
+                stats = None
+                if span and plotted is not None and plotted.visible \
+                        and not plotted.series.has_labels:
+                    stats = range_statistics(plotted.series.timestamps,
+                                             plotted.series.values, span[0], span[1],
+                                             hold=True)
+                texts = ([''] * len(STAT_COLUMNS) if stats is None else
+                         [f'{stats.minimum:.3f}', f'{stats.maximum:.3f}',
+                          f'{stats.mean:.3f}', f'{stats.rms:.3f}', f'{stats.samples:,}'])
+                for offset, text in enumerate(texts):
+                    col = _STAT_FIRST + offset
+                    item = self.table.item(row, col)
+                    if item is None:
+                        item = QTableWidgetItem()
+                        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                        item.setData(Qt.ItemDataRole.UserRole, key)
+                        self.table.setItem(row, col, item)
+                    item.setText(text)
+        finally:
+            self.table.setUpdatesEnabled(True)
+            self.table.blockSignals(was_blocked)
+
     def _update_table_values(self, x: float, col: int = 2) -> None:
         """Update Cursor 1 (col=2) or Cursor 2 (col=3) value column."""
         self.table.setUpdatesEnabled(False)
@@ -2885,8 +3136,35 @@ class PlotPanel(QWidget):
                         cell.setText(f"{float(value):.3f}")
                     except (TypeError, ValueError):
                         cell.setText(str(value))
+            self._update_delta()
         finally:
             self.table.setUpdatesEnabled(True)
+
+    def _update_delta(self) -> None:
+        """Fill the Δ column: each signal's Cursor 2 value minus its Cursor 1
+        value, at the same samples the cursor columns show. Signals with
+        text labels stay blank."""
+        if self.table.isColumnHidden(_DELTA_COL):
+            return
+        x1, x2 = self.v_line.value(), self.v_line2.value()
+        for key, plotted in self._items.items():
+            if not plotted.visible:
+                continue
+            row = self._row_lookup.get(key)
+            cell = self.table.item(row, _DELTA_COL) if row is not None else None
+            if cell is None:
+                continue
+            text = ''
+            if not plotted.series.has_labels:
+                i1 = self._nearest_index(plotted.series.timestamps, x1)
+                i2 = self._nearest_index(plotted.series.timestamps, x2)
+                if i1 is not None and i2 is not None:
+                    values = plotted.series.values
+                    try:
+                        text = f'{float(values[i2]) - float(values[i1]):.3f}'
+                    except (TypeError, ValueError, IndexError):
+                        text = ''
+            cell.setText(text)
 
     # ── Fit to window ─────────────────────────────────────────────────────
 
@@ -3397,11 +3675,12 @@ class PlotPanel(QWidget):
                     sig_item.setFont(generated_font)
                 c1_item  = QTableWidgetItem('')
                 c2_item  = QTableWidgetItem('')
+                dl_item  = QTableWidgetItem('')
                 un_item  = QTableWidgetItem(plotted.series.unit)
                 brush = QBrush(QColor(
                     plotted.color if plotted.visible else '#606060'
                 ))
-                for item in (sig_item, c1_item, c2_item, un_item):
+                for item in (sig_item, c1_item, c2_item, dl_item, un_item):
                     item.setForeground(brush)
                 chk_item.setForeground(brush)
                 # Col 5: Ax — colored swatch showing the unit-group axis color
@@ -3430,8 +3709,13 @@ class PlotPanel(QWidget):
                 self.table.setItem(row_idx, 4, un_item)
                 self.table.setItem(row_idx, 5, sw_item)
                 self.table.setItem(row_idx, 6, ax_item)
+                self.table.setItem(row_idx, _DELTA_COL, dl_item)
         self.table.blockSignals(False)
         self._apply_collapse_state()
+        self._schedule_statistics()
+        if self.table_view_active():
+            self._fill_tabular()
+        self._draw_events()   # on whichever plots the rebuild made
         # Rebuild the key→row index used by _update_table_values on every cursor drag.
         self._row_lookup = {}
         for row in range(self.table.rowCount()):
@@ -3555,6 +3839,7 @@ class PlotPanel(QWidget):
     def clear_all(self) -> None:
         self._push_undo()
         self._items.clear()
+        self.set_events([])   # they belong to the measurement being cleared
         self._clear_rendered_items()
         self.table.setRowCount(0)
         self._current_key = None
@@ -3988,7 +4273,7 @@ class PlotPanel(QWidget):
         self.table.setItem(row_idx, 1, name_item)
 
         # Cols 2-6: empty, same background
-        for col in (2, 3, 4, 5, 6):
+        for col in range(2, self.table.columnCount()):
             cell = QTableWidgetItem('')
             cell.setFlags(draggable)
             cell.setBackground(bg)
@@ -4548,6 +4833,7 @@ class PlotPanel(QWidget):
             act = QAction('Set Plot Background Color...', menu)
             act.triggered.connect(self._choose_plot_background_color)
             menu.addAction(act)
+            menu.addAction(self.events_action)
         else:
             self.plot.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             self.plot.customContextMenuRequested.connect(self._show_plot_menu)
@@ -4685,7 +4971,7 @@ class PlotPanel(QWidget):
         # The table and this panel both reach the bottom of the main
         # window's splitter, so the space under the plot here is the space
         # to leave under the table.
-        plot = self.view_stack.geometry()
+        plot = self.area_stack.geometry()   # the plots, or the table in their place
         self._table_bottom_gap.setFixedHeight(max(0, self.height() - plot.y() - plot.height()))
         # The tag lies as far under the table as the cursor line under the
         # plot, and as tall, so the two read as one line.

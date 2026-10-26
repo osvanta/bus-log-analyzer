@@ -35,7 +35,8 @@ MAIN_ICON_SIZE = QSize(18, 18)   # as the plot buttons' icons
 
 
 class FileMenu(QMenu):
-    """A configuration opened or saved, and plotted signals exported."""
+    """A configuration opened or saved, signals exported, and what the open
+    measurement is."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__('File', parent)
@@ -45,9 +46,21 @@ class FileMenu(QMenu):
         self.addSeparator()
         self.export_action = self.addAction('Export plotted signals')
         self.export_action.setShortcut(QKeySequence('Ctrl+E'))
+        self.save_decoded_action = self.addAction('Save decoded measurement as MF4')
+        self.addSeparator()
+        self.info_action = self.addAction('Measurement info')
+        self.info_action.setShortcut(QKeySequence('Ctrl+I'))
         # The style leaves a single space between the longest item and its
         # shortcut; a wider menu moves the shortcuts clear of the text.
         self.setMinimumWidth(self.sizeHint().width() + 3 * self.fontMetrics().horizontalAdvance('M'))
+
+
+class ToolsMenu(QMenu):
+    """Jobs on measurement files that need not be open."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__('Tools', parent)
+        self.convert_action = self.addAction('Convert files')
 
 
 class MainStepButton(QToolButton):

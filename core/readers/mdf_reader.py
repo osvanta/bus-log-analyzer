@@ -858,6 +858,31 @@ class MDFReader:
             pass
         return f"Group_{group_idx}"
 
+    @staticmethod
+    def _written_bus_channel(mdf, group_idx: int):
+        """The bus channel of a group this application wrote (core.mf4_writer),
+        as ``(BusType, number)``; None for any other group.
+
+        Only groups whose acquisition source names this application: MF4s
+        decoded by other tools record a bus channel too, but their signals
+        keep the ``CH?`` keys they always had, so plot configurations saved
+        on them still restore.
+        """
+        from core.mf4_writer import SOURCE_NAME
+
+        try:
+            source = mdf.groups[group_idx].channel_group.acq_source
+            if source is None or getattr(source, "name", "") != SOURCE_NAME:
+                return None
+            path = str(getattr(source, "path", "") or "")
+        except Exception:
+            return None
+        for prefix, bus in (("CAN", BusType.CAN), ("LIN", BusType.LIN)):
+            number = path[len(prefix):]
+            if path.startswith(prefix) and number.isdigit() and int(number) < 255:
+                return bus, int(number)
+        return None
+
 
 class MDFSampleSource:
     """
@@ -874,6 +899,8 @@ class MDFSampleSource:
         self._recovery_path = recovery_path
         self._channel_error = channel_error
         self.groups: list[tuple[int, str, list[tuple[int, str, str]], int]] = []
+        # Group index → bus channel, for groups this application wrote.
+        self.group_channels: dict[int, tuple[BusType, int]] = {}
         for group_idx, group in enumerate(mdf.groups):
             if MDFReader._is_raw_can_group(group):
                 continue
@@ -895,6 +922,9 @@ class MDFSampleSource:
                 self.groups.append(
                     (group_idx, MDFReader._group_name(mdf, group_idx), channels, cycles)
                 )
+                bus_channel = MDFReader._written_bus_channel(mdf, group_idx)
+                if bus_channel is not None:
+                    self.group_channels[group_idx] = bus_channel
         self._channels = {g[0]: g[2] for g in self.groups}
         # One thread at a time uses the MDF: the reader's (plotting, a
         # calculation) or a group copy's.
