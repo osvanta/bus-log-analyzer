@@ -35,7 +35,7 @@ The application finds out for itself what an MDF or CSV file holds.
 
 - Decodes large measurements fast, channel by channel, with a database for each channel.
 - Lists every channel, message and signal in a tree you can search, with `*` and `?` wildcards.
-- Plots signals in Stacked, Multi-Axis or MultiStack mode, with two cursors and Rectangle Zoom.
+- Plots signals in Stacked, Multi-Axis or MultiStack mode, with two cursors, statistics between them, named markers and Rectangle Zoom.
 - Calculates new signals from others with a formula.
-- Shows the **Trace**: the raw CAN and LIN frames, in order.
+- Shows the **Trace**: the raw CAN and LIN frames, in order, with the time since each ID's previous frame and its changed bytes highlighted.
 - Exports plotted signals to CSV or Excel, and saves the whole session as a configuration.

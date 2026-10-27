@@ -14,10 +14,12 @@ bus-log-analyzer/
 │   ├── vectorized_decoder.py     # NumPy DBC decode, sparse multiplex filtering, cantools fallback
 │   ├── blf_reader.py             # BLF decompression into packed column batches; CAN + LIN objects
 │   ├── export.py                 # CSV export
-│   ├── mf4_writer.py             # Decoded signals → MF4 (asammdf); marks each group's bus channel so the file reopens with the same keys
+│   ├── mf4_writer.py             # Decoded signals → MF4 (asammdf); marks each group's bus channel so the file reopens with the same keys; plot markers become MF4 marker events
 │   ├── converter.py              # Tools ▸ Convert files: join / cut / keep signals / resample; MF4·MDF via asammdf, BLF·ASC frames via python-can
 │   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line
-│   ├── signal_statistics.py      # Min / max / mean / RMS / samples of a signal over a time range
+│   ├── signal_statistics.py      # Min / max / mean / std dev / RMS / samples of a signal over a time range
+│   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
+│   ├── signal_selection.py       # Convert files' saved signal selections: match by name or pattern, read/write .txt lists
 │   ├── formula_catalog.py        # Insert Function's list: every formula function, operator and constant, by category, with argument help and examples
 │   ├── readers/
 │   │   ├── __init__.py           # reader_factory(), dbc_required_for(), bus-tagged prescan_measurement()
@@ -58,7 +60,7 @@ bus-log-analyzer/
 │   ├── plot_icons.py             # Monochrome plot button icons, drawn from SVG in the palette's text colour
 │   ├── brand_logo.py             # BrandLogo: the Osvanta logo at the status bar's right end, in the light or dark theme's colours
 │   ├── signal_tree.py            # SignalTreeWidget with live search
-│   ├── raw_frame_dialog.py       # Sliding-window CAN/LIN Trace (RawFrameStore, no cap)
+│   ├── raw_frame_dialog.py       # Sliding-window CAN/LIN Trace (RawFrameStore, no cap); Δt, changed-byte highlight, follows plot Cursor 1
 │   ├── dbc_manager.py            # Database Manager dialog: per-bus-channel DBC/ARXML/LDF, match quality bars
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
 │   ├── app_data.py               # Where logs and settings live: %LOCALAPPDATA%\Osvanta\BusLogAnalyzer when packaged, next to app.py from source

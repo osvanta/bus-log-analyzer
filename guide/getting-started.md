@@ -106,6 +106,24 @@ Plot a signal from the tree in any of these ways:
 Cursor 2. The line under the plot shows both times and the time between them,
 and the signal table shows each signal's value at each cursor.
 
+**Signal table columns.** Right-click the table header to show or hide a
+column: the cursor values, **Δ C2−C1** (Cursor 2's value minus Cursor 1's),
+the unit, and the statistics **Min**, **Max**, **Mean**, **Std dev**, **RMS**
+and **Samples**. The statistics are between the cursors when both are on, and
+over the visible range otherwise.
+
+**Markers.** Right-click the plot and choose **Add marker here**, or press ++m++
+to add one at Cursor 1. Drag a marker to move it, double-click it to rename
+it, and right-click it to move Cursor 1 there or delete it. **Go to marker**
+in the plot's right-click menu brings one into view. Markers are saved in the
+configuration, and an MF4 export keeps them as events.
+
+**Trace.** The **Δt** column is the time since the previous frame with the
+same ID on the same channel, and the bytes that changed since that frame are
+bold and coloured; right-click the header to turn either off. While
+**⇄ Follow Cursor 1** is on, picking a frame moves Cursor 1 to it, and moving
+Cursor 1 brings its frame into view.
+
 **Moving around.** ++f++ fits the whole recording, and ++v++ fits the height
 only. With **Rectangle Zoom** (++z++), drag a box to zoom into it, ++shift+++drag
 to zoom out, and double-click to see everything again. ++ctrl+z++ undoes the
@@ -118,7 +136,11 @@ last plot action.
   with their colours, groups and order, the axes and the cursors. **File ▸ Open
   configuration** brings it all back.
 - **File ▸ Export plotted signals** (++ctrl+e++) writes the plotted signals to
-  CSV or Excel, on the time base you choose.
+  CSV or Excel, on the time base you choose, or to MF4.
+- **Tools ▸ Convert files** joins, cuts and converts measurements. In
+  **Choose signals**, **Save as…** keeps the ticked signals as a named
+  selection that works on any file, and **Import .txt…** and **Export .txt…**
+  share a list with others: one signal name a line, `*` and `?` allowed.
 
 ## Next
 

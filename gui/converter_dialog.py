@@ -16,18 +16,26 @@ from pathlib import Path
 
 from PySide6.QtCore import QSignalBlocker, QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QProgressBar, QPushButton, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton, QVBoxLayout,
 )
 
 from core.converter import (
     MDF_INPUTS, MDF_OUTPUTS, RAW_INPUTS, RAW_OUTPUTS, Cancelled, ConvertError, ConvertJob,
     convert, list_signals,
 )
+from core.signal_selection import (apply_selection, read_selection, selection_of,
+                                   write_selection)
+from gui.user_settings import read_setting, write_setting
 
 _INPUT_FILTER = 'Measurements (*.mf4 *.mdf *.dat *.blf *.asc);;All files (*)'
 _OUTPUT_FILTERS = {'.mf4': 'MF4 (*.mf4)', '.csv': 'CSV (*.csv)',
                    '.blf': 'BLF (*.blf)', '.asc': 'ASC (*.asc)'}
+_LIST_FILTER = 'Signal lists (*.txt);;All files (*)'
+#: User settings: the saved selections, {name: [entries]}, and the last used.
+_SELECTIONS_KEY = 'converter_selections'
+_LAST_SELECTION_KEY = 'converter_last_selection'
+_NO_SELECTION = '—'
 
 
 class _Job(QThread):
@@ -62,12 +70,18 @@ class _Job(QThread):
 
 class SignalPicker(QDialog):
     """The signals of an MDF file, ticked to keep, with a search that
-    narrows the list; ticks outside the search are kept."""
+    narrows the list; ticks outside the search are kept.
 
-    def __init__(self, signals, chosen, parent=None) -> None:
+    A selection of signal names can be saved by name (in the user settings,
+    with *settings_path*), applied to any file, and read from or written to a
+    text file. The last one used is offered again, and applied when nothing
+    is ticked yet."""
+
+    def __init__(self, signals, chosen, parent=None, *, settings_path=None) -> None:
         super().__init__(parent)
         self.setWindowTitle('Signals to keep')
-        self.resize(420, 480)
+        self.resize(520, 520)
+        self._settings_path = settings_path
         self.search = QLineEdit()
         self.search.setPlaceholderText('Search signals… (* and ? wildcards)')
         self.search.setClearButtonEnabled(True)
@@ -79,6 +93,19 @@ class SignalPicker(QDialog):
             item.setCheckState(Qt.CheckState.Checked if (name, group, index) in chosen
                                else Qt.CheckState.Unchecked)
             self.list.addItem(item)
+        self.selection = QComboBox()
+        self.selection.setMinimumContentsLength(16)
+        self.selection.setToolTip('A saved selection: choosing one ticks its signals')
+        self.save_selection = QPushButton('Save as…')
+        self.save_selection.setToolTip('Save the ticked signals as a selection, by name')
+        self.delete_selection = QPushButton('Delete')
+        self.import_selection = QPushButton('Import .txt…')
+        self.import_selection.setToolTip(
+            'Tick the signals a text file lists: one name a line, * and ? allowed')
+        self.export_selection = QPushButton('Export .txt…')
+        self.export_selection.setToolTip('Write the ticked signal names to a text file')
+        self.applied = QLabel()
+        self.applied.setWordWrap(True)
         self.tick_shown = QPushButton('Tick shown')
         self.tick_shown.setToolTip('Tick every signal the search shows')
         self.untick_all = QPushButton('Untick all')
@@ -89,6 +116,16 @@ class SignalPicker(QDialog):
         self.untick_all.clicked.connect(lambda: self._set_checked(self._items(), False))
         self.search.textChanged.connect(self._filter)
         self.list.itemChanged.connect(self._show_count)
+        self.save_selection.clicked.connect(self._save_selection)
+        self.delete_selection.clicked.connect(self._delete_selection)
+        self.import_selection.clicked.connect(self._import_selection)
+        self.export_selection.clicked.connect(self._export_selection)
+        selection_row = QHBoxLayout()
+        selection_row.addWidget(QLabel('Selection:'))
+        selection_row.addWidget(self.selection, 1)
+        for button in (self.save_selection, self.delete_selection,
+                       self.import_selection, self.export_selection):
+            selection_row.addWidget(button)
         buttons = QHBoxLayout()
         buttons.addWidget(self.tick_shown)
         buttons.addWidget(self.untick_all)
@@ -96,11 +133,130 @@ class SignalPicker(QDialog):
         buttons.addWidget(ok)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel('Tick the signals to keep; none ticked keeps them all.'))
+        layout.addLayout(selection_row)
+        layout.addWidget(self.applied)
         layout.addWidget(self.search)
         layout.addWidget(self.list)
         layout.addLayout(buttons)
+        self._fill_selections(read_setting(settings_path, _LAST_SELECTION_KEY)
+                              if settings_path else None)
+        self.selection.currentTextChanged.connect(self._on_selection_chosen)
+        if not chosen and self.selection.currentText() != _NO_SELECTION:
+            self._on_selection_chosen(self.selection.currentText())
         self._show_count()
         self.search.setFocus()
+
+    # ── Saved selections ─────────────────────────────────────────────────
+
+    def saved_selections(self) -> dict[str, list[str]]:
+        saved = (read_setting(self._settings_path, _SELECTIONS_KEY, {})
+                 if self._settings_path else {})
+        if not isinstance(saved, dict):
+            return {}
+        return {str(name): [str(e) for e in entries]
+                for name, entries in saved.items() if isinstance(entries, list)}
+
+    def _store(self, selections: dict[str, list[str]], last: str | None) -> None:
+        if self._settings_path is None:
+            return
+        try:
+            write_setting(self._settings_path, _SELECTIONS_KEY, selections)
+            write_setting(self._settings_path, _LAST_SELECTION_KEY, last)
+        except OSError as exc:
+            self.applied.setText(f'The selection could not be saved: {exc}')
+
+    def _fill_selections(self, current: str | None) -> None:
+        names = sorted(self.saved_selections(), key=str.casefold)
+        with QSignalBlocker(self.selection):
+            self.selection.clear()
+            self.selection.addItems([_NO_SELECTION, *names])
+            self.selection.setCurrentText(current if current in names else _NO_SELECTION)
+        self.delete_selection.setEnabled(self.selection.currentText() != _NO_SELECTION)
+
+    def _on_selection_chosen(self, name: str) -> None:
+        self.delete_selection.setEnabled(name != _NO_SELECTION)
+        if name == _NO_SELECTION:
+            return
+        entries = self.saved_selections().get(name)
+        if entries is not None:
+            self.apply_entries(entries, f'"{name}"')
+            self._store(self.saved_selections(), name)
+
+    def apply_entries(self, entries, label: str) -> None:
+        """Tick exactly the signals *entries* name, and say how many of the
+        entries this file has; the ones it lacks are in the tooltip."""
+        items = self._items()
+        picked, missing = apply_selection(
+            entries, [item.data(Qt.ItemDataRole.UserRole)[0] for item in items])
+        picked = set(picked)
+        with QSignalBlocker(self.list):
+            for number, item in enumerate(items):
+                item.setCheckState(Qt.CheckState.Checked if number in picked
+                                   else Qt.CheckState.Unchecked)
+        total = len([e for e in entries if e.strip()])
+        text = f'Applied {label}: {total - len(missing)} of {total} found'
+        if missing:
+            text += f' · {len(missing)} not in this file'
+        self.applied.setText(text)
+        self.applied.setToolTip('Not in this file:\n' + '\n'.join(missing) if missing else '')
+        self._show_count()
+
+    def ticked_names(self) -> list[str]:
+        return selection_of(name for name, _group, _index in self.chosen())
+
+    def _save_selection(self) -> None:
+        names = self.ticked_names()
+        if not names:
+            self.applied.setText('Tick the signals to save first.')
+            return
+        current = self.selection.currentText()
+        name, ok = QInputDialog.getText(
+            self, 'Save selection', 'Name of the selection:',
+            text='' if current == _NO_SELECTION else current)
+        name = name.strip()
+        if not ok or not name or name == _NO_SELECTION:
+            return
+        selections = self.saved_selections()
+        selections[name] = names
+        self._store(selections, name)
+        self._fill_selections(name)
+        self.applied.setText(f'Saved "{name}": {len(names)} signals')
+
+    def _delete_selection(self) -> None:
+        name = self.selection.currentText()
+        selections = self.saved_selections()
+        if selections.pop(name, None) is None:
+            return
+        self._store(selections, None)
+        self._fill_selections(None)
+        self.applied.setText(f'Deleted "{name}"')
+
+    def _import_selection(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, 'Import signal list', '', _LIST_FILTER)
+        if not path:
+            return
+        try:
+            entries = read_selection(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            self.applied.setText(f'The list could not be read: {exc}')
+            return
+        self.apply_entries(entries, f'"{Path(path).name}"')
+
+    def _export_selection(self) -> None:
+        names = self.ticked_names()
+        if not names:
+            self.applied.setText('Tick the signals to export first.')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export signal list', 'signals.txt', _LIST_FILTER)
+        if not path:
+            return
+        try:
+            write_selection(path, names)
+        except OSError as exc:
+            self.applied.setText(f'The list could not be written: {exc}')
+            return
+        self.applied.setText(f'Exported {len(names)} signal names to {Path(path).name}')
 
     def _items(self) -> list[QListWidgetItem]:
         return [self.list.item(i) for i in range(self.list.count())]
@@ -147,10 +303,11 @@ class SignalPicker(QDialog):
 
 
 class ConverterDialog(QDialog):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, settings_path=None) -> None:
         super().__init__(parent)
         self.setWindowTitle('Convert files')
         self.resize(560, 420)
+        self._settings_path = settings_path
         self._job: _Job | None = None
         self.keep: list[tuple[str, int, int]] = []
 
@@ -294,7 +451,8 @@ class ConverterDialog(QDialog):
     def pick_signals(self) -> None:
         if self._kind() != 'mdf':
             return
-        picker = SignalPicker(list_signals(self.inputs()[0]), self.keep, self)
+        picker = SignalPicker(list_signals(self.inputs()[0]), self.keep, self,
+                              settings_path=self._settings_path)
         if picker.exec():
             self.keep = picker.chosen()
             self._update_options()

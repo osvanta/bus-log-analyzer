@@ -36,6 +36,7 @@ def test_statistics_of_a_range_match_numpy():
     assert stats.minimum == pytest.approx(expected.min())
     assert stats.maximum == pytest.approx(expected.max())
     assert stats.mean == pytest.approx(expected.mean())
+    assert stats.std == pytest.approx(expected.std())
     assert stats.rms == pytest.approx(np.sqrt(np.mean(expected ** 2)))
 
 
@@ -52,7 +53,7 @@ def test_a_range_without_samples_holds_the_last_value_before_it():
     ts = np.array([0.0, 1.0, 2.0])
     vs = np.array([5.0, -7.0, 9.0])
     held = range_statistics(ts, vs, 1.2, 1.8, hold=True)
-    assert (held.minimum, held.maximum, held.mean, held.rms, held.samples) == (-7.0, -7.0, -7.0, 7.0, 0)
+    assert (held.minimum, held.maximum, held.mean, held.std, held.rms, held.samples) ==         (-7.0, -7.0, -7.0, 0.0, 7.0, 0)
     assert range_statistics(ts, vs, 1.2, 1.8) is None            # sample-based only
     assert range_statistics(ts, vs, -2.0, -1.0, hold=True) is None   # nothing before it
 
@@ -74,8 +75,25 @@ def test_chunks_and_time_order_do_not_matter(monkeypatch):
     chunked = range_statistics(ts, vs, 20.0, 80.0)
     assert chunked.samples == whole.samples
     assert chunked.mean == pytest.approx(whole.mean)
+    assert chunked.std == pytest.approx(whole.std)
+    assert chunked.std == pytest.approx(vs[(ts >= 20.0) & (ts <= 80.0)].std())
     assert chunked.rms == pytest.approx(whole.rms)
     assert (chunked.minimum, chunked.maximum) == (whole.minimum, whole.maximum)
+
+
+def test_std_dev_keeps_its_precision_under_a_large_offset(monkeypatch):
+    # A value of a million that moves by ±0.5: subtracting squares would
+    # lose the deviation in rounding; chunk means keep it.
+    monkeypatch.setattr(signal_statistics, 'CHUNK', 3)
+    vs = 1e6 + np.tile([-0.5, 0.5], 50)
+    stats = range_statistics(np.arange(100.0), vs, 0.0, 99.0)
+    assert stats.std == pytest.approx(0.5, rel=1e-9)
+    assert stats.mean == pytest.approx(1e6, rel=1e-12)
+
+
+def test_a_single_sample_has_no_spread():
+    stats = range_statistics(np.array([1.0]), np.array([42.0]), 0.0, 2.0)
+    assert (stats.mean, stats.std, stats.samples) == (42.0, 0.0, 1)
 
 
 # ── The signal table ─────────────────────────────────────────────────────
@@ -124,13 +142,14 @@ def test_columns_are_hidden_until_asked_for(panel):
 
 def test_statistics_over_the_visible_range(shown):
     assert _stats_row(shown, 'Speed') == ['10.000', '19.000', '14.500',
+                                          f'{np.arange(10, 20).std():.3f}',
                                           f'{np.sqrt(np.mean(np.arange(10, 20) ** 2)):.3f}', '10']
 
 
 def test_a_range_between_two_samples_shows_the_held_value(shown, monkeypatch):
     monkeypatch.setattr(shown, '_visible_x_range', lambda: [10.2, 10.7])
     shown._update_statistics()
-    assert _stats_row(shown, 'Speed') == ['10.000', '10.000', '10.000', '10.000', '0']
+    assert _stats_row(shown, 'Speed') == ['10.000', '10.000', '10.000', '0.000', '10.000', '0']
 
 
 def test_they_are_in_the_signals_colour(shown):
@@ -146,8 +165,8 @@ def test_they_are_in_the_signals_colour(shown):
 
 
 def test_label_and_hidden_signals_stay_blank(shown):
-    assert _stats_row(shown, 'Gear') == [''] * 5
-    assert _stats_row(shown, 'Temp') == [''] * 5
+    assert _stats_row(shown, 'Gear') == [''] * 6
+    assert _stats_row(shown, 'Temp') == [''] * 6
 
 
 def test_between_the_cursors_when_both_are_on(shown, qapp):
