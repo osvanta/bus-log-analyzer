@@ -20,8 +20,8 @@ from PySide6.QtCore import (
     QItemSelectionModel, QEvent,
 )
 from PySide6.QtGui import (
-    QAction, QBrush, QColor, QDrag, QDragEnterEvent, QDropEvent, QFont, QPen, QPainter,
-    QPalette,
+    QAction, QBrush, QColor, QCursor, QDrag, QDragEnterEvent, QDropEvent, QFont,
+    QKeySequence, QPen, QPainter, QPalette,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -132,6 +132,47 @@ class _CursorLine(pg.InfiniteLine):
                 line.update()
 
 
+#: Markers: dashed amber lines, named at the top of the plot.
+_MARKER_COLOR = '#E8A317'
+
+
+@dataclass(slots=True)
+class PlotMarker:
+    """A time the user marked, on the plot's time base, and its name."""
+    time: float
+    name: str
+
+
+class _MarkerLine(pg.InfiniteLine):
+    """One marker's line on one plot. Dragged, it moves the marker (and its
+    lines on the other rows); double-clicked, it asks for a new name;
+    right-clicked, it offers Rename, Move Cursor 1 here and Delete."""
+
+    def __init__(self, panel: 'PlotPanel', marker: PlotMarker, *, named: bool) -> None:
+        style = Qt.PenStyle.DashLine
+        super().__init__(
+            pos=marker.time, angle=90, movable=True,
+            pen=pg.mkPen(color=_MARKER_COLOR, width=1.2, style=style),
+            hoverPen=pg.mkPen(color=_MARKER_COLOR, width=3.0, style=style),
+            label=marker.name if named else None,
+            labelOpts={'position': 0.97, 'color': _MARKER_COLOR, 'movable': False})
+        self.marker = marker
+        self.siblings: list[_MarkerLine] = [self]
+        self._panel = weakref.ref(panel)
+
+    def mouseClickEvent(self, ev) -> None:
+        panel = self._panel()
+        if panel is not None and ev.button() == Qt.MouseButton.RightButton:
+            ev.accept()
+            panel.marker_menu(self.marker).exec(QCursor.pos())
+            return
+        if panel is not None and ev.button() == Qt.MouseButton.LeftButton and ev.double():
+            ev.accept()
+            panel.rename_marker_interactively(self.marker)
+            return
+        super().mouseClickEvent(ev)
+
+
 class _LeftAxis(pg.AxisItem):
     """Left AxisItem that keeps its title adjacent to tick labels even when setWidth()
     expands the item far beyond its natural content width.
@@ -237,6 +278,23 @@ class _ZoomViewBox(pg.ViewBox):
         else:
             self._zoom_box.setRect(box)
             self._zoom_box.show()
+
+    def raiseContextMenu(self, ev) -> None:
+        """The plot's right-click menu, with the marker commands for the time
+        under the mouse on top of pyqtgraph's own."""
+        own = self.getMenu(ev)
+        if own is None:
+            return
+        if hasattr(own, 'updateState'):
+            own.updateState()
+        menu = self._panel._make_menu()
+        self._panel._add_marker_actions(menu, self.mapSceneToView(ev.scenePos()).x())
+        menu.addSeparator()
+        for action in own.actions():
+            menu.addAction(action)
+        self.scene().addParentContextMenus(self, menu, ev)
+        self._context_menu = menu        # kept while it is open
+        menu.popup(ev.screenPos().toPoint())
 
 
 #: Line styles offered for a plotted signal, in menu order.
@@ -655,7 +713,7 @@ _RANGE_CHUNK = 1 << 20
 
 #: The signal table's statistics columns, after its seven others; hidden
 #: until turned on from the table header's menu.
-STAT_COLUMNS = ('Min', 'Max', 'Mean', 'RMS', 'Samples')
+STAT_COLUMNS = ('Min', 'Max', 'Mean', 'Std dev', 'RMS', 'Samples')
 _STAT_FIRST = 7
 #: Cursor 2 minus Cursor 1, per signal. Last by index, shown after Cursor 2.
 DELTA_COLUMN = 'Δ C2−C1'
@@ -869,6 +927,8 @@ class PlotPanel(QWidget):
     columnChoicesChanged = Signal(dict)
     # "Show measurement events" was ticked or unticked in a plot's menu.
     eventsToggled = Signal(bool)
+    # Cursor 1 is on and at this time, moved by any means: the Trace follows.
+    cursor1Moved = Signal(float)
     # "Remove all signals" in the signal table's menu: the main window clears
     # the plot, as its Clear Plot button does.
     clearRequested = Signal()
@@ -972,6 +1032,9 @@ class PlotPanel(QWidget):
         self.events_action = QAction('Show measurement events', self)
         self.events_action.setCheckable(True)
         self.events_action.toggled.connect(self._on_events_toggled)
+        # Markers the user set, by time, and the lines drawn for them.
+        self._markers: list[PlotMarker] = []
+        self._marker_lines: list[tuple[object, _MarkerLine]] = []
         self._install_plot_background_menu()
         self._install_plot_click_deselect()
 
@@ -2902,6 +2965,8 @@ class PlotPanel(QWidget):
         self._schedule_statistics()   # between the cursors, they may have moved
         if self.table_view_active() and self._cursor1_enabled:
             self.tabular.select_time(self.v_line.value())
+        if self._cursor1_enabled:
+            self.cursor1Moved.emit(float(self.v_line.value()))
         x1 = self.v_line.value()
         x2 = self.v_line2.value()
         if self._cursor1_enabled and self._cursor2_enabled:
@@ -2969,6 +3034,133 @@ class PlotPanel(QWidget):
                     labelOpts={'position': 0.92, 'color': color, 'movable': False})
                 plot_item.addItem(line, ignoreBounds=True)
                 self._event_lines.append((plot_item, line))
+
+    # ── Markers ───────────────────────────────────────────────────────────
+
+    def markers(self) -> list[PlotMarker]:
+        """The markers, in time order."""
+        return list(self._markers)
+
+    def markers_config(self) -> list[dict]:
+        return [{'time': m.time, 'name': m.name} for m in self._markers]
+
+    def set_markers(self, markers) -> None:
+        """Replace every marker, from {'time', 'name'} dicts or (time, name)
+        pairs, as a configuration loads; anything unreadable is left out."""
+        parsed: list[PlotMarker] = []
+        for item in markers or ():
+            try:
+                time_s, name = ((item.get('time'), item.get('name'))
+                                if isinstance(item, dict) else item)
+                time_s = float(time_s)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(time_s):
+                parsed.append(PlotMarker(time_s, str(name or '').strip()
+                                         or self._next_marker_name(parsed)))
+        self._markers = sorted(parsed, key=lambda m: m.time)
+        self._draw_markers()
+
+    def _next_marker_name(self, markers: list[PlotMarker] | None = None) -> str:
+        """M1, M2, …: the first not taken."""
+        taken = {m.name for m in (self._markers if markers is None else markers)}
+        number = 1
+        while f'M{number}' in taken:
+            number += 1
+        return f'M{number}'
+
+    def add_marker(self, time_s: float, name: str | None = None) -> PlotMarker:
+        marker = PlotMarker(float(time_s), (name or '').strip() or self._next_marker_name())
+        self._markers.append(marker)
+        self._markers.sort(key=lambda m: m.time)
+        self._draw_markers()
+        return marker
+
+    def add_marker_at_cursor1(self) -> PlotMarker | None:
+        """A marker where Cursor 1 is; None while Cursor 1 is off."""
+        if not self._cursor1_enabled:
+            return None
+        return self.add_marker(self.v_line.value())
+
+    def rename_marker(self, marker: PlotMarker, name: str) -> None:
+        name = name.strip()
+        if name and marker in self._markers:
+            marker.name = name
+            self._draw_markers()
+
+    def rename_marker_interactively(self, marker: PlotMarker) -> None:
+        name, ok = QInputDialog.getText(self, 'Rename marker', 'Name:', text=marker.name)
+        if ok:
+            self.rename_marker(marker, name)
+
+    def remove_marker(self, marker: PlotMarker) -> None:
+        if marker in self._markers:
+            self._markers.remove(marker)
+            self._draw_markers()
+
+    def go_to_marker(self, marker: PlotMarker) -> None:
+        """Centre the view on *marker*, keeping the zoom."""
+        span = self._visible_x_range()
+        half = (span[1] - span[0]) / 2 if span else 1.0
+        self.center_on_time(marker.time, half)
+
+    def marker_menu(self, marker: PlotMarker) -> QMenu:
+        menu = self._make_menu()
+        menu.addAction('Rename…', lambda *_: self.rename_marker_interactively(marker))
+        # As a click on the plot does: Cursor 1 there, switched on if off.
+        menu.addAction('Move Cursor 1 here', lambda *_: self.plotAreaClicked.emit(marker.time))
+        menu.addAction('Delete marker', lambda *_: self.remove_marker(marker))
+        return menu
+
+    def _add_marker_actions(self, menu: QMenu, time_s: float | None = None) -> None:
+        """Add marker here (given a time), Add marker at Cursor 1, Go to
+        marker and Show measurement events, to a right-click menu."""
+        if time_s is not None:
+            menu.addAction('Add marker here', lambda *_: self.add_marker(time_s))
+        at_cursor = menu.addAction('Add marker at Cursor 1',
+                                   lambda *_: self.add_marker_at_cursor1())
+        at_cursor.setShortcut(QKeySequence('M'))
+        at_cursor.setShortcutVisibleInContextMenu(True)
+        at_cursor.setEnabled(self._cursor1_enabled)
+        go_to = menu.addMenu('Go to marker')
+        go_to.setEnabled(bool(self._markers))
+        for marker in self._markers:
+            go_to.addAction(f'{marker.name}  ·  {marker.time:.3f} s',
+                            lambda *_, m=marker: self.go_to_marker(m))
+        menu.addAction(self.events_action)
+
+    def _draw_markers(self) -> None:
+        for plot_item, line in self._marker_lines:
+            try:
+                plot_item.removeItem(line)
+            except Exception:
+                pass   # its plot was rebuilt away
+        self._marker_lines = []
+        if not self._markers:
+            return
+        targets = (self._stacked_plots if self._stacked_mode and self._stacked_plots
+                   else [self.plot.plotItem])
+        for marker in self._markers:
+            # Named on the top row only: the name once, the line on each row.
+            lines = [_MarkerLine(self, marker, named=row == 0)
+                     for row in range(len(targets))]
+            for plot_item, line in zip(targets, lines):
+                line.siblings = lines
+                line.sigDragged.connect(self._on_marker_dragged)
+                line.sigPositionChangeFinished.connect(self._on_marker_moved)
+                plot_item.addItem(line, ignoreBounds=True)
+                self._marker_lines.append((plot_item, line))
+
+    def _on_marker_dragged(self, line: _MarkerLine) -> None:
+        for other in line.siblings:
+            if other is not line:
+                other.blockSignals(True)
+                other.setPos(line.value())
+                other.blockSignals(False)
+
+    def _on_marker_moved(self, line: _MarkerLine) -> None:
+        line.marker.time = float(line.value())
+        self._markers.sort(key=lambda m: m.time)
 
     # ── Table view ────────────────────────────────────────────────────────
 
@@ -3062,6 +3254,10 @@ class PlotPanel(QWidget):
             act.setChecked(self._column_choices[name])
             if name in needs:
                 act.setToolTip(needs[name])
+            elif name == 'Std dev':
+                act.setToolTip('Standard deviation over the samples (divided by their '
+                               'number), between the cursors when both are on, else in '
+                               'the visible range.')
             elif name in STAT_COLUMNS:
                 act.setToolTip('Sample-based, between the cursors when both are on, '
                                'else in the visible range.')
@@ -3072,7 +3268,7 @@ class PlotPanel(QWidget):
     # ── Statistics columns ────────────────────────────────────────────────
 
     def statistics_columns_visible(self) -> bool:
-        """Whether any of Min / Max / Mean / RMS / Samples is shown."""
+        """Whether any of the statistics columns is shown."""
         return any(not self.table.isColumnHidden(_STAT_FIRST + i)
                    for i in range(len(STAT_COLUMNS)))
 
@@ -3116,7 +3312,8 @@ class PlotPanel(QWidget):
                                              hold=True)
                 texts = ([''] * len(STAT_COLUMNS) if stats is None else
                          [f'{stats.minimum:.3f}', f'{stats.maximum:.3f}',
-                          f'{stats.mean:.3f}', f'{stats.rms:.3f}', f'{stats.samples:,}'])
+                          f'{stats.mean:.3f}', f'{stats.std:.3f}', f'{stats.rms:.3f}',
+                          f'{stats.samples:,}'])
                 # In the signal's colour, as its name and cursor values are.
                 brush = QBrush(QColor(plotted.color if plotted is not None and plotted.visible
                                       else '#606060'))
@@ -3738,6 +3935,7 @@ class PlotPanel(QWidget):
         if self.table_view_active():
             self._fill_tabular()
         self._draw_events()   # on whichever plots the rebuild made
+        self._draw_markers()
         # Rebuild the key→row index used by _update_table_values on every cursor drag.
         self._row_lookup = {}
         for row in range(self.table.rowCount()):
@@ -3862,6 +4060,8 @@ class PlotPanel(QWidget):
         self._push_undo()
         self._items.clear()
         self.set_events([])   # they belong to the measurement being cleared
+        # Markers stay: they mark times of the measurement, not signals, and a
+        # configuration sets them before its Decode clears the plot.
         self._clear_rendered_items()
         self.table.setRowCount(0)
         self._current_key = None
@@ -4617,8 +4817,10 @@ class PlotPanel(QWidget):
             self._group_colors[new_name] = self._group_colors.pop(old_name)
         self._rebuild_curves(preserve_selection=True)
 
-    def _show_signal_menu(self, selected_keys: list, global_pos) -> None:
-        """Shared signal context menu used by table and stacked plot right-click."""
+    def _show_signal_menu(self, selected_keys: list, global_pos,
+                          time_s: float | None = None) -> None:
+        """Shared signal context menu used by table and stacked plot right-click;
+        *time_s*, the time under a right-click on a plot, offers a marker there."""
         menu = self._make_menu()
         has_sel   = bool(selected_keys)
         has_one   = len(selected_keys) == 1
@@ -4698,6 +4900,8 @@ class PlotPanel(QWidget):
         bg_act = QAction('Set plot background color...', menu)
         bg_act.triggered.connect(self._choose_plot_background_color)
         menu.addAction(bg_act)
+        menu.addSeparator()
+        self._add_marker_actions(menu, time_s)
         menu.exec(global_pos)
 
     def _add_remove_all_action(self, menu: QMenu) -> QAction:
@@ -4753,8 +4957,8 @@ class PlotPanel(QWidget):
                     keys = self._stacked_row_keys[i]
                     self._restore_selection(keys)
                     # QCursor.pos() is always reliable for screen coordinates
-                    from PySide6.QtGui import QCursor
-                    self._show_signal_menu(keys, QCursor.pos())
+                    self._show_signal_menu(keys, QCursor.pos(),
+                                           time_s=p.vb.mapSceneToView(pos).x())
                     try:
                         event.accept()
                     except Exception:

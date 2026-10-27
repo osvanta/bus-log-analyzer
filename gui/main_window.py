@@ -685,6 +685,7 @@ class MainWindow(QMainWindow):
         self._esc_rect_zoom.setEnabled(self.btn_zoom_rect.isChecked())
         QShortcut(QKeySequence('C'), self, activated=self._shortcut_change_signal_color)
         QShortcut(QKeySequence('R'), self, activated=self._shortcut_toggle_cursors)
+        QShortcut(QKeySequence('M'), self, activated=self._shortcut_add_marker)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=lambda: self.add_signals_to_plot(self.signal_tree.selected_signal_keys()))
         # Raw Frames hidden from GUI to prevent hang on large files — accessible via shortcut
         QShortcut(QKeySequence('Ctrl+Shift+R'), self, activated=self.show_raw_frames)
@@ -1159,7 +1160,8 @@ class MainWindow(QMainWindow):
         from gui.converter_dialog import ConverterDialog
         dialog = getattr(self, '_converter_dialog', None)
         if dialog is None:
-            dialog = self._converter_dialog = ConverterDialog(self)
+            dialog = self._converter_dialog = ConverterDialog(
+                self, settings_path=self._user_settings_path)
             source = self._measurement_file()
             if source:
                 dialog.set_inputs([Path(source)])
@@ -1308,6 +1310,7 @@ class MainWindow(QMainWindow):
         """Remove decoded and plotted state belonging to the previous file."""
         self.plot_panel.clear_all()
         self.plot_panel.discard_undo_history()
+        self.plot_panel.set_markers([])     # they mark times of the previous file
         self.plot_panel.set_measurement_file(None)
         self.signal_tree.set_payload({})
         self.signal_tree.set_generated_signals([])
@@ -1568,6 +1571,10 @@ class MainWindow(QMainWindow):
         if key:
             self.plot_panel._choose_color_for_key(str(key))
 
+    def _shortcut_add_marker(self) -> None:
+        if self.plot_panel.add_marker_at_cursor1() is None:
+            self._update_status('No marker added', 'Turn Cursor 1 on: M adds a marker where it is')
+
     def _shortcut_toggle_cursors(self) -> None:
         both_on = self.btn_cursor1.isChecked() and self.btn_cursor2.isChecked()
         target = not both_on
@@ -1584,7 +1591,13 @@ class MainWindow(QMainWindow):
             ) if self.store else 'Load a measurement file first.'
             QMessageBox.information(self, 'Trace unavailable', reason)
             return
-        self._raw_frame_dialog = RawFrameDialog(rfs, self)
+        self._raw_frame_dialog = RawFrameDialog(rfs, self, settings_path=self._user_settings_path)
+        # Picking a frame places a cursor there; Cursor 1 brings its frame into view.
+        self._raw_frame_dialog.timeClicked.connect(self._place_cursor1)
+        self._raw_frame_dialog.cursor2Requested.connect(self._place_cursor2)
+        self.plot_panel.cursor1Moved.connect(self._raw_frame_dialog.follow_time)
+        if self.btn_cursor1.isChecked():
+            self._raw_frame_dialog.follow_time(self.plot_panel.v_line.value())
         self._raw_frame_dialog.show()
         self._raw_frame_dialog.raise_()
         self._raw_frame_dialog.activateWindow()
@@ -2117,6 +2130,7 @@ class MainWindow(QMainWindow):
             'name_show_channel': self.plot_panel._name_show_channel,
             'name_show_message': self.plot_panel._name_show_message,           # Fix 4
             'table_column_widths': self.plot_panel.table_column_widths(),  # Fix 2
+            'markers': self.plot_panel.markers_config(),
         }
         path, _ = QFileDialog.getSaveFileName(self, 'Save configuration', 'osvanta_config.json', 'JSON Files (*.json)')
         if not path:
@@ -2257,6 +2271,8 @@ class MainWindow(QMainWindow):
         if bg:
             self.plot_panel.set_background_color(str(bg))
         self.plot_panel.set_group_colors(dict(data.get('group_colors') or {}))
+        markers = data.get('markers')
+        self.plot_panel.set_markers(markers if isinstance(markers, list) else [])
         multi_axis = bool(data.get('multi_axis', False))
         multistack = bool(data.get('multistack', False))
         stacked = bool(data.get('stacked', not multi_axis and not multistack))
@@ -2777,7 +2793,9 @@ class MainWindow(QMainWindow):
 
         base = float(getattr(self.store, 'base_ts', 0.0) or 0.0) if self.store else 0.0
         try:
-            count = write_mf4(series_items, path, base_ts=base, progress=progress)
+            markers = [(m.time, m.name) for m in self.plot_panel.markers()]
+            count = write_mf4(series_items, path, base_ts=base, events=markers,
+                              progress=progress)
         except Cancelled:
             self._log(f'{title}: cancelled; nothing was written.')
             return False
@@ -2854,6 +2872,7 @@ class MainWindow(QMainWindow):
         ('F9',              'Decode — read the measurement and decode it into signals'),
         ('Ctrl + S',        'Save configuration'),
         ('Ctrl + E',        'Export plotted signals'),
+        ('Ctrl + I',        'Measurement info'),
         ('F',               'Fit to Window — rescale X and Y to all data'),
         ('V',               'Fit Vertical — rescale Y only (keep current X)'),
         ('Z',               'Rectangle Zoom on/off — drag a box on the plot to zoom into it'),
@@ -2864,6 +2883,7 @@ class MainWindow(QMainWindow):
         ('Space',           'Plot selected signal(s) from the signal tree'),
         ('C',               'Change color of the selected signal'),
         ('R',               'Toggle Cursor 1 and Cursor 2 on/off together'),
+        ('M',               'Add a marker at Cursor 1; right-click the plot for more'),
         ('Click on plot',   'Place Cursor 1 there, switching it on if it is off'),
         ('Shift + click on plot', 'Place Cursor 2 there, switching it on if it is off'),
         ('Delete',          'Remove selected signal from plot'),

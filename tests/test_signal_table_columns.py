@@ -109,7 +109,7 @@ def test_the_menu_lists_every_optional_column_in_order(panel):
     names = [a.text() for a in panel._table_header_menu().actions() if not a.isSeparator()]
     assert names == list(OPTIONAL_COLUMNS) == [
         'Cursor 1', 'Cursor 2', 'Δ C2−C1', 'Unit', 'Axis',
-        'Min', 'Max', 'Mean', 'RMS', 'Samples']
+        'Min', 'Max', 'Mean', 'Std dev', 'RMS', 'Samples']
     checked = {a.text() for a in panel._table_header_menu().actions() if a.isChecked()}
     assert checked == {'Cursor 1', 'Cursor 2', 'Δ C2−C1', 'Unit', 'Axis'}
 
@@ -168,3 +168,8 @@ def test_the_choice_is_remembered(qapp, monkeypatch, tmp_path):
     finally:
         second.close()
         qapp.processEvents()
+
+
+def test_std_dev_says_how_it_is_computed(panel):
+    tip = _action(panel, 'Std dev').toolTip()
+    assert 'Standard deviation' in tip and 'divided by their number' in tip

@@ -11,6 +11,7 @@
 | ++f9++ | Decode: read the measurement and decode it into signals |
 | ++ctrl+s++ | Save configuration |
 | ++ctrl+e++ | Export plotted signals |
+| ++ctrl+i++ | Measurement info |
 | ++ctrl+shift+r++ | Open the Trace: the raw CAN and LIN frames |
 
 ## Calculated Signal
@@ -43,6 +44,7 @@
 | Key or mouse | Action |
 |---|---|
 | ++r++ | Switch Cursor 1 and Cursor 2 on or off together |
+| ++m++ | Add a marker at Cursor 1. Right-click the plot to add one anywhere or go to one |
 | Click on the plot | Place Cursor 1 there, switching it on if it is off |
 | ++shift+++click on the plot | Place Cursor 2 there, switching it on if it is off |
 

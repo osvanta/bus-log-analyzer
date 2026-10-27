@@ -42,17 +42,22 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 
 - Fast bulk loading and decoding for BLF, ASC, MDF/MF4, and CSV measurements.
 - Searchable channel/message/signal tree with multi-select plotting and drag-and-drop.
-- Indexed **Trace** of the raw CAN and LIN frames, with filtering and on-demand signal decode.
-- Formula-based **Calculated Signal** with arithmetic, comparisons, logical expressions, temporal operations, and a stateful diagnostic counter; the definitions are saved in configurations.
-- CSV and Excel (`.xlsx`) export using a selected signal's timestamps or a manually entered recurrence time.
-- JSON configuration save/load for measurement paths, database mapping, calculated signals, plotted order, groups, colors, visibility, axes, cursors, and display settings.
+- Indexed **Trace** of the raw CAN and LIN frames, with filtering and on-demand signal decode. Its **Δt** column shows the time since the previous frame with the same ID on the same channel, the bytes that changed since that frame are highlighted, and it can follow plot Cursor 1 both ways.
+- Formula-based **Calculated Signal** with arithmetic, comparisons, logical expressions, temporal operations, and a stateful diagnostic counter; **Insert function** (`Shift+F3`) lists every function by category, with how to use each. The definitions are saved in configurations.
+- **Statistics** in the signal table: Min, Max, Mean, Std dev, RMS and Samples, over the visible range or between the cursors, and the **Δ C2−C1** difference between the cursors. Right-click the table header to choose the columns.
+- **Table**: the plotted signals as a table, right of the plot, a row per sample time.
+- Named **markers** on the plot: add one where you right-click or at Cursor 1 (`M`), drag, rename, go to; they are saved in configurations and written into MF4 exports as events.
+- **File ▸ Measurement info** (`Ctrl+I`): the file's format, size, start time and duration, and for MF4 its header, events and attachments. MF4 events can be drawn on the plot.
+- Export of the plotted signals to CSV or Excel (`.xlsx`), on a selected signal's timestamps or a recurrence time you enter, or to MF4; **File ▸ Save decoded measurement as MF4** writes every decoded signal.
+- **Tools ▸ Convert files**: join, cut and resample measurements, keep chosen signals, and convert between BLF, ASC, MF4 and CSV. Signal selections can be saved by name and reused on other files, or shared as text files.
+- JSON configuration save/load for measurement paths, database mapping, calculated signals, plotted order, groups, colors, visibility, axes, cursors, markers, and display settings.
 - YAML rule-based diagnostics for expressions, ranges, fault flags, and message loss; optional GitHub Models analysis is available through `Ctrl+Shift+A`.
 
 ### Plotting
 
 - **Stacked** is the default mode and gives each signal its own lane and Y scale.
-- **Normal** overlays signals on one Y axis.
-- **Multi-Axis** groups axes by unit, with an optional individual axis per signal.
+- **Multi-Axis** overlays the signals, with one axis per unit and an optional individual axis per signal.
+- **MultiStack** has lanes that each hold several signals; drag signals into a lane to overlay them there.
 - Dual draggable cursors provide values and delta time; a click on the plot places Cursor 1 there and a Shift+click places Cursor 2. A cursor switched on always appears inside the visible window, and cursors are black on a light plot background and white on a dark one.
 - Fit-to-window and vertical-fit work across all plot modes while preserving the relevant view range.
 - After the plot mode buttons, Fit to Window, Fit Vertical, the cursors, the line mode, Show Data Points and Hide Line are black-and-white icons; pointing at one shows its name.
@@ -87,7 +92,7 @@ The portable build and CI release build use Python 3.12.
 3. Select **Decode** (`F9`).
 4. Search the signal tree, then double-click, drag, press `Space`, or use the context menu to plot signals.
 5. Use cursors, plot modes, data points, grouping, and fit controls as needed.
-6. In the **File** menu, select **Save configuration** to preserve the session, or **Export plotted signals** to choose CSV/Excel and its timestamp source.
+6. In the **File** menu, select **Save configuration** to preserve the session, or **Export plotted signals** to write them to CSV, Excel or MF4.
 7. Open the **Trace** when the source contains raw CAN frames.
 8. The **Help** menu has Getting started (`F1`), the keyboard shortcuts, GitHub Discussions for questions and ideas, GitHub issues for problems and feature requests, and About.
 
@@ -98,16 +103,21 @@ The portable build and CI release build use Python 3.12.
 | `F1` | Getting started, in the user guide |
 | `Ctrl+O` | Open Measurement |
 | `F9` | Decode |
+| `Ctrl+S` | Save configuration |
 | `Ctrl+E` | Export plotted signals |
+| `Ctrl+I` | Measurement info |
+| `Ctrl+Shift+R` | Open the Trace |
+| `Shift+F3` | Insert function, in Calculated Signal |
 | `F` | Fit X and Y to all visible data |
 | `V` | Fit Y to the current X range |
+| `Z` / `Esc` | Rectangle Zoom on or off / leave it |
+| `S` | Step Mode or Interpolation Mode |
 | `Space` | Plot selected signal-tree entries |
 | `C` | Change the selected signal color |
 | `R` | Toggle both cursors |
+| `M` | Add a marker at Cursor 1 |
 | `Delete` | Remove selected plotted signals |
 | `Ctrl+Z` | Undo the last plot action |
-| `Ctrl+S` | Save configuration |
-| `Ctrl+Shift+R` | Open the Trace |
 | `Ctrl+Shift+-` / `Ctrl+Shift++` | Collapse / expand signal-tree messages |
 
 

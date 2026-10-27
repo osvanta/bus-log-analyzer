@@ -6,27 +6,52 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QPalette
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QScrollBar, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QPushButton, QScrollBar, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from core.bus_types import channel_label
 from core.raw_frame_store import RawFrameStore
+from core.trace_differences import previous_frames, window_differences
+from gui.user_settings import read_setting, write_setting
 
 _WINDOW = 5_000
 _STEP   = 1_000
-_COL    = 7
+_COL    = 8
 # Typing in Search waits this long after the last key before searching.
 _SEARCH_PAUSE_MS = 250
+# Cursor 1 dragged on the plot: the Trace follows once it rests this long.
+_FOLLOW_PAUSE_MS = 60
+
+#: Columns by number.
+_TIME, _DELTA, _CHN, _ID, _NAME, _DIR, _DLC, _DATA = range(_COL)
+_HEADERS = ['Time (s)', 'Δt (ms)', 'Chn', 'ID', 'Name', 'Dir', 'DLC', 'Data / Value']
+
+#: Item data of the Data cell: which bytes changed, as a string of 0 and 1.
+_CHANGED_ROLE = Qt.ItemDataRole.UserRole + 1
+
+#: The user setting holding the Trace's choices, and their defaults.
+_OPTIONS_KEY = 'trace_options'
+_DEFAULT_OPTIONS = {'delta_column': True, 'highlight_changes': True, 'follow_cursor': True}
 
 
 def _fmt_t(t: float | None) -> str:
     return f'{t:.3f} s' if t is not None else '—'
+
+
+def _row(name: str = '', data: str = '') -> list[str]:
+    """The texts of a row under a frame: a name and a value, the rest empty."""
+    texts = [''] * _COL
+    texts[_NAME] = name
+    texts[_DATA] = data
+    return texts
 
 
 class _NavButton(QWidget):
@@ -51,6 +76,70 @@ class _NavButton(QWidget):
         self.btn.clicked.connect(slot)
 
 
+class _DataDelegate(QStyledItemDelegate):
+    """The Data column, with the bytes that changed since the previous frame
+    of the same kind drawn bold in the highlight colour."""
+
+    def __init__(self, dialog: 'RawFrameDialog') -> None:
+        super().__init__(dialog)
+        self._dialog = dialog
+
+    def _changes(self, index) -> str:
+        if not self._dialog.highlight_changes:
+            return ''
+        changed = index.data(_CHANGED_ROLE)
+        return changed if isinstance(changed, str) and '1' in changed else ''
+
+    @staticmethod
+    def colour(palette: QPalette) -> QColor:
+        """Orange, darker on a light background so it reads on both."""
+        light = palette.color(QPalette.ColorRole.Base).lightness() > 128
+        return QColor('#C25E00' if light else '#FFA640')
+
+    def paint(self, painter, option, index) -> None:
+        changed = self._changes(index)
+        if not changed:
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        opt.text = ''
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+        rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, widget)
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        plain = opt.palette.color(QPalette.ColorRole.HighlightedText if selected
+                                  else QPalette.ColorRole.Text)
+        bold = QFont(opt.font)
+        bold.setBold(True)
+        accent = self.colour(opt.palette)
+        painter.save()
+        x = rect.left() + 3
+        for number, byte in enumerate(text.split(' ')):
+            hit = number < len(changed) and changed[number] == '1'
+            font = bold if hit else opt.font
+            metrics = QFontMetrics(font)
+            painter.setFont(font)
+            painter.setPen(accent if hit else plain)
+            width = metrics.horizontalAdvance(byte + ' ')
+            painter.drawText(QRect(x, rect.top(), width, rect.height()),
+                             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                             byte)
+            x += width
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:
+        size = super().sizeHint(option, index)
+        if self._changes(index):
+            bold = QFont(option.font)
+            bold.setBold(True)
+            size.setWidth(max(size.width(),
+                              QFontMetrics(bold).horizontalAdvance(str(index.data())) + 12))
+        return size
+
+
 class RawFrameDialog(QDialog):
     """
     Raw CAN Frame viewer — on-disk sliding window, no frame cap.
@@ -59,19 +148,53 @@ class RawFrameDialog(QDialog):
     - Filtering uses vectorised numpy on in-memory arrays — no disk access
     - Rendering reads only the visible 5,000-frame window from disk
     - Signals decoded on-demand when a row is expanded
+
+    Δt is the time since the previous frame of the same ID on the same
+    channel, over the whole file whatever the filter; the bytes that changed
+    since that frame are highlighted. While "Follow Cursor 1" is on, picking a
+    frame asks for Cursor 1 there (*timeClicked*), and follow_time() brings
+    the frame at Cursor 1 into view.
     """
 
-    def __init__(self, raw_store: RawFrameStore, parent=None) -> None:
+    #: A frame was picked while following: Cursor 1 belongs at this time.
+    timeClicked = Signal(float)
+    #: "Set Cursor 2 here" on a frame.
+    cursor2Requested = Signal(float)
+
+    def __init__(self, raw_store: RawFrameStore, parent=None, *,
+                 settings_path: Path | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle('Trace — Raw CAN and LIN Frames')
         self.resize(1260, 750)
 
         self._raw_store = raw_store
         self._win_start = 0
+        self._window_times: tuple[float | None, float | None] = (None, None)
         self._is_expanded = False
+        self._settings_path = settings_path
+        saved = read_setting(settings_path, _OPTIONS_KEY, {}) if settings_path else {}
+        self._options = {name: bool(saved.get(name, default))
+                         if isinstance(saved, dict) else default
+                         for name, default in _DEFAULT_OPTIONS.items()}
 
         # _matching: None = all frames; else the matching frames' indices
         self._matching: np.ndarray | None = None
+
+        # The previous frame of each frame's kind, worked out in steps on a
+        # large file (the event loop runs between them).
+        self._previous = previous_frames(raw_store)
+        self._index_timer = QTimer(self)
+        self._index_timer.setInterval(0)
+        self._index_timer.timeout.connect(self._index_step)
+
+        # Following Cursor 1: the time asked for, set while the Trace moves
+        # its own selection so that move does not ask for a cursor in turn.
+        self._follow_time: float | None = None
+        self._following = False
+        self._follow_timer = QTimer(self)
+        self._follow_timer.setSingleShot(True)
+        self._follow_timer.setInterval(_FOLLOW_PAUSE_MS)
+        self._follow_timer.timeout.connect(self._follow_now)
 
         # ── Filter controls ───────────────────────────────────────────────
         self.search_edit = QLineEdit()
@@ -86,6 +209,12 @@ class RawFrameDialog(QDialog):
         for key in raw_store.channel_keys():
             self.channel_combo.addItem(channel_label(key), key)
 
+        self.follow_button = QPushButton('⇄ Follow Cursor 1')
+        self.follow_button.setCheckable(True)
+        self.follow_button.setChecked(self._options['follow_cursor'])
+        self.follow_button.setToolTip(
+            'On: picking a frame moves plot Cursor 1 to it, and moving Cursor 1 '
+            'brings its frame into view.')
         self.expand_btn   = QPushButton('Expand All')
         self.collapse_btn = QPushButton('Collapse All')
 
@@ -94,12 +223,18 @@ class RawFrameDialog(QDialog):
         top_row.addWidget(self.search_edit, 1)
         top_row.addWidget(QLabel('Channel'))
         top_row.addWidget(self.channel_combo)
+        top_row.addWidget(self.follow_button)
         top_row.addWidget(self.expand_btn)
         top_row.addWidget(self.collapse_btn)
 
         # ── Status ────────────────────────────────────────────────────────
         self.status_label = QLabel()
         self.status_label.setStyleSheet('color: #8B949E; font-size: 11px;')
+        self.cursor_label = QLabel()
+        self.cursor_label.setStyleSheet('color: #8B949E; font-size: 11px;')
+        status_row = QHBoxLayout()
+        status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.cursor_label)
 
         # ── Navigation bar ────────────────────────────────────────────────
         self._nb_start = _NavButton('◀◀ Start')
@@ -159,17 +294,29 @@ class RawFrameDialog(QDialog):
         # ── Tree ──────────────────────────────────────────────────────────
         self.tree = QTreeWidget()
         self.tree.setColumnCount(_COL)
-        self.tree.setHeaderLabels(
-            ['Time (s)', 'Chn', 'ID', 'Name', 'Dir', 'DLC', 'Data / Value']
-        )
+        self.tree.setHeaderLabels(_HEADERS)
+        self.tree.headerItem().setToolTip(
+            _DELTA, 'Time since the previous frame with the same ID on the same '
+                    'channel, in milliseconds, over the whole file.')
+        self.tree.headerItem().setToolTip(
+            _DATA, 'Bytes that changed since the previous frame with the same ID '
+                   'on the same channel are bold and coloured.')
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(False)
         self.tree.setRootIsDecorated(True)
+        self.tree.setItemDelegateForColumn(_DATA, _DataDelegate(self))
+        self.tree.setColumnHidden(_DELTA, not self._options['delta_column'])
+        header = self.tree.header()
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        header.customContextMenuRequested.connect(
+            lambda pos: self.header_menu().exec(header.mapToGlobal(pos)))
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_row_menu)
 
         # ── Layout ────────────────────────────────────────────────────────
         layout = QVBoxLayout(self)
         layout.addLayout(top_row)
-        layout.addWidget(self.status_label)
+        layout.addLayout(status_row)
         layout.addLayout(nav_row)
         layout.addWidget(self.tree, 1)
 
@@ -193,8 +340,61 @@ class RawFrameDialog(QDialog):
         self.expand_btn.clicked.connect(self._expand_window)
         self.collapse_btn.clicked.connect(self._collapse_all)
         self.tree.itemExpanded.connect(self._on_item_expanded)
+        self.tree.currentItemChanged.connect(self._on_current_changed)
+        self.follow_button.toggled.connect(self._on_follow_toggled)
 
+        # A file that fits one step is indexed at once; a larger one in
+        # steps, its Δt filled in when done.
+        if self._previous.progress == 0 and self._previous.count <= _small_file():
+            self._previous.build()
         self._on_filter_changed()
+        if not self._previous.ready:
+            self._index_timer.start()
+
+    # ── Options ───────────────────────────────────────────────────────────
+
+    @property
+    def highlight_changes(self) -> bool:
+        return self._options['highlight_changes']
+
+    def delta_column_shown(self) -> bool:
+        return not self.tree.isColumnHidden(_DELTA)
+
+    def set_option(self, name: str, on: bool) -> None:
+        """Turn one of the Trace's choices on or off, and remember it."""
+        if self._options.get(name) == on:
+            return
+        self._options[name] = on
+        if name == 'delta_column':
+            self.tree.setColumnHidden(_DELTA, not on)
+            if on:
+                self.tree.resizeColumnToContents(_DELTA)
+        elif name == 'highlight_changes':
+            self.tree.viewport().update()
+            self.tree.resizeColumnToContents(_DATA)
+        elif name == 'follow_cursor' and self.follow_button.isChecked() != on:
+            self.follow_button.setChecked(on)
+        if self._settings_path is not None:
+            try:
+                write_setting(self._settings_path, _OPTIONS_KEY, dict(self._options))
+            except OSError:
+                pass        # the choice still holds for this session
+
+    def header_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        for name, text, tip in (
+                ('delta_column', 'Δt column',
+                 'Time since the previous frame with the same ID on the same channel.'),
+                ('highlight_changes', 'Highlight changed bytes',
+                 'Bytes that changed since that frame, bold and coloured.')):
+            action = QAction(text, menu)
+            action.setCheckable(True)
+            action.setChecked(self._options[name])
+            action.setToolTip(tip)
+            action.toggled.connect(lambda on, n=name: self.set_option(n, on))
+            menu.addAction(action)
+        return menu
 
     # ── Filter ────────────────────────────────────────────────────────────
 
@@ -220,6 +420,23 @@ class RawFrameDialog(QDialog):
         if self._matching is None:
             return pos
         return int(self._matching[pos])
+
+    def _position_at(self, target_t: float, *, last: bool = False) -> int:
+        """Position in the matching list of the first frame at or after
+        *target_t*; with *last*, of the last frame at or before it (0 when
+        there is none). Searched in halves: frames are in time order, or
+        nearly so."""
+        n = self._total_matching()
+        ts_store = np.frombuffer(self._raw_store.timestamps, dtype=np.float64)
+        lo, hi = 0, n
+        while lo < hi:
+            mid = (lo + hi) // 2
+            t = ts_store[self._frame_index(mid)]
+            if t <= target_t if last else t < target_t:
+                lo = mid + 1
+            else:
+                hi = mid
+        return max(0, lo - 1) if last else min(lo, n - 1)
 
     # ── Navigation ────────────────────────────────────────────────────────
 
@@ -248,17 +465,7 @@ class RawFrameDialog(QDialog):
         n = self._total_matching()
         if n == 0:
             return
-        ts_store = np.frombuffer(self._raw_store.timestamps, dtype=np.float64)
-
-        # Binary search in the matching subset
-        lo, hi = 0, n - 1
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if ts_store[self._frame_index(mid)] < target_t:
-                lo = mid + 1
-            else:
-                hi = mid
-
+        lo = self._position_at(target_t)
         start = max(0, min(lo - _WINDOW // 2, n - _WINDOW))
         self._set_window(start)
 
@@ -293,14 +500,24 @@ class RawFrameDialog(QDialog):
         # Fetch records from store (disk read for data bytes)
         records = self._raw_store.get_window(indices)
 
+        delta = changed = None
+        if indices and self._previous.ready:
+            delta, changed = window_differences(
+                self._raw_store, self._previous.previous, indices)
+
         top_items: list[QTreeWidgetItem] = []
         for rec in records:
+            position = len(top_items)
             ch_text = channel_label(rec.channel_key)
             id_text = f'{rec.arbitration_id:X}'
             data_hex = ' '.join(f'{b:02X}' for b in rec.data[:rec.dlc])
+            delta_text = ''
+            if delta is not None and delta[position] == delta[position]:
+                delta_text = f'{delta[position] * 1000:.3f}'
 
             top = QTreeWidgetItem([
                 f'{rec.time_s:.6f}',
+                delta_text,
                 ch_text,
                 id_text,
                 rec.frame_name or ('(decoded)' if rec.decoded else '(unmatched)'),
@@ -308,8 +525,15 @@ class RawFrameDialog(QDialog):
                 str(rec.dlc),
                 data_hex,
             ])
+            top.setTextAlignment(_DELTA, Qt.AlignmentFlag.AlignRight
+                                 | Qt.AlignmentFlag.AlignVCenter)
+            if changed is not None:
+                shown = changed[position, :len(rec.data[:rec.dlc])]
+                if shown.any():
+                    top.setData(_DATA, _CHANGED_ROLE,
+                                ''.join('1' if c else '0' for c in shown))
             # Store store-index in item data for lazy signal decode
-            top.setData(0, Qt.ItemDataRole.UserRole, indices[len(top_items)])
+            top.setData(0, Qt.ItemDataRole.UserRole, indices[position])
             # Placeholder child so the expand arrow appears for decoded frames
             if rec.decoded:
                 placeholder = QTreeWidgetItem(['…'])
@@ -318,8 +542,12 @@ class RawFrameDialog(QDialog):
             top_items.append(top)
 
         self.tree.setUpdatesEnabled(False)
-        self.tree.clear()
-        self.tree.insertTopLevelItems(0, top_items)
+        self._following = True          # clearing moves the current item
+        try:
+            self.tree.clear()
+            self.tree.insertTopLevelItems(0, top_items)
+        finally:
+            self._following = False
         self.tree.setUpdatesEnabled(True)
 
         for col in range(_COL):
@@ -340,11 +568,115 @@ class RawFrameDialog(QDialog):
         self._nb_fwd.set_time(_ts(min(n - 1, w_start + _WINDOW + _STEP - 1)))
         self._nb_end.set_time(_ts(n - 1))
 
-        self.status_label.setText(
-            f'Showing frames {w_start+1:,}–{w_end:,} of {n:,} matching  '
-            f'({_fmt_t(t_win_s)} → {_fmt_t(t_win_e)})  '
-            f'| Total in file: {n_store:,}'
-        )
+        self._show_status(t_win_s, t_win_e)
+
+    def _show_status(self, t_win_s=None, t_win_e=None, *, keep_times: bool = False) -> None:
+        if not keep_times:
+            self._window_times = (t_win_s, t_win_e)
+        t_win_s, t_win_e = self._window_times
+        n = self._total_matching()
+        w_end = min(self._win_start + _WINDOW, n)
+        text = (f'Showing frames {self._win_start+1:,}–{w_end:,} of {n:,} matching  '
+                f'({_fmt_t(t_win_s)} → {_fmt_t(t_win_e)})  '
+                f'| Total in file: {len(self._raw_store):,}')
+        if not self._previous.ready:
+            text += f'  | Δt: working out… {self._previous.progress:.0%}'
+        self.status_label.setText(text)
+
+    # ── Δt index, in steps ───────────────────────────────────────────────
+
+    def _index_step(self) -> None:
+        try:
+            done = self._previous.step()
+        except RuntimeError:            # the measurement was closed
+            self._index_timer.stop()
+            return
+        if done:
+            self._index_timer.stop()
+            current = self._current_frame()
+            self._render_window()
+            if current is not None:
+                self._select_frame(current)
+        else:
+            self._show_status(keep_times=True)
+
+    # ── Cursor 1 ──────────────────────────────────────────────────────────
+
+    def _current_frame(self) -> int | None:
+        """Store index of the frame of the current row (or of its signal)."""
+        item = self.tree.currentItem()
+        while item is not None and item.parent() is not None:
+            item = item.parent()
+        if item is None:
+            return None
+        index = item.data(0, Qt.ItemDataRole.UserRole)
+        return int(index) if index is not None and index >= 0 else None
+
+    def _frame_time(self, index: int) -> float:
+        return float(np.frombuffer(self._raw_store.timestamps, dtype=np.float64)[index])
+
+    def _select_frame(self, index: int) -> bool:
+        """Make the row of store frame *index* current, if on screen."""
+        for row in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(row)
+            if item.data(0, Qt.ItemDataRole.UserRole) == index:
+                self._following = True
+                try:
+                    self.tree.setCurrentItem(item)
+                finally:
+                    self._following = False
+                self.tree.scrollToItem(item, QTreeWidget.ScrollHint.PositionAtCenter)
+                return True
+        return False
+
+    def _on_current_changed(self, current, _previous) -> None:
+        if self._following or current is None or not self.follow_button.isChecked():
+            return
+        index = self._current_frame()
+        if index is not None:
+            self.timeClicked.emit(self._frame_time(index))
+
+    def _on_follow_toggled(self, on: bool) -> None:
+        self.set_option('follow_cursor', on)
+        if on and self._follow_time is not None:
+            self._follow_now()
+
+    def follow_time(self, t: float) -> None:
+        """Cursor 1 is at *t*: show its frame (the last at or before *t*)
+        once Cursor 1 rests, while following and shown."""
+        self._follow_time = t
+        self.cursor_label.setText(f'Cursor 1: {t:.6f} s')
+        self._follow_timer.start()
+
+    def _follow_now(self) -> None:
+        t = self._follow_time
+        if t is None or not self.follow_button.isChecked() or not self.isVisible():
+            return
+        current = self._current_frame()
+        if current is not None and self._frame_time(current) == t:
+            return          # picked here: that frame stays the current one
+        if not self._total_matching():
+            return
+        position = self._position_at(t, last=True)
+        if not self._win_start <= position < self._win_start + _WINDOW:
+            self._set_window(position - _WINDOW // 2)
+        self._select_frame(self._frame_index(position))
+
+    def _show_row_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        self.tree.setCurrentItem(item)
+        index = self._current_frame()
+        if index is None:
+            return
+        self.row_menu(self._frame_time(index)).exec(self.tree.viewport().mapToGlobal(pos))
+
+    def row_menu(self, t: float) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction('Set Cursor 1 here', lambda: self.timeClicked.emit(t))
+        menu.addAction('Set Cursor 2 here', lambda: self.cursor2Requested.emit(t))
+        return menu
 
     # ── Lazy signal decode on expand ──────────────────────────────────────
 
@@ -380,7 +712,7 @@ class RawFrameDialog(QDialog):
             decoder = getattr(self._raw_store, 'decoder', None)
 
         if decoder is None:
-            item.addChild(QTreeWidgetItem(['', '', '', '(no DBC)', '', '', '']))
+            item.addChild(QTreeWidgetItem(_row(name='(no DBC)')))
             return
 
         raw_frame = RawFrame(
@@ -399,12 +731,12 @@ class RawFrameDialog(QDialog):
             samples = []
 
         if not samples:
-            item.addChild(QTreeWidgetItem(['', '', '', '(no signals)', '', '', '']))
+            item.addChild(QTreeWidgetItem(_row(name='(no signals)')))
             return
 
         for s in samples:
             val_str = f'{s.value} {s.unit}'.strip()
-            child = QTreeWidgetItem(['', '', '', s.signal_name, '', '', val_str])
+            child = QTreeWidgetItem(_row(name=s.signal_name, data=val_str))
             child.setData(0, Qt.ItemDataRole.UserRole, -2)
             item.addChild(child)
 
@@ -417,3 +749,9 @@ class RawFrameDialog(QDialog):
     def _collapse_all(self) -> None:
         self._is_expanded = False
         self.tree.collapseAll()
+
+
+def _small_file() -> int:
+    """Frames the Trace indexes at once, before it opens."""
+    from core import trace_differences
+    return trace_differences.CHUNK

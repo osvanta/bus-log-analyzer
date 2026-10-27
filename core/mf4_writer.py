@@ -88,16 +88,21 @@ def _buckets(items: Sequence[SignalSeries]) -> list[tuple[np.ndarray, list[Signa
 
 def write_mf4(series_items: Iterable[SignalSeries], path: str | Path, *,
               base_ts: float = 0.0,
+              events: Iterable[tuple[float, str]] = (),
               progress: Callable[[int, int], None] | None = None) -> int:
     """Write *series_items* to *path*; returns how many signals were written.
 
     *base_ts* is the recording's start as the store has it (an epoch time
     for BLF and ASC); it becomes the header's start time when it is one.
+    *events* are (time, name) on the signals' time base, written as MF4
+    marker events: the plot's markers, which "Show measurement events" then
+    draws when the file is opened again.
     *progress(done, total)* is called per message and may raise Cancelled.
     """
     from asammdf import MDF, Signal
     from asammdf.blocks import v4_constants as v4c
     from asammdf.blocks.source_utils import Source
+    from asammdf.blocks.v4_blocks import EventBlock
 
     groups: dict[tuple, list[SignalSeries]] = {}
     for series in series_items:
@@ -126,6 +131,15 @@ def write_mf4(series_items: Iterable[SignalSeries], path: str | Path, *,
                 written += len(signals)
             if progress is not None:
                 progress(done, total)
+        for time_s, name in events:
+            # A point in time, in seconds: sync_base × sync_factor.
+            event = EventBlock(event_type=v4c.EVENT_TYPE_MARKER,
+                               sync_type=v4c.EVENT_SYNC_TYPE_S,
+                               range_type=v4c.EVENT_RANGE_TYPE_POINT,
+                               cause=v4c.EVENT_CAUSE_USER,
+                               sync_base=1, sync_factor=float(time_s))
+            event.name = str(name)
+            mdf.events.append(event)
         mdf.save(str(path), overwrite=True)
     finally:
         mdf.close()
