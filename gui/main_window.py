@@ -69,7 +69,7 @@ from core.bus_types import (
     sort_key,
 )
 from core.channel_config import ChannelConfig
-from gui import app_data, app_log, survey_prompt
+from gui import app_data, app_log, session_restore, survey_prompt
 from gui.brand_logo import BrandLogo, leave_logo_unframed
 from gui.dbc_manager import DBCManagerDialog
 from gui.edge_tab import EdgeTab
@@ -302,6 +302,20 @@ class MainWindow(QMainWindow):
         self._survey_timer.setSingleShot(True)
         self._survey_timer.setInterval(survey_prompt.REQUEST_DELAY_MS)
         self._survey_timer.timeout.connect(self._count_start_and_ask_for_survey)
+        # The last session, asked about on close, kept up to date while the
+        # user works and offered at the next start: see gui.session_restore.
+        self._session_restore = session_restore.enabled(sys.argv)
+        self._session_path = self._settings_folder() / session_restore.FILE_NAME
+        self._session_offered = False
+        self._session_settled = False
+        # The last written session, as (configuration, saved as).
+        self._session_written: tuple[dict, str | None] | None = None
+        self._session_timer = QTimer(self)
+        self._session_timer.setInterval(session_restore.REFRESH_INTERVAL_MS)
+        self._session_timer.timeout.connect(self._refresh_last_session)
+        # The configuration file last saved or opened, and what it holds.
+        self._config_path: str | None = None
+        self._config_snapshot: dict | None = None
         # Hidden, session-only CAN load forensics (Ctrl+Alt+D).
         self._debug_mode = False
         self._debug_window: LoadDebugWindow | None = None
@@ -2090,7 +2104,11 @@ class MainWindow(QMainWindow):
             self._plot_calculated_signals()
 
     def save_configuration(self) -> None:
-        config = {
+        self._save_configuration_to(self._config_path or 'osvanta_config.json')
+
+    def _configuration_dict(self) -> dict:
+        """The session as File ▸ Save configuration writes it."""
+        return {
             'version': self.version,
             'measurement_path': self.measurement_path or self.blf_path,  # canonical key
             'blf_path': self.measurement_path or self.blf_path,  # legacy alias, read by older CANScope versions
@@ -2133,9 +2151,14 @@ class MainWindow(QMainWindow):
             'table_column_widths': self.plot_panel.table_column_widths(),  # Fix 2
             'markers': self.plot_panel.markers_config(),
         }
-        path, _ = QFileDialog.getSaveFileName(self, 'Save configuration', 'osvanta_config.json', 'JSON Files (*.json)')
+
+    def _save_configuration_to(self, start: str) -> bool:
+        """Save the configuration where the user chooses, starting at *start*.
+        False when the user cancels or the file cannot be written."""
+        config = self._configuration_dict()
+        path, _ = QFileDialog.getSaveFileName(self, 'Save configuration', start, 'JSON Files (*.json)')
         if not path:
-            return
+            return False
         try:
             Path(path).write_text(json.dumps(config, indent=2), encoding='utf-8')
             self._log(f'Saved configuration: {path}')
@@ -2143,6 +2166,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, 'Save configuration failed', str(exc))
             self._update_status('Save failed', 'Check path permissions and try again')
+            return False
+        self._config_path = path
+        self._config_snapshot = session_restore.as_saved(config)
+        return True
 
     def load_configuration(self) -> None:
         if self._refuse_while_loading('loading a configuration'):
@@ -2162,6 +2189,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, 'Load configuration failed', str(exc))
             return
+        self._config_path = path
+        self._config_snapshot = data if isinstance(data, dict) else None
+        self._apply_configuration(data, path)
+
+    def _apply_configuration(self, data: dict, path: str) -> None:
+        """Apply the configuration *data*, read from *path*: reload its
+        measurement, or plot from the data already decoded."""
         # An explicitly loaded configuration takes precedence over the
         # session-only measurement handoff.
         self._temporary_plot_handoff = None
@@ -3099,6 +3133,86 @@ class MainWindow(QMainWindow):
             self._survey_start_counted = True
             if survey_prompt.enabled(sys.argv):
                 self._survey_timer.start()
+        if not self._session_offered:
+            self._session_offered = True
+            if self._session_restore:
+                self._session_timer.start()
+                QTimer.singleShot(session_restore.OFFER_DELAY_MS, self._offer_last_session)
+
+    def _session_in_flux(self) -> bool:
+        """Whether the session is only part-way to what the user set up: a
+        load or calculation running, or a layout waiting for its decode. Kept
+        or asked about now, it would replace a whole session with half of one."""
+        return (self._thread is not None or self._calc_thread is not None
+                or bool(self._pending_plot_keys))
+
+    def _offer_last_session(self) -> None:
+        """Offer to reopen the last session, once the window is up."""
+        # Never over work already begun: a file opened, a dialog showing.
+        if (self._closing or not self.isVisible() or self.store is not None
+                or self.measurement_path or self._session_in_flux()
+                or QApplication.activeModalWidget() is not None):
+            return
+        try:
+            data = session_restore.read(self._session_path)
+        except (OSError, ValueError) as exc:
+            self._log(f'Last session not offered, it cannot be read: {exc}')
+            return
+        if data is None:
+            return
+        answer = session_restore.ask_to_reopen(self, session_restore.summary(data))
+        if answer is not session_restore.OfferAnswer.REOPEN:
+            return
+        self._log(f'Reopening the last session: {self._session_path}')
+        # A session saved as a file is that file's configuration again;
+        # one never saved still has to be.
+        saved_to = session_restore.saved_to(data)
+        self._config_path = saved_to
+        self._config_snapshot = data if saved_to else None
+        self._apply_configuration(data, str(self._session_path))
+
+    def _refresh_last_session(self) -> None:
+        """Keep the last session up to date while the user works."""
+        if self._closing or self._session_in_flux():
+            return
+        config = self._configuration_dict()
+        if session_restore.holds_something(config):
+            self._keep_last_session(config)
+
+    def _keep_last_session(self, config: dict) -> None:
+        """Write *config* as the last session, unless it is already."""
+        saved_to = (None if session_restore.differs(config, self._config_snapshot)
+                    else self._config_path)
+        written = (session_restore.as_saved(config), saved_to)
+        if written == self._session_written:
+            return
+        try:
+            session_restore.write(self._session_path, config, saved_to)
+        except OSError as exc:
+            self._log(f'Last session not kept: {exc}')
+            return
+        self._session_written = written
+
+    def _settle_last_session(self) -> bool:
+        """On close: ask about a changed configuration and keep the session.
+        False when the user cancels the close."""
+        if not self._session_restore or self._session_settled:
+            return True
+        if not self._session_in_flux():
+            config = self._configuration_dict()
+            if session_restore.holds_something(config):
+                if session_restore.differs(config, self._config_snapshot):
+                    answer = session_restore.ask_to_save(self)
+                    if answer is session_restore.CloseAnswer.CANCEL:
+                        return False
+                    if (answer is session_restore.CloseAnswer.SAVE
+                            and not self._save_configuration_to(
+                                self._config_path or 'osvanta_config.json')):
+                        return False
+                self._keep_last_session(config)
+        self._session_settled = True
+        self._session_timer.stop()
+        return True
 
     def _count_start_and_ask_for_survey(self) -> None:
         try:
@@ -3132,6 +3246,10 @@ class MainWindow(QMainWindow):
             self._log(f'Survey answer warning: {exc}')
 
     def closeEvent(self, event) -> None:
+        # Asked first: Cancel must find the window as the user left it.
+        if not self._closing and not self._settle_last_session():
+            event.ignore()
+            return
         # Every worker thread is a child of this window, and Qt terminates the
         # application when one is destroyed while it runs. None can be
         # stopped part-way, so a close during Decode, a calculation or

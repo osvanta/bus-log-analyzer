@@ -65,6 +65,14 @@ def _no_diag_telemetry(monkeypatch):
 def _no_survey_request(monkeypatch):
     monkeypatch.setenv("OSVANTA_SURVEY_PROMPT", "0")
 
+
+# Keep the last session out of test runs: every window a test closes with a
+# plot would ask whether to save it, and keep it beside the source tree.
+# tests/test_session_restore.py turns it back on.
+@pytest.fixture(autouse=True)
+def _no_session_restore(monkeypatch):
+    monkeypatch.setenv("OSVANTA_SESSION_RESTORE", "0")
+
 # ── Payload constants (match sample.dbc signal layout) ────────────────────
 # EngineControl 0x100: EngSpeed raw=2400 (0x0960 LE) → 1200.0 rpm; Throttle raw=100 → 50.0 %
 ENG_PAYLOAD  = bytes([0x60, 0x09, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00])
