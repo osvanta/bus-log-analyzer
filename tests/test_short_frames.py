@@ -197,13 +197,7 @@ def _write_mf4(path: Path) -> Path:
 
 _WRITERS = {'.asc': _write_asc, '.blf': _write_blf, '.trc': _write_trc, '.mf4': _write_mf4}
 
-# A bus-logging MF4 is decoded by asammdf (extract_bus_logging), which reads
-# each record's fixed-size DataBytes and not its DataLength: short frames
-# still decode from padding there. Strict, so the day it is fixed says so.
-_MF4_READS_PADDING = pytest.mark.xfail(
-    strict=True, reason='asammdf decodes bus-logging MF4 frames from padding')
-_FORMATS = [pytest.param(s, marks=_MF4_READS_PADDING) if s == '.mf4' else s
-            for s in _WRITERS]
+_FORMATS = list(_WRITERS)
 
 
 def _load(measurement: Path, dbc: Path):
@@ -238,14 +232,17 @@ def load_dbc(tmp_path) -> Path:
 def test_every_format_decodes_only_what_each_frame_holds(qapp, tmp_path, load_dbc, suffix):
     measurement = _WRITERS[suffix](tmp_path / f'short{suffix}')
 
-    decoded, _store, messages = _load(measurement, load_dbc)
+    decoded, store, messages = _load(measurement, load_dbc)
 
     assert decoded['Short::Fits'] == [float(i + 1) for i in range(10)]
     assert decoded['Short::Past'] == [4660.0] * 5          # whole frames only
     assert decoded['Motor::Speed'] == [258.0] * 10        # big-endian, fits
     assert decoded['Motor::Temp'] == [50.0] * 4           # whole frames only
     assert 'Sync::Sync_Counter' not in decoded            # never sent
-    warning = next(m for m in messages if 'shorter than the message' in m)
+    # In the Log for the frame formats; a bus-logging MF4 reports it among
+    # its load warnings, the only report its reader makes after decoding.
+    warning = next(m for m in [*messages, *store.load_warnings]
+                   if 'shorter than the message' in m)
     assert '21 frame(s)' in warning and 'got no value' in warning
 
 
@@ -276,3 +273,172 @@ def test_the_plot_holds_what_the_can_trace_shows(qapp, tmp_path, load_dbc):
                 sample.numeric_value)
 
     assert decoded == trace
+
+
+# ── Bus-logging MF4, decoded by asammdf ──────────────────────────────────
+#
+# asammdf reads each frame at its message's full length; the reader leaves
+# out what a short frame does not hold, matched to asammdf's groups by time
+# stamp. The same frames as ASC go through the vectorized decoder, proven
+# against cantools above, so an MF4 must decode exactly as its ASC does.
+
+_HARD_DBC = f'''VERSION ""
+NS_ :
+BS_:
+BU_: ECU
+BO_ {0x98FECAEF} DM1_239: 22 ECU
+ SG_ DTC1 : 16|32@1+ (1,0) [0|4294967295] "" ECU
+ SG_ DTC2 : 48|32@1+ (1,0) [0|4294967295] "" ECU
+BO_ {0x98FECAF3} DM1_243: 22 ECU
+ SG_ DTC1 : 16|32@1+ (1,0) [0|4294967295] "" ECU
+ SG_ DTC2 : 48|32@1+ (1,0) [0|4294967295] "" ECU
+BO_ {0x8CFEF100} CCVS: 8 ECU
+ SG_ Speed : 8|16@1+ (1,0) [0|65535] "" ECU
+ SG_ Brake : 32|8@1+ (1,0) [0|255] "" ECU
+BO_ 801 MuxMsg: 8 ECU
+ SG_ Mux M : 0|8@1+ (1,0) [0|255] "" ECU
+ SG_ Near m1 : 8|8@1+ (1,0) [0|255] "" ECU
+ SG_ Far m2 : 40|16@1+ (1,0) [0|65535] "" ECU
+BO_ 802 Motor: 8 ECU
+ SG_ Speed : 7|16@0+ (1,0) [0|65535] "" ECU
+ SG_ Temp : 39|8@0+ (1,0) [0|255] "" ECU
+BA_DEF_ BO_ "VFrameFormat" ENUM "StandardCAN","ExtendedCAN","reserved","J1939PG";
+BA_DEF_DEF_ "VFrameFormat" "StandardCAN";
+BA_ "VFrameFormat" BO_ {0x98FECAEF} 3;
+BA_ "VFrameFormat" BO_ {0x98FECAF3} 3;
+BA_ "VFrameFormat" BO_ {0x8CFEF100} 3;
+'''
+
+
+def _hard_frames(two_priorities: bool = False) -> list[tuple[float, int, bytes, bool]]:
+    frames = []
+    for i in range(6):
+        t = 0.010 * (i + 1)
+        dm1 = bytes([0x00, 0xFF, 0x45, 0xF1, 0, 0, 0xFF, 0xFF])
+        frames.append((t, 0x18FECAEF, dm1, True))                 # 8 of 22 bytes
+        frames.append((t + 0.0001, 0x18FECAF3, bytes(8), True))
+        ccvs = bytes([0, 0x10 + i, 0x02, 0, 7, 0, 0, 0])
+        frames.append((t + 0.0002, 0x0CFEF117, ccvs, True))       # sender 0x17: whole
+        frames.append((t + 0.0003, 0x0CFEF121, ccvs[:4], True))   # sender 0x21: no Brake
+        if two_priorities and i % 2:
+            # Sender 0x17 again, at priority 6 and short.
+            frames.append((t + 0.0006, 0x18FEF117, ccvs[:4], True))
+        mux = bytes([1 + i % 2, 30 + i, 0, 0, 0, 0x34, 0x12, 0])
+        frames.append((t + 0.0004, 0x321, mux if i < 2 else mux[:2], False))
+        motor = bytes([0x01, 0x02, 0, 0, 50, 0, 0, 0])
+        frames.append((t + 0.0005, 0x322, motor if i % 3 == 0 else motor[:2], False))
+    return frames
+
+
+def _write_hard_asc(path: Path, frames=None) -> Path:
+    import can
+    with can.ASCWriter(str(path)) as writer:
+        for t, arb_id, data, extended in frames or _hard_frames():
+            writer.on_message_received(can.Message(
+                timestamp=t, arbitration_id=arb_id, data=data, dlc=len(data),
+                is_extended_id=extended, channel=0))
+    return path
+
+
+def _write_hard_mf4(path: Path, frames=None) -> Path:
+    from core.converter import ConvertJob, convert
+    asc = _write_hard_asc(path.with_suffix('.src.asc'), frames)
+    convert(ConvertJob(inputs=[asc], output=path))
+    return path
+
+
+@pytest.fixture()
+def hard_dbc(tmp_path) -> Path:
+    path = tmp_path / 'hard.dbc'
+    path.write_text(_HARD_DBC, encoding='utf-8')
+    return path
+
+
+def test_an_mf4_decodes_exactly_as_its_asc(qapp, tmp_path, hard_dbc):
+    asc = _load(_write_hard_asc(tmp_path / 'hard.asc'), hard_dbc)[0]
+
+    mf4 = _load(_write_hard_mf4(tmp_path / 'hard.mf4'), hard_dbc)[0]
+
+    assert mf4 == asc
+    # Not vacuous: each case left something out, and kept the rest.
+    assert 'DM1_239::DTC2' not in mf4 and mf4['DM1_239::DTC1'] == [61765.0] * 6
+    assert 'CCVS [SA 0x21]::Brake' not in mf4
+    assert len(mf4['CCVS [SA 0x21]::Speed']) == 6 and len(mf4['CCVS [SA 0x17]::Brake']) == 6
+    assert len(mf4['MuxMsg::Near']) == 3 and mf4['MuxMsg::Far'] == [4660.0]
+    assert mf4['Motor::Temp'] == [50.0, 50.0] and len(mf4['Motor::Speed']) == 6
+
+
+def test_a_j1939_senders_short_frames_are_found_at_any_priority(qapp, tmp_path, hard_dbc):
+    """asammdf gathers a J1939 sender's frames by PGN and source address,
+    whatever their priority, so its short frames are looked for the same way.
+    (Its samples come twice in an MF4 when it sends at two priorities, as
+    they did before this check: one asammdf group per frame ID.)"""
+    path = _write_hard_mf4(tmp_path / 'priorities.mf4', _hard_frames(two_priorities=True))
+
+    decoded = _load(path, hard_dbc)[0]
+
+    # Brake is past the end of the priority-6 frames: only the whole frames'
+    # 7, never the padding. Speed fits in them, so their values are kept.
+    assert set(decoded['CCVS [SA 0x17]::Brake']) == {7.0}
+    assert {529.0, 531.0, 533.0} <= set(decoded['CCVS [SA 0x17]::Speed'])
+
+
+def test_an_mf4_without_short_frames_is_unchanged(qapp, tmp_path, hard_dbc, monkeypatch):
+    from core.readers import mdf_can_reader
+
+    whole = [frame for frame in _hard_frames()
+             if len(frame[2]) == 8 and frame[1] not in (0x18FECAEF, 0x18FECAF3)]
+    path = _write_hard_mf4(tmp_path / 'whole.mf4', whole)
+
+    decoded = _load(path, hard_dbc)[0]
+    monkeypatch.setattr(mdf_can_reader.MDFCANReader, '_find_short_frames',
+                        lambda *args: mdf_can_reader._ShortFrames())
+    before = _load(path, hard_dbc)[0]
+
+    assert decoded == before
+
+
+def test_the_lazy_and_the_eager_mf4_read_agree(qapp, tmp_path, hard_dbc):
+    from core.channel_config import ChannelConfig
+    from core.readers.mdf_can_reader import MDFCANReader
+
+    path = _write_hard_mf4(tmp_path / 'both.mf4', None)
+    config = ChannelConfig.from_single_dbc(str(hard_dbc))
+
+    eager = {
+        (meta[1], meta[3]): list(np.asarray(values, dtype=float))
+        for meta, _ts, values, _display in
+        MDFCANReader(path, str(hard_dbc)).iter_decoded_channel_arrays(config)
+    }
+    tree = []   # the signal tree's rows, announced before any sample is read
+    sources = MDFCANReader(path, str(hard_dbc)).open_decoded_sources(
+        config, metadata_ready=tree.extend)
+    try:
+        groups = sorted({signal[0] for signal in sources.signals})
+        read = sources.source.read_groups(groups)
+        lazy = {}
+        for group, _channel, message, _id, name, _unit, count in sources.signals:
+            parts = read[(group, name)]
+            values = [float(v) for part in parts for v in np.asarray(part[1], dtype=float)]
+            assert len(values) == count, (message, name)
+            lazy[(message, name)] = values
+    finally:
+        sources.source.close()
+
+    assert lazy == eager
+    assert ('MuxMsg', 'Far') in lazy and ('Motor', 'Temp') in lazy
+    # A signal no frame was long enough for is not offered at all.
+    assert {(row[1], row[3]) for row in tree} == set(lazy)
+    assert ('DM1_239', 'DTC2') not in lazy
+
+
+@pytest.mark.parametrize('name', ['LittleEndian', 'BigEndian', 'Long'])
+def test_the_bytes_a_signal_needs_are_what_cantools_decides(unit_db, name):
+    from core.readers.mdf_can_reader import _bytes_needed
+
+    message = unit_db.get_message_by_name(name)
+    for length in range(message.length + 1):
+        decoded = message.decode(bytes(range(1, length + 1)), **_KWARGS)
+        for signal in message.signals:
+            assert (signal.name in decoded) == (length >= _bytes_needed(signal)), \
+                (name, signal.name, length)
