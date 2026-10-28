@@ -46,6 +46,7 @@ same without them.
 | `logs\BLA_crash.log` | Why the application ended when it crashed or froze: stack traces and the messages Qt printed, which can name a file being opened. |
 | `osvanta_user_settings.json` | Preferences, and whether the survey was answered. |
 | `osvanta_temp_plot_config.json` | The last plot layout, so it can be restored: **signal and message names from your database**, colours and axes. |
+| `osvanta_last_session.json` | The session the application was last closed with, so the next start can offer to reopen it: **the full path of the measurement and databases**, the plotted signals, calculated signals and layout. Rewritten once a minute while you work. |
 
 Windows lets only you, and the computer's administrators, read this folder, so
 the files stay private even when the application itself runs from a shared

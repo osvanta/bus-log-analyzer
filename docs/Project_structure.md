@@ -66,6 +66,7 @@ bus-log-analyzer/
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
 │   ├── app_data.py               # Where logs and settings live: %LOCALAPPDATA%\Osvanta\BusLogAnalyzer when packaged, next to app.py from source
 │   ├── crash_log.py              # BLA_crash.log: Qt fatal errors, native crashes, freezes, uncaught exceptions
+│   ├── session_restore.py        # Last session: asks Save / Don't save / Cancel on close, keeps osvanta_last_session.json (refreshed each minute), offers it at start
 │   ├── survey_prompt.py          # User survey request on the 10th start, and the top row's link after "Remind me later"; state in osvanta_user_settings.json
 │   ├── top_row.py                # The top row's File and Tools menus and its Decode button: bold, its icon beside the word
 │   ├── insert_function_dialog.py # Calculated Signal ▸ Insert function (Shift+F3): categories, functions, how to use each

@@ -135,6 +135,9 @@ last plot action.
   file: the measurement, the databases, calculated signals, the plotted signals
   with their colours, groups and order, the axes and the cursors. **File ▸ Open
   configuration** brings it all back.
+- Closing with changes you have not saved asks whether to save them. Whatever
+  you answer, the application keeps the session, and the next start offers to
+  reopen it, even after a crash.
 - **File ▸ Export plotted signals** (++ctrl+e++) writes the plotted signals to
   CSV or Excel, on the time base you choose, or to MF4.
 - **Tools ▸ Convert files** joins, cuts and converts measurements. In
