@@ -81,6 +81,7 @@ logs/
 *.mf4
 *.mdf
 *.asc
+*.trc
 *.dbc
 # ── Test / coverage ───────────────────────────────────────────────────────
 .pytest_cache/
@@ -88,8 +89,9 @@ logs/
 htmlcov/
 *.coveragerc
 # ── Test fixtures ─────────────────────────────────────────────────────────
-# sample.blf and sample.asc are generated locally by tests/fixtures/_generate.py
-# and intentionally NOT committed (already caught by *.blf / *.asc above).
+# sample.blf, sample.asc and sample.trc are generated locally by
+# tests/fixtures/_generate.py and intentionally NOT committed (already caught
+# by *.blf / *.asc / *.trc above).
 # sample.dbc is a hand-written text fixture that IS committed — un-exclude it.
 !tests/fixtures/sample.dbc
 # sample_lowid.dbc puts a CAN message at 0x20, inside the 6-bit LIN ID range,

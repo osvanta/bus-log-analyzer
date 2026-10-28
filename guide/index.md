@@ -26,6 +26,7 @@ Python is needed.
 |---|---|---|
 | BLF (`.blf`) | Raw CAN and LIN frames | DBC or ARXML for CAN, LDF for LIN |
 | ASC (`.asc`) | Raw CAN and LIN frames | DBC or ARXML for CAN, LDF for LIN |
+| TRC (`.trc`) | Raw CAN frames, from PEAK trace files (versions 1.0 to 3.0) | DBC or ARXML |
 | MDF4 and MDF3 (`.mf4`, `.mdf`) | Raw CAN or LIN bus logging, or decoded signals | Only for raw bus logging |
 | CSV (`.csv`) | A raw CAN export, or signals in columns | Only for raw CAN data |
 

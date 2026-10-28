@@ -27,7 +27,7 @@ in the order of the work.
 | | Item | What it does |
 |---|---|---|
 | 1 | **File** | Open configuration, Save configuration (++ctrl+s++), Export plotted signals (++ctrl+e++) |
-| 2 | **Open Measurement** | Opens a BLF, ASC, MF4, MDF or CSV file (++ctrl+o++) |
+| 2 | **Open Measurement** | Opens a BLF, ASC, TRC, MF4, MDF or CSV file (++ctrl+o++) |
 | 3 | **Databases** | Assigns DBC, ARXML and LDF databases to the bus channels |
 | 4 | **Decode** | Reads the measurement and decodes it into signals (++f9++) |
 | 5 | **Calculated Signal** | Creates a signal calculated from others by a formula |

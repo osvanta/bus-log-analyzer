@@ -130,7 +130,7 @@ def prescan_measurement(*args, **kwargs):
 # core.readers.ALL_SUFFIXES, for the Open Measurement dialog. A copy, so the dialog
 # opens at once rather than after core.readers has finished loading; a test
 # keeps the two equal.
-_MEASUREMENT_SUFFIXES = ('.asc', '.blf', '.csv', '.mdf', '.mf4')
+_MEASUREMENT_SUFFIXES = ('.asc', '.blf', '.csv', '.mdf', '.mf4', '.trc')
 
 # The logo's height in the status bar: the smallest at which OSVANTA, under
 # the name, can still be read. The bar grows by a few pixels to hold it.
@@ -977,16 +977,17 @@ class MainWindow(QMainWindow):
         self._debug_window.append_report(message)
 
     def choose_blf(self) -> None:
-        """Open any supported measurement file (BLF, ASC, MF4, MDF, CSV)."""
+        """Open any supported measurement file (BLF, ASC, TRC, MF4, MDF, CSV)."""
         # Resetting for a new file under a running load would let the old
         # load's results arrive as the new file's, and start a second load.
         if self._refuse_while_loading('opening another measurement'):
             return
         all_ext = ' '.join(f'*{e}' for e in _MEASUREMENT_SUFFIXES)
         filt = (
-            'Measurement Files (*.blf *.asc *.mf4 *.mdf *.csv);;'
+            'Measurement Files (*.blf *.asc *.trc *.mf4 *.mdf *.csv);;'
             'Vector BLF (*.blf);;'
             'Vector ASC (*.asc);;'
+            'PEAK TRC (*.trc);;'
             'ASAM MDF4 (*.mf4);;'
             'ASAM MDF (*.mdf);;'
             'CSV Signals (*.csv);;'

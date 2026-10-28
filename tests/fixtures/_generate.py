@@ -6,15 +6,15 @@
 
 """
 Generate the binary measurement fixtures for the Osvanta Bus Log Analyzer
-test suite: sample.blf, sample.asc, sample_lin.mf4, sample_lin.blf,
-sample_lin.asc and sample_mixed_bus.blf.
+test suite: sample.blf, sample.asc, sample.trc, sample_lin.mf4,
+sample_lin.blf, sample_lin.asc and sample_mixed_bus.blf.
 
 Run once after cloning, or whenever sample.dbc changes:
 
     python tests/fixtures/_generate.py
 
 Output files are intentionally excluded from git (.gitignore: *.blf, *.asc,
-*.mf4).  The .ldf inputs are text and are committed.
+*.trc, *.mf4).  The .ldf inputs are text and are committed.
 Each file contains three repeated bursts of CAN frames that match sample.dbc:
 
   0x100  EngineControl  EngSpeed=1200.0 rpm, Throttle=50.0 %
@@ -103,6 +103,32 @@ def generate_asc(out_path: Path) -> None:
     print(f"Written: {out_path} ({len(messages)} frames)")
 
 
+def generate_trc(out_path: Path) -> None:
+    """The frames of sample.asc as a TRC 2.1 trace file: the layout
+    PCAN-Explorer 6 writes, with the bus and reserved columns. Bus 2, where
+    sample.asc has them (python-can's channel 1 is the second channel)."""
+    start = datetime(2024, 1, 15, 10, 0, 0)
+    days = (start - datetime(1899, 12, 30)).total_seconds() / 86400
+    lines = [
+        ";$FILEVERSION=2.1",
+        f";$STARTTIME={days:.10f}",
+        ";$COLUMNS=N,O,T,B,I,d,R,L,D",
+        ";",
+        ";   Start time: 15.01.2024 10:00:00.000.0",
+        ";-------------------------------------------------------------------------------",
+        ";   Bus  Name         Connection             Protocol",
+        ";   2    Connection2  TestNet@pcan_usb       CAN",
+        ";-------------------------------------------------------------------------------",
+    ]
+    for index, (ts, arb_id, data) in enumerate(_frames(), 1):
+        frame_id = f"{arb_id:04X}"     # 4 digits: an 11-bit ID
+        lines.append(
+            f"{index:>8} {ts * 1000:>13.3f} DT 2  {frame_id:>8} Rx -  {len(data):<4} "
+            + " ".join(f"{byte:02X}" for byte in data)
+        )
+    # PEAK's tools end lines with CR LF.
+    out_path.write_bytes(("\r\n".join(lines) + "\r\n").encode("latin-1"))
+    print(f"Written: {out_path} ({len(lines) - 9} frames)")
 
 
 # ── LIN bus-logging MF4 ───────────────────────────────────────────────────
@@ -443,6 +469,7 @@ def generate_other_bus_blf(out_path: Path) -> None:
 if __name__ == "__main__":
     generate_blf(HERE / "sample.blf")
     generate_asc(HERE / "sample.asc")
+    generate_trc(HERE / "sample.trc")
     generate_lin_mf4(HERE / "sample_lin.mf4")
     generate_lin_blf(HERE / "sample_lin.blf")
     generate_lin_asc(HERE / "sample_lin.asc")
