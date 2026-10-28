@@ -77,14 +77,23 @@ def _frames():
             yield cycle * 0.010 + order * 0.0002, 0x18FECA00 | sa, _dm1(dtc)
 
 
-def _write_asc(path):
+def _two_priority_frames():
+    """SA 0xEF alone, alternating priority 6 and 7: one sender, two frame IDs."""
+    frames = [frame for frame in _frames() if frame[1] & 0xFF == 0xEF]
+    return [
+        (timestamp, 0x1CFECAEF if index % 2 else frame_id, data)
+        for index, (timestamp, frame_id, data) in enumerate(frames)
+    ]
+
+
+def _write_asc(path, frames=None):
     lines = [
         "date Thu Sep 24 10:00:00.000 am 2026",
         "base hex  timestamps absolute",
         "internal events logged",
         "Begin Triggerblock Thu Sep 24 10:00:00.000 am 2026",
     ]
-    for timestamp, frame_id, data in _frames():
+    for timestamp, frame_id, data in frames or _frames():
         payload = " ".join(f"{byte:02X}" for byte in data)
         lines.append(
             f"{timestamp + 0.001:11.6f} 1  {frame_id:08X}x       Rx   d 8 {payload}"
@@ -94,11 +103,11 @@ def _write_asc(path):
     return path
 
 
-def _write_mf4(path):
+def _write_mf4(path, frames=None):
     can = pytest.importorskip("can")
     pytest.importorskip("asammdf")
     with can.Logger(str(path)) as logger:
-        for timestamp, frame_id, data in _frames():
+        for timestamp, frame_id, data in frames or _frames():
             logger.on_message_received(can.Message(
                 timestamp=1000.0 + timestamp, arbitration_id=frame_id,
                 is_extended_id=True, data=data, channel=0,
@@ -184,30 +193,41 @@ def test_undefined_sender_of_sa_specific_pgn_stays_undecoded(measurement, tmp_pa
     assert _nonzero(series["DM1_239::DM1_239_DTC1"]) == [61765.0]
 
 
-def test_one_sender_on_two_priorities_loads_in_time_order(tmp_path):
-    # SA 0xEF alternates priority 6 and 7: one sender, one series, but the
-    # loader decodes it one frame ID at a time.
-    asc = tmp_path / "priorities.asc"
-    _write_asc(asc)
-    lines = [
-        line for line in asc.read_text(encoding="utf-8").splitlines()
-        if "18FECA13x" not in line and "18FECAE6x" not in line
-    ]
-    seen = 0
-    for index, line in enumerate(lines):
-        if "18FECAEFx" in line:
-            if seen % 2:
-                lines[index] = line.replace("18FECAEFx", "1CFECAEFx")
-            seen += 1
-    asc.write_text("\n".join(lines) + "\n", encoding="utf-8")
+@pytest.mark.parametrize("suffix", ["asc", "mf4"])
+def test_one_sender_on_two_priorities_loads_in_time_order(tmp_path, suffix):
+    # SA 0xEF alternates priority 6 and 7: one sender, one series. The ASC
+    # loader decodes it one frame ID at a time; asammdf writes an MF4 group
+    # per frame ID, each holding every frame of the sender, so each sample
+    # must still load once.
+    writer = _write_asc if suffix == "asc" else _write_mf4
+    measurement = writer(tmp_path / f"priorities.{suffix}", _two_priority_frames())
     dbc = _dbc(tmp_path, [("DM1", 0x18FECAFE)])
 
-    series = _load(asc, dbc)
+    series = _load(measurement, dbc)
+    names = _trace_names(measurement, dbc)
 
     assert set(series) == {"DM1::DM1_DTC1"}
     timestamps, values = series["DM1::DM1_DTC1"]
     assert len(values) == _CYCLES
     assert np.all(np.diff(timestamps) > 0)
+    # The CAN Trace names the frames under both IDs.
+    assert names == {0x18FECAEF: {"DM1"}, 0x1CFECAEF: {"DM1"}}
+
+
+def _trace_names(measurement, dbc_path) -> dict[int, set[str]]:
+    """The message names the CAN Trace gives each frame ID."""
+    worker = LoadWorker(str(measurement), ChannelConfig.from_single_dbc(str(dbc_path)))
+    result: dict = {}
+    worker.finished.connect(lambda store: result.setdefault("store", store))
+    worker.run()
+    rfs = result["store"].raw_frame_store
+    try:
+        names: dict[int, set[str]] = {}
+        for record in rfs.get_window(range(len(rfs))):
+            names.setdefault(record.arbitration_id, set()).add(record.frame_name)
+        return names
+    finally:
+        rfs.close()
 
 
 def test_store_reorders_series_fed_out_of_time_order():
@@ -241,3 +261,28 @@ def test_store_leaves_in_order_series_alone():
         )
 
     assert store.sort_merged_series() == 0
+
+
+def test_only_a_group_as_long_as_the_first_counts_as_a_copy():
+    """A copy repeats an earlier group's sender and length. A group of the
+    same sender with a different length is not asammdf's copy and is kept."""
+    from types import SimpleNamespace
+
+    from core.bus_types import BusType
+    from core.readers.mdf_can_reader import MDFCANReader
+
+    def group(cycles):
+        return SimpleNamespace(channel_group=SimpleNamespace(cycles_nr=cycles))
+
+    extracted = SimpleNamespace(groups=[group(10), group(10), group(7), group(10)])
+    channel = (BusType.CAN, 1)
+    identities = {
+        0: (channel, "DM1", 0x18FECAEF),
+        1: (channel, "DM1", 0x1CFECAEF),    # same sender, same length: a copy
+        2: (channel, "DM1", 0x14FECAEF),    # same sender, other length: kept
+        3: (channel, "DM1", 0x18FECA13),    # another sender: kept
+    }
+
+    copies = MDFCANReader._repeated_j1939_senders(extracted, identities)
+
+    assert copies == {1: identities[1]}

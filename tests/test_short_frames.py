@@ -370,17 +370,20 @@ def test_an_mf4_decodes_exactly_as_its_asc(qapp, tmp_path, hard_dbc):
 
 def test_a_j1939_senders_short_frames_are_found_at_any_priority(qapp, tmp_path, hard_dbc):
     """asammdf gathers a J1939 sender's frames by PGN and source address,
-    whatever their priority, so its short frames are looked for the same way.
-    (Its samples come twice in an MF4 when it sends at two priorities, as
-    they did before this check: one asammdf group per frame ID.)"""
-    path = _write_hard_mf4(tmp_path / 'priorities.mf4', _hard_frames(two_priorities=True))
+    whatever their priority, so its short frames are looked for the same way;
+    and of its group per frame ID, each holding all those frames, one is read."""
+    frames = _hard_frames(two_priorities=True)
+    asc = _load(_write_hard_asc(tmp_path / 'priorities.asc', frames), hard_dbc)[0]
 
-    decoded = _load(path, hard_dbc)[0]
+    decoded = _load(_write_hard_mf4(tmp_path / 'priorities.mf4', frames), hard_dbc)[0]
 
     # Brake is past the end of the priority-6 frames: only the whole frames'
     # 7, never the padding. Speed fits in them, so their values are kept.
     assert set(decoded['CCVS [SA 0x17]::Brake']) == {7.0}
     assert {529.0, 531.0, 533.0} <= set(decoded['CCVS [SA 0x17]::Speed'])
+    # Each sample once, as the ASC of the same frames has it.
+    assert decoded == asc
+    assert len(decoded['CCVS [SA 0x17]::Speed']) == 9
 
 
 def test_an_mf4_without_short_frames_is_unchanged(qapp, tmp_path, hard_dbc, monkeypatch):

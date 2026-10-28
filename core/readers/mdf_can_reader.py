@@ -687,6 +687,15 @@ class MDFCANReader:
                 self._j1939_group_identities(extracted, channel_config)
                 if extracted is not None else {}
             )
+            # A sender on two priorities: asammdf writes a group per frame
+            # ID, each holding all of the sender's frames. Read one; the
+            # others only name their frames in the CAN Trace.
+            sender_copies = (
+                self._repeated_j1939_senders(extracted, j1939_groups)
+                if extracted is not None else {}
+            )
+            for group_idx in sender_copies:
+                j1939_groups[group_idx] = None
             short_frames = _ShortFrames()
             if extracted is not None:
                 try:
@@ -759,6 +768,10 @@ class MDFCANReader:
                 for channel, message_name, message_id, _signal_name, _unit
                 in dbc_metadata_rows
             }
+            for channel, message_name, frame_id in sender_copies.values():
+                self.dbc_trace_message_names.setdefault(
+                    (channel, int(frame_id)), message_name
+                )
 
             if metadata_ready is not None:
                 # Existing decoded channels are intentionally listed first;
@@ -1053,6 +1066,36 @@ class MDFCANReader:
                     raise
                 channel_error(group_name, "LIN_Frame", exc)
         return total
+
+    @staticmethod
+    def _repeated_j1939_senders(extracted, j1939_groups) -> dict[int, tuple]:
+        """
+        The J1939 groups that repeat an earlier group's frames, with their
+        identities.
+
+        asammdf writes a J1939 group per frame ID but fills it with every frame
+        of that PGN and source address, whatever its priority, so a sender on
+        two priorities gets two groups holding the same frames, and every
+        sample would load twice. A group is a copy when an earlier one has its
+        channel, message, PGN and source address and as many samples; groups
+        that differ in length are both kept, as before.
+        """
+        first: dict[tuple, int] = {}
+        copies: dict[int, tuple] = {}
+        for group_idx in sorted(j1939_groups):
+            identity = j1939_groups[group_idx]
+            if identity is None:
+                continue
+            channel, message_name, frame_id = identity
+            pgn, sa = _j1939_pgn_and_sa(np.array([frame_id], dtype=np.int64))
+            key = (channel, message_name, int(pgn[0]), int(sa[0]))
+            channel_group = getattr(extracted.groups[group_idx], "channel_group", None)
+            cycles = int(getattr(channel_group, "cycles_nr", 0) or 0)
+            if first.get(key) == cycles:
+                copies[group_idx] = identity
+            else:
+                first.setdefault(key, cycles)
+        return copies
 
     def _find_short_frames(self, source, extracted, channel_config, j1939_groups) -> _ShortFrames:
         """
