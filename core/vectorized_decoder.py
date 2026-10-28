@@ -33,6 +33,13 @@ For each cantools message, the vectorized decoder runs once on the first
 frame and compares its output against `cantools.message.decode()`. If any
 signal disagrees beyond a tiny tolerance, the entire message falls back to
 the per-row cantools decoder for the rest of the frames in that group.
+
+Short frames
+------------
+Given each row's byte length, a frame shorter than its message yields only
+the signals that fit in the bytes it holds, as `message.decode()` does with
+`allow_truncated`: a signal past the end is NaN on that row, never a value
+read from the zero padding of the fixed-width record.
 """
 from __future__ import annotations
 
@@ -51,7 +58,7 @@ class SignalExtractor:
         'name', 'unit', 'choices', 'scale', 'offset',
         'start_bit', 'length', 'byte_order', 'is_signed', 'is_float',
         'fast_path', 'is_multiplexer', 'multiplexer_ids',
-        'multiplexer_signal',
+        'multiplexer_signal', 'bytes_needed',
     )
 
     def __init__(self, signal: Any) -> None:
@@ -69,6 +76,10 @@ class SignalExtractor:
         self.is_multiplexer = bool(getattr(signal, 'is_multiplexer', False))
         self.multiplexer_ids = tuple(getattr(signal, 'multiplexer_ids', None) or ())
         self.multiplexer_signal = getattr(signal, 'multiplexer_signal', None)
+        # How many bytes a frame must hold for this signal to be in it, for
+        # a little-endian signal: only the fast path reads it. The slow path
+        # hands cantools the bytes received, and cantools decides.
+        self.bytes_needed = (self.start_bit + self.length - 1) // 8 + 1
 
         if self.byte_order != 'little_endian':
             self.fast_path = False
@@ -181,33 +192,52 @@ class MessageVectorDecoder:
 
     # ── Public decode ─────────────────────────────────────────────────────
 
-    def decode(self, data_arr: np.ndarray) -> dict[str, tuple[SignalExtractor, np.ndarray]]:
+    def decode(
+        self, data_arr: np.ndarray, lengths: np.ndarray | None = None,
+    ) -> dict[str, tuple[SignalExtractor, np.ndarray]]:
         """
         Decode every signal across all rows of *data_arr*.
 
         Parameters
         ----------
         data_arr : np.ndarray  uint8, shape ``(N, MAX_BYTES)`` (≥ expected_length)
+        lengths  : np.ndarray  each row's byte length, shape ``(N,)``. A signal
+                   that does not fit in a shorter row is NaN there. None reads
+                   every row at the message's full length.
 
         Returns
         -------
         dict mapping signal name → ``(SignalExtractor, numeric_arr float64[N])``
         """
+        # Rows that hold the whole message need no lengths: the common case.
+        if lengths is not None and (
+            len(lengths) == 0 or int(lengths.min()) >= self.expected_length
+        ):
+            lengths = None
         if self.fully_fast:
             if not self._verified:
                 if not self._verify_fast_path(data_arr):
                     self.fully_fast = False
             if self.fully_fast:
-                return self._decode_fast(data_arr)
-        return self._decode_slow(data_arr)
+                return self._decode_fast(data_arr, lengths)
+        return self._decode_slow(data_arr, lengths)
 
     # ── Fast / slow implementations ──────────────────────────────────────
 
-    def _decode_fast(self, data_arr: np.ndarray) -> dict[str, tuple]:
+    def _decode_fast(self, data_arr: np.ndarray,
+                     lengths: np.ndarray | None) -> dict[str, tuple]:
         out: dict[str, tuple] = {}
         view = data_arr[:, :self.expected_length]
         for ext in self.extractors:
-            out[ext.name] = (ext, ext.extract_fast(view))
+            values = ext.extract_fast(view)
+            if lengths is not None:
+                # Past the end of a short frame: padding, not a value. Cut
+                # before the multiplexing below, so a cut-off multiplexer
+                # leaves every branch out of that row too.
+                cut = lengths < ext.bytes_needed
+                if cut.any():
+                    values[cut] = np.nan
+            out[ext.name] = (ext, values)
 
         # Keep only rows where a multiplexed branch is active.  NaNs are
         # removed by LoadWorker before bulk insertion, producing the same
@@ -227,7 +257,8 @@ class MessageVectorDecoder:
                 out[ext.name] = (ext, values)
         return out
 
-    def _decode_slow(self, data_arr: np.ndarray) -> dict[str, tuple]:
+    def _decode_slow(self, data_arr: np.ndarray,
+                     lengths: np.ndarray | None) -> dict[str, tuple]:
         n = data_arr.shape[0]
         per_sig = {ext.name: (ext, np.full(n, np.nan, dtype=np.float64))
                    for ext in self.extractors}
@@ -235,7 +266,9 @@ class MessageVectorDecoder:
         msg = self.message
         ex_len = self.expected_length
         for i in range(n):
-            payload = data_arr[i, :ex_len].tobytes()
+            # Only the bytes received: cantools leaves out what does not fit.
+            size = ex_len if lengths is None else min(ex_len, int(lengths[i]))
+            payload = data_arr[i, :size].tobytes()
             try:
                 decoded = msg.decode(payload, **kwargs)
             except Exception:

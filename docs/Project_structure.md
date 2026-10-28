@@ -11,7 +11,7 @@ bus-log-analyzer/
 │   ├── signal_store.py           # SignalStore, SignalSeries (array.array storage)
 │   ├── raw_frame_store.py        # Batched CAN+LIN Trace store: compact metadata + 64 B/frame mmap payload; error/remote/BRS flags, BusStatus records
 │   ├── dbc_decoder.py            # DBCDecoder with 3-level cache — .dbc, .arxml, .ldf (via DBC conversion)
-│   ├── vectorized_decoder.py     # NumPy DBC decode, sparse multiplex filtering, cantools fallback
+│   ├── vectorized_decoder.py     # NumPy DBC decode, sparse multiplex filtering, short frames decode only what fits, cantools fallback
 │   ├── blf_reader.py             # BLF decompression into packed column batches; CAN + LIN objects
 │   ├── export.py                 # CSV export
 │   ├── mf4_writer.py             # Decoded signals → MF4 (asammdf); marks each group's bus channel so the file reopens with the same keys; plot markers become MF4 marker events
@@ -218,10 +218,14 @@ empty measurement with no error and nothing to point at.
   the CANoe sample, `Door.ldf` scores a perfect ID match against *both* LIN
   channels and belongs to one. `PrescanResult.lengths_per_channel` carries the
   observed lengths; it is empty for CAN, so CAN scoring is unchanged.
-- **A short frame decodes from padding rather than failing**, because
-  `VectorizedDBC` slices a fixed 64-byte record. `LoadWorker` counts frames
-  shorter than the message they matched and reports the total — the visible
-  symptom of a database on the wrong channel.
+- **A short frame yields only the signals that fit in its bytes.**
+  `LoadWorker` hands `MessageVectorDecoder.decode` each frame's length, so a
+  signal past the end of a frame gets no sample from it, as cantools
+  (`allow_truncated`) and the CAN Trace decode it, instead of a value read from
+  the padding of the fixed 64-byte record. `LoadWorker` counts frames shorter
+  than the message they matched and reports the total — the visible symptom of
+  a database on the wrong channel. A bus-logging MF4 is decoded by asammdf,
+  which still reads the padding.
 - `blf_content.py` scans object types — stopping at the first CAN object, so a
   normal CAN log costs one container — and `reader_factory` refuses a BLF
   holding *neither* CAN nor LIN. That check runs **before** the database check:
