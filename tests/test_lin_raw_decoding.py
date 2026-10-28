@@ -318,11 +318,12 @@ def test_frames_reach_the_trace_tagged_as_lin(lin_measurement, sample_ldf_path):
 def test_a_short_frame_against_a_longer_message_is_reported(
     lin_blf_path, sample_ldf_path, alt_ldf_path
 ):
-    """Swapping the two databases decodes silently, not loudly.
+    """Swapping the two databases leaves signals out, and says why.
 
-    A 1-byte frame matched to a 2-byte message reads its second byte from the
-    zero padding of the fixed-width record, so the signal comes back as 0
-    rather than failing. The count is the only thing that makes it visible.
+    A 1-byte frame matched to a 2-byte message holds the signal in its first
+    byte and not the one in its second: that one gets no value from it, never
+    a 0 read from the zero padding of the fixed-width record. The count says
+    why it is missing.
     """
     _require_ldf_support()
     decoded, _store, messages = _decode(
@@ -330,14 +331,16 @@ def test_a_short_frame_against_a_longer_message_is_reported(
         {LIN1: str(alt_ldf_path), LIN2: str(sample_ldf_path)},
     )
 
-    # The wrong database decodes, and produces padding.
-    assert decoded["LIN1::Seat::SeatHeat"][:2] == [0.0, 0.0]
+    # The wrong database decodes what fits, and nothing from the padding.
+    assert set(decoded["LIN1::Seat::SeatPos"]) == {20.0, 40.0}
+    assert "LIN1::Seat::SeatHeat" not in decoded
 
     warning = next(
         (m for m in messages if "shorter than the message" in m), None
     )
     assert warning is not None
     assert "32" in warning
+    assert "got no value" in warning
 
 
 # ── Refusals that remain ───────────────────────────────────────────────────

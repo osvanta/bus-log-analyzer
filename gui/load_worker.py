@@ -715,12 +715,14 @@ class LoadWorker(QObject):
             ]
             in_parts = len(slices) > 1
 
-            # Frames shorter than the message they matched decode from the
-            # zero padding of the fixed 64-byte record rather than failing, so
-            # a database meant for a different cluster produces plausible
-            # zeros instead of an error. Counting the shortfall is what makes
-            # that visible — on LIN especially, where unrelated clusters
-            # reuse the same low frame IDs and only the lengths differ.
+            # A frame shorter than the message it matched yields only the
+            # signals that fit in its bytes, as cantools and the CAN Trace
+            # decode it: one past the end gets no value from that frame, not
+            # a zero read from the padding of the fixed 64-byte record.
+            # Counting the shortfall still says why signals are missing —
+            # usually a database meant for a different cluster, on LIN
+            # especially, where unrelated clusters reuse the same low frame
+            # IDs and only the lengths differ.
             expected_length = int(getattr(message, 'length', 0) or 0)
             if expected_length:
                 short_rows = sum(
@@ -739,7 +741,8 @@ class LoadWorker(QObject):
             failed = False
             for group_idx in slices:
                 try:
-                    sig_results = msg_dec.decode(rfs.rows(group_idx))
+                    sig_results = msg_dec.decode(
+                        rfs.rows(group_idx), lengths=dlcs_np[group_idx])
                 except Exception:
                     failed = True
                     break
@@ -867,8 +870,8 @@ class LoadWorker(QObject):
             )
             self.progress.emit(
                 f"WARNING: {dlc_short_total:,} frame(s) were shorter than the "
-                f"message they matched ({named}{more}). Those signals decoded "
-                "from padding, not from the bus — usually a database assigned "
+                f"message they matched ({named}{more}). Signals past the end "
+                "of those frames got no value — usually a database assigned "
                 "to the wrong channel."
             )
 
