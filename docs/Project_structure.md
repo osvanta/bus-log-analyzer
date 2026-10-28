@@ -226,7 +226,11 @@ empty measurement with no error and nothing to point at.
   the padding of the fixed 64-byte record. `LoadWorker` counts frames shorter
   than the message they matched and reports the total — the visible symptom of
   a database on the wrong channel. A bus-logging MF4 is decoded by asammdf,
-  which still reads the padding.
+  which reads the padding; `MDFCANReader` finds the frames shorter than their
+  message from `DataLength` (keeping only those, so memory follows their
+  number), matches them to asammdf's samples by time stamp, and leaves out
+  the same samples in the lazy and the eager read, reporting the count among
+  the load warnings. CAN only: a LIN bus-logging MF4 still reads padding.
 - `blf_content.py` scans object types — stopping at the first CAN object, so a
   normal CAN log costs one container — and `reader_factory` refuses a BLF
   holding *neither* CAN nor LIN. That check runs **before** the database check:

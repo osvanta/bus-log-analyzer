@@ -141,16 +141,94 @@ def _bus_logging_keys(mdf) -> dict[str, list[int]]:
 DBC_GROUP_BASE = 1 << 20
 
 
+def _bytes_needed(signal) -> int:
+    """How many bytes a frame must hold for *signal*, a cantools signal, to be
+    in it, as cantools decides with ``allow_truncated``."""
+    if signal.byte_order == "little_endian":
+        last_bit = signal.start + signal.length - 1
+    else:
+        # Motorola: the start bit is the most significant one, counted from
+        # bit 7 of byte 0 down; the signal runs on in transmission order.
+        last_bit = 8 * (signal.start // 8) + (7 - signal.start % 8) + signal.length - 1
+    return last_bit // 8 + 1
+
+
+def _j1939_pgn_and_sa(frame_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The PGN and source address of 29-bit frame IDs, as asammdf reads them."""
+    tmp = frame_ids >> 8
+    pf = (frame_ids >> 16) & 0xFF
+    pgn = np.where(pf >= 240, (tmp & 0x3FF00) + (tmp & 0xFF), tmp & 0x3FF00)
+    return pgn, frame_ids & 0xFF
+
+
+class _ShortFrames:
+    """
+    The samples asammdf decoded from frames too short to hold them.
+
+    asammdf reads each frame's ``DataBytes`` at its message's full length and
+    never its ``DataLength``, so a signal past the end of a short frame comes
+    back as whatever pads the record. The other formats leave such a signal
+    out of that frame, as cantools and the CAN Trace do. For each decoded
+    group with short frames this keeps the length of the frame behind each
+    sample and the bytes each signal needs, so the same samples are left out
+    wherever the group is read.
+    """
+
+    def __init__(self) -> None:
+        self._groups: dict[int, tuple[np.ndarray, dict[str, int]]] = {}
+        self.frames = 0                  # shorter than the message they matched
+        self.messages: set[str] = set()
+
+    def add(self, group: int, lengths: np.ndarray, needed: dict[str, int]) -> None:
+        self._groups[group] = (lengths, needed)
+
+    def has(self, group: int) -> bool:
+        return group in self._groups
+
+    def keep(self, group: int, signal_name: str, count: int) -> np.ndarray | None:
+        """Which of the *count* samples of *signal_name* in *group* came from
+        frames that hold it; None when all did, or when *count* is not the
+        group's (nothing is left out on a guess)."""
+        entry = self._groups.get(group)
+        if entry is None:
+            return None
+        lengths, needed = entry
+        need = needed.get(signal_name)
+        if need is None or len(lengths) != count:
+            return None
+        keep = lengths >= need
+        return None if keep.all() else keep
+
+    def count(self, group: int, signal_name: str, cycles: int) -> int:
+        """How many of the group's *cycles* samples *signal_name* keeps."""
+        keep = self.keep(group, signal_name, cycles)
+        return cycles if keep is None else int(keep.sum())
+
+    def apply(self, group: int, signal_name: str, timestamps, values, display):
+        """*timestamps*, *values* and *display* values without the samples
+        from frames too short for *signal_name*."""
+        keep = self.keep(group, signal_name, len(timestamps))
+        if keep is None:
+            return timestamps, values, display
+        if display is not None and len(display):
+            display = (
+                np.asarray(display)[keep] if isinstance(display, np.ndarray)
+                else [display[i] for i in np.flatnonzero(keep).tolist()]
+            )
+        return np.asarray(timestamps)[keep], np.asarray(values)[keep], display
+
+
 class _BusDecodeHandles:
     """What a bus decode hands over: its open decoded MDFs and signal names."""
 
     def __init__(self, native_source, extracted, recovery_path,
-                 j1939_groups, metadata_by_key) -> None:
+                 j1939_groups, metadata_by_key, short_frames=None) -> None:
         self.native_source = native_source
         self.extracted = extracted
         self.recovery_path = recovery_path
         self.j1939_groups = j1939_groups
         self.metadata_by_key = metadata_by_key
+        self.short_frames = short_frames or _ShortFrames()
 
     def close(self) -> None:
         for mdf in (self.extracted, self.native_source):
@@ -179,10 +257,11 @@ class BusDecodeSources:
 class _JoinedSampleSource:
     """A bus log's recorder-decoded and DBC-decoded groups as one source."""
 
-    def __init__(self, native, dbc, recovery_path) -> None:
+    def __init__(self, native, dbc, recovery_path, short_frames=None) -> None:
         self._native = native
         self._dbc = dbc
         self._recovery_path = recovery_path
+        self._short_frames = short_frames or _ShortFrames()
 
     def _part(self, group: int):
         if group >= DBC_GROUP_BASE:
@@ -199,6 +278,11 @@ class _JoinedSampleSource:
             if source is None or not mine:
                 continue
             for (group, name), parts in source.read_groups(mine, channel_names).items():
+                if base == DBC_GROUP_BASE:
+                    parts = [
+                        (*self._short_frames.apply(group, name, ts, values, display), unit)
+                        for ts, values, display, unit in parts
+                    ]
                 results[(group + base, name)] = parts
         return results
 
@@ -416,10 +500,14 @@ class MDFCANReader:
             for _ch_idx, signal_name, unit in channels:
                 signals.append((group_idx, None, group_name, 0, signal_name, unit, cycles))
         j1939_groups = handles.j1939_groups
-        for group_idx, _name, channels, cycles in (dbc.groups if dbc else ()):
+        short_frames = handles.short_frames
+        for group_idx, _name, channels, group_cycles in (dbc.groups if dbc else ()):
             if group_idx in j1939_groups and j1939_groups[group_idx] is None:
                 continue
             for _ch_idx, signal_name, unit in channels:
+                cycles = short_frames.count(group_idx, signal_name, group_cycles)
+                if group_cycles and not cycles:
+                    continue   # in no frame long enough to hold it
                 meta = handles.metadata_by_key.get((group_idx, signal_name))
                 if meta is None and group_idx in j1939_groups:
                     channel, message_name, message_id = j1939_groups[group_idx]
@@ -434,7 +522,8 @@ class MDFCANReader:
                     message_id, signal_name, unit, cycles,
                 ))
         return BusDecodeSources(
-            _JoinedSampleSource(native, dbc, handles.recovery_path), signals
+            _JoinedSampleSource(native, dbc, handles.recovery_path, short_frames),
+            signals,
         )
 
     def _bus_decode(
@@ -598,11 +687,36 @@ class MDFCANReader:
                 self._j1939_group_identities(extracted, channel_config)
                 if extracted is not None else {}
             )
+            short_frames = _ShortFrames()
+            if extracted is not None:
+                try:
+                    short_frames = self._find_short_frames(
+                        source, extracted, channel_config, j1939_groups
+                    )
+                except Exception as exc:
+                    # Never a reason to lose the decode: the signals keep
+                    # what asammdf decoded, padding included.
+                    self._record_channel_error("Short frames", "DataLength", exc)
+                if short_frames.frames:
+                    named = ", ".join(sorted(short_frames.messages)[:5])
+                    more = (
+                        f" and {len(short_frames.messages) - 5} more"
+                        if len(short_frames.messages) > 5 else ""
+                    )
+                    self.load_warnings.append(
+                        f"{short_frames.frames:,} frame(s) were shorter than the "
+                        f"message they matched ({named}{more}). Signals past the end "
+                        "of those frames got no value — usually a database assigned "
+                        "to the wrong channel."
+                    )
             for group_idx, group in enumerate(
                 extracted.groups if extracted is not None else ()
             ):
                 if group_idx in j1939_groups and j1939_groups[group_idx] is None:
                     continue
+                group_cycles = int(
+                    getattr(getattr(group, "channel_group", None), "cycles_nr", 0) or 0
+                )
                 for ch_idx, decoded_channel in enumerate(group.channels):
                     signal_name = (
                         getattr(decoded_channel, "name", None) or f"Ch{ch_idx}"
@@ -611,6 +725,10 @@ class MDFCANReader:
                         continue
                     if signal_name.lower() in ("time", "t", "timestamps"):
                         continue
+                    if group_cycles and not short_frames.count(
+                        group_idx, signal_name, group_cycles
+                    ):
+                        continue   # in no frame long enough to hold it
                     unit = str(getattr(decoded_channel, "unit", "") or "")
                     if group_idx in j1939_groups:
                         channel, message_name, message_id = j1939_groups[group_idx]
@@ -655,7 +773,7 @@ class MDFCANReader:
                         self.raw_trace_error = str(exc)
                 handles = _BusDecodeHandles(
                     native_source, extracted, recovery_path,
-                    j1939_groups, metadata_by_key,
+                    j1939_groups, metadata_by_key, short_frames,
                 )
                 handed_over = True
                 yield handles
@@ -691,6 +809,11 @@ class MDFCANReader:
                         continue
                     signal_name = old_meta[1]
                     unit = old_meta[2]
+                    ts_arr, num_arr, disp_list = short_frames.apply(
+                        group_idx, signal_name, ts_arr, num_arr, disp_list
+                    )
+                    if not len(ts_arr) and short_frames.has(group_idx):
+                        continue   # in no frame long enough to hold it
                     meta = metadata_by_key.get((group_idx, signal_name))
                     if meta is None and group_idx in j1939_groups:
                         channel, message_name, message_id = j1939_groups[group_idx]
@@ -930,6 +1053,199 @@ class MDFCANReader:
                     raise
                 channel_error(group_name, "LIN_Frame", exc)
         return total
+
+    def _find_short_frames(self, source, extracted, channel_config, j1939_groups) -> _ShortFrames:
+        """
+        Find the samples asammdf decoded from frames too short for them.
+
+        Each CAN group asammdf decoded holds one message's frames from one bus:
+        those with its frame ID, or for J1939 its PGN and source address. The
+        raw frames of that message shorter than it are read (ID, length and
+        time only), and a decoded sample came from a short frame when one of
+        them has its time stamp: asammdf copies the raw time stamps as they
+        are. Only short frames are kept, so memory follows how many there are,
+        not the length of the log.
+        """
+        short = _ShortFrames()
+        # By key: the message's name and length, and the length below which
+        # a frame leaves out one of its signals or falls short of it.
+        messages: dict[tuple, tuple[str, int, int]] = {}
+        group_keys: dict[int, tuple[tuple, dict[str, int]]] = {}
+        for group_idx, group in enumerate(extracted.groups):
+            if group_idx in j1939_groups and j1939_groups[group_idx] is None:
+                continue
+            names = [
+                channel.name for channel in group.channels
+                if getattr(channel, "channel_type", -1) != 1
+                and channel.name.lower() not in ("time", "t", "timestamps")
+            ]
+            if not names:
+                continue
+            channel, message_name, message_id = self._decoded_group_metadata(
+                extracted, group_idx, names[0], channel_config
+            )
+            if channel is None or channel[0] is not BusType.CAN:
+                continue
+            if group_idx in j1939_groups:
+                frame_id, extended = j1939_groups[group_idx][2], True
+                pgn, sa = _j1939_pgn_and_sa(np.array([frame_id], dtype=np.int64))
+                key = ("j1939", channel[1], int(pgn[0]), int(sa[0]))
+            else:
+                frame_id = message_id
+                extended = self._decoded_group_extended(extracted, group_idx, message_id)
+                key = ("id", channel[1], message_id, extended)
+            message = self._database_message(
+                channel, message_name, frame_id, extended, channel_config
+            )
+            if message is None:
+                continue
+            needed = {
+                signal.name: _bytes_needed(signal)
+                for signal in message.signals if signal.name in names
+            }
+            length = int(message.length or 0)
+            limit = max([length, *needed.values()])
+            if key in messages:
+                limit = max(limit, messages[key][2])
+            messages[key] = (message.name, length, limit)
+            group_keys[group_idx] = (key, needed)
+        if not group_keys:
+            return short
+
+        found = self._short_raw_frames(source, messages)
+        for key, (_times, lengths) in found.items():
+            name, length, _limit = messages[key]
+            count = int((lengths < length).sum())
+            if count:
+                short.frames += count
+                short.messages.add(name)
+        for group_idx, (key, needed) in group_keys.items():
+            if key not in found:
+                continue
+            times, lengths = found[key]
+            master = np.asarray(extracted.get_master(group_idx), dtype=np.float64)
+            at = np.minimum(np.searchsorted(times, master), len(times) - 1)
+            hit = times[at] == master
+            if not hit.any():
+                continue
+            # A frame not among the short ones held the whole message.
+            sample_lengths = np.full(len(master), 255, dtype=np.uint8)
+            sample_lengths[hit] = lengths[at[hit]]
+            shortest = int(sample_lengths.min())
+            if any(need > shortest for need in needed.values()):
+                short.add(group_idx, sample_lengths, needed)
+        return short
+
+    @staticmethod
+    def _short_raw_frames(source, messages) -> dict[tuple, tuple[np.ndarray, np.ndarray]]:
+        """
+        By key of *messages*: the time stamps, in order, and lengths of its raw
+        frames shorter than its limit. Frames are matched to a key as asammdf
+        matches them to a message: by bus, frame ID and IDE, or for J1939 by
+        bus, PGN and source address. A group without ``DataLength`` is skipped:
+        its frames' lengths are unknown.
+        """
+        def code(key) -> int:
+            # One number per key: the bus above, then the frame ID and IDE,
+            # or for J1939 the PGN and source address.
+            kind, bus, first, second = key
+            if kind == "id":
+                return (int(bus) << 32) | (int(second) << 31) | int(first)
+            return (int(bus) << 32) | (int(first) << 8) | int(second)
+
+        # By kind: the keys' numbers in order, their limits and the keys.
+        tables = {}
+        for kind in ("id", "j1939"):
+            keys = sorted((key for key in messages if key[0] == kind), key=code)
+            if keys:
+                tables[kind] = (
+                    np.asarray([code(key) for key in keys], dtype=np.uint64),
+                    np.asarray([messages[key][2] for key in keys], dtype=np.int64),
+                    keys,
+                )
+
+        collected: dict[tuple, list] = {}
+        for group_idx, group in enumerate(getattr(source, "groups", ())):
+            names = [getattr(channel, "name", "") for channel in group.channels]
+            if not {
+                "CAN_DataFrame.BusChannel", "CAN_DataFrame.ID", "CAN_DataFrame.DataLength",
+            } <= set(names):
+                continue
+            wanted = ["CAN_DataFrame.BusChannel", "CAN_DataFrame.ID",
+                      "CAN_DataFrame.DataLength"]
+            if "CAN_DataFrame.IDE" in names:
+                wanted.append("CAN_DataFrame.IDE")
+            cycles = int(getattr(group.channel_group, "cycles_nr", 0) or 0)
+            for offset in range(0, cycles, _TRACE_CHUNK_RECORDS):
+                # The columns and their time stamps in one pass over the
+                # records; the payloads are never read.
+                signals = source.select(
+                    [(name, group_idx, names.index(name)) for name in wanted],
+                    record_offset=offset,
+                    record_count=min(_TRACE_CHUNK_RECORDS, cycles - offset),
+                )
+                buses, ids, lengths = (
+                    np.asarray(signal.samples) for signal in signals[:3]
+                )
+                buses = buses.astype(np.uint64)
+                ids = ids.astype(np.uint64)
+                if len(signals) > 3:
+                    ide = np.asarray(signals[3].samples).astype(np.uint64) & np.uint64(1)
+                else:
+                    ide = (ids >> np.uint64(31)) & np.uint64(1)
+                ids &= np.uint64(0x1FFFFFFF)
+                lengths = lengths.astype(np.int64)
+                times = np.asarray(signals[0].timestamps, dtype=np.float64)
+                for kind, (codes_sorted, limits_sorted, keys_sorted) in tables.items():
+                    if kind == "id":
+                        codes = (buses << np.uint64(32)) | (ide << np.uint64(31)) | ids
+                    else:
+                        pgn, sa = _j1939_pgn_and_sa(ids)
+                        codes = (buses << np.uint64(32)) | (pgn << np.uint64(8)) | sa
+                    at = np.minimum(np.searchsorted(codes_sorted, codes), len(codes_sorted) - 1)
+                    rows = (codes_sorted[at] == codes) & (lengths < limits_sorted[at])
+                    if not rows.any():
+                        continue
+                    for position in np.unique(at[rows]).tolist():
+                        mine = rows & (at == position)
+                        collected.setdefault(keys_sorted[position], []).append(
+                            (times[mine], lengths[mine])
+                        )
+
+        found = {}
+        for key, parts in collected.items():
+            times = np.concatenate([part[0] for part in parts])
+            lengths = np.concatenate([part[1] for part in parts])
+            order = np.argsort(times, kind="stable")
+            found[key] = (times[order], lengths[order].astype(np.uint8))
+        return found
+
+    @staticmethod
+    def _decoded_group_extended(extracted, group_idx, message_id) -> bool:
+        """Whether asammdf decoded *group_idx* from extended frames
+        (``EXT=True`` in its names); by the ID's size when it does not say."""
+        channel_group = getattr(extracted.groups[group_idx], "channel_group", None)
+        source = getattr(channel_group, "acq_source", None)
+        text = (f"{getattr(source, 'path', '') or ''} "
+                f"{getattr(channel_group, 'acq_name', '') or ''}")
+        match = re.search(r"\bEXT=(True|False)\b", text, re.IGNORECASE)
+        if match:
+            return match.group(1).lower() == "true"
+        return message_id > 0x7FF
+
+    def _database_message(self, channel, message_name, frame_id, extended, channel_config):
+        """The database message asammdf decoded *frame_id* on *channel* as."""
+        if channel_config is not None:
+            decoder = channel_config.decoder_for(*channel)
+        else:
+            decoder = self.decoder
+        if decoder is None or not hasattr(decoder, "candidates_for"):
+            return None
+        return next(
+            (message for message in decoder.candidates_for(frame_id, extended)
+             if message.name == message_name),
+            None,
+        )
 
     @classmethod
     def _j1939_group_identities(cls, extracted, channel_config):
