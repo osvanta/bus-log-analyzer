@@ -13,12 +13,13 @@ Two kinds of input, each with the steps that make sense for it:
 * **MDF / MF4** — through asammdf: join (``MDF.concatenate``), keep signals
   (``filter``), cut (``cut``, seconds from the first sample), resample
   (``resample``); written as MF4 or CSV (one time column for every signal).
-* **BLF / ASC** — raw frames, through python-can's readers and writers: join
-  and cut, written as BLF, ASC or MF4 (ASAM bus logging). Frames are copied
-  as they are; there are no signals to choose or resample.
+* **BLF / ASC / TRC** — raw frames, through python-can's readers and writers:
+  join and cut, written as BLF, ASC or MF4 (ASAM bus logging). Frames are
+  copied as they are; there are no signals to choose or resample.
 
-Never through the application's own measurement readers, and never over one
-of the input files.
+Never through the application's own measurement readers, except TRC: python-can
+cannot read every version of it, so the trace reader gives its frames. Never
+over one of the input files.
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Callable
 
 MDF_INPUTS = ('.mf4', '.mdf', '.dat')
-RAW_INPUTS = ('.blf', '.asc')
+RAW_INPUTS = ('.blf', '.asc', '.trc')
 MDF_OUTPUTS = ('.mf4', '.csv')
 RAW_OUTPUTS = ('.blf', '.asc', '.mf4')
 
@@ -62,14 +63,15 @@ class ConvertJob:
             return 'mdf'
         if len(suffixes) == 1 and suffixes <= set(RAW_INPUTS):
             return 'raw'
-        raise ConvertError('Join files of one format only: all MF4/MDF, all BLF or all ASC.')
+        raise ConvertError('Join files of one format only: all MF4/MDF, all BLF, all ASC '
+                           'or all TRC.')
 
     def check(self) -> None:
         kind = self.kind
         outputs = MDF_OUTPUTS if kind == 'mdf' else RAW_OUTPUTS
         suffix = Path(self.output).suffix.lower()
         if suffix not in outputs:
-            raise ConvertError(f'From {"MF4/MDF" if kind == "mdf" else "BLF/ASC"} the output '
+            raise ConvertError(f'From {"MF4/MDF" if kind == "mdf" else "BLF/ASC/TRC"} the output '
                                f'can be {", ".join(s.upper().lstrip(".") for s in outputs)}.')
         target = Path(self.output).resolve()
         if any(Path(p).resolve() == target for p in self.inputs):
@@ -77,7 +79,7 @@ class ConvertJob:
         if self.start is not None and self.end is not None and self.end <= self.start:
             raise ConvertError('The end of the time range must come after its start.')
         if kind == 'raw' and (self.keep or self.raster):
-            raise ConvertError('BLF and ASC hold frames: signals can be chosen and '
+            raise ConvertError('BLF, ASC and TRC hold frames: signals can be chosen and '
                                'resampled in MF4/MDF files only.')
         if self.raster is not None and self.raster <= 0:
             raise ConvertError('The resampling raster must be greater than zero.')
@@ -165,7 +167,11 @@ def _convert_mdf(job: ConvertJob, progress) -> None:
 
 def _reader(path: Path):
     import can
-    return can.BLFReader(str(path)) if path.suffix.lower() == '.blf' else can.ASCReader(str(path))
+    suffix = path.suffix.lower()
+    if suffix == '.trc':
+        from core.readers.trc_can_reader import TRCCANReader
+        return TRCCANReader(path).iter_messages()
+    return can.BLFReader(str(path)) if suffix == '.blf' else can.ASCReader(str(path))
 
 
 def _writer(path: Path):

@@ -147,6 +147,23 @@ def asc_path() -> Path:
 
 
 @pytest.fixture(scope="session")
+def trc_path() -> Path:
+    """The frames of sample.asc as a TRC 2.1 trace file."""
+    path = FIXTURES_DIR / "sample.trc"
+    if not path.exists():
+        try:
+            subprocess.check_call(
+                [sys.executable, str(FIXTURES_DIR / "_generate.py")],
+                timeout=60,
+            )
+        except Exception as exc:
+            skip_or_fail(f"Could not generate sample.trc: {exc}")
+    if not path.exists():
+        skip_or_fail("sample.trc not found — run tests/fixtures/_generate.py")
+    return path
+
+
+@pytest.fixture(scope="session")
 def lin_blf_path() -> Path:
     """A BLF holding LIN traffic and no CAN — python-can reads zero frames."""
     path = FIXTURES_DIR / "sample_lin.blf"

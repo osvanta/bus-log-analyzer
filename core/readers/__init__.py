@@ -19,10 +19,10 @@ _install_asammdf_guard()
 
 
 # ── Formats that always require DBC (regardless of file content) ──────────
-CAN_RAW_SUFFIXES = {'.blf', '.asc'}
+CAN_RAW_SUFFIXES = {'.blf', '.asc', '.trc'}
 
 # ── All supported measurement file suffixes ───────────────────────────────
-ALL_SUFFIXES = {'.blf', '.asc', '.mf4', '.mdf', '.csv'}
+ALL_SUFFIXES = {'.blf', '.asc', '.trc', '.mf4', '.mdf', '.csv'}
 
 # Maximum frames to read during a lightweight pre-scan (keeps it < 1 s)
 _PRESCAN_LIMIT = 50_000
@@ -71,7 +71,7 @@ def prescan_measurement(
     Lightweight pre-scan: read up to *_PRESCAN_LIMIT* raw frames from *path*
     and return the bus-tagged channels and frame IDs without decoding signals.
 
-    Works for BLF, ASC, MDF bus logging (CAN and LIN), and raw CAN CSV
+    Works for BLF, ASC, TRC, MDF bus logging (CAN and LIN), and raw CAN CSV
     exports. Pre-decoded CSV/MDF files return an empty result (channels come
     from decoded signals instead).
 
@@ -101,6 +101,20 @@ def prescan_measurement(
             ids_per_channel={
                 (BusType.CAN, int(ch)): set(ids) for ch, ids in csv_ids.items()
             },
+        )
+
+    if suffix == '.trc':
+        # Through the loader's own reader: python-can's fails on some
+        # versions of the format. A trace file carries CAN only.
+        if progress:
+            progress("Scanning measurement for channels…")
+        try:
+            _prescan_trc(path, ids_per_channel)
+        except Exception:
+            pass
+        return PrescanResult(
+            channels=sorted(ids_per_channel, key=sort_key),
+            ids_per_channel=ids_per_channel,
         )
 
     if suffix not in CAN_RAW_SUFFIXES and suffix not in ('.mf4', '.mdf'):
@@ -190,6 +204,25 @@ def _prescan_lin_raw(
             # Last observation wins; a frame's length does not vary within a
             # cluster, and disagreement means the log is not what it claims.
             lengths_per_channel.setdefault(key, {})[frame_id] = int(dlcs[index])
+        seen += len(timestamps)
+        if seen >= _PRESCAN_LIMIT:
+            break
+
+
+def _prescan_trc(path: str, ids_per_channel: dict[BusChannel, set[int]]) -> None:
+    """Collect CAN channels and frame IDs from a TRC file's first frames."""
+    from core.raw_frame_store import FLAG_ERROR
+    from core.readers.trc_can_reader import TRCCANReader
+
+    seen = 0
+    for _base_ts, timestamps, channels, arb_ids, _dlcs, _dirs, flags, _data \
+            in TRCCANReader(path).iter_raw_batches():
+        for index in range(len(timestamps)):
+            if flags[index] & FLAG_ERROR:
+                continue        # an error frame has no ID of its own
+            ids_per_channel.setdefault(
+                (BusType.CAN, int(channels[index])), set()
+            ).add(int(arb_ids[index]))
         seen += len(timestamps)
         if seen >= _PRESCAN_LIMIT:
             break
@@ -312,7 +345,7 @@ def dbc_required_for(path: str) -> bool:
     """
     Return True when the measurement file needs a database to decode signals.
 
-    For .blf / .asc: always True.
+    For .blf / .asc / .trc: always True.
     For .mf4 / .mdf: True only for raw-only bus recordings (CAN or LIN). Mixed
         MDFs containing existing decoded signals can load those signals without
         a database, so they return False.
@@ -370,7 +403,8 @@ def _reject_ldf_database(measurement_path: str, dbc_path: str) -> None:
     """Refuse an LDF for a format that carries no LIN traffic.
 
     BLF, ASC and MF4 all decode LIN, so an LDF is legitimate there. A raw CAN
-    CSV export is not — it has no bus dimension at all — and without this the
+    CSV export is not — it has no bus dimension at all — nor is a TRC trace,
+    which records CAN (LIN traces are a format of their own); without this the
     LDF would be loaded, matched against nothing, and reported as a database
     that simply does not fit the file.
     """
@@ -450,6 +484,17 @@ def reader_factory(
         from core.readers.asc_can_reader import ASCCANReader
         from core.dbc_decoder import DBCDecoder
         return ASCCANReader(measurement_path, DBCDecoder(dbc_path))
+
+    if suffix == '.trc':
+        if not dbc_path:
+            raise ValueError(
+                "A DBC or ARXML file is required for TRC files."
+            )
+        # A trace file carries CAN only; LIN traces are a format of their own.
+        _reject_ldf_database(measurement_path, dbc_path)
+        from core.readers.trc_can_reader import TRCCANReader
+        from core.dbc_decoder import DBCDecoder
+        return TRCCANReader(measurement_path, DBCDecoder(dbc_path))
 
     if suffix in ('.mf4', '.mdf'):
         from core.readers.mdf_reader import MDFReader

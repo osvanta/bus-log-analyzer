@@ -24,6 +24,8 @@ This project is not affiliated with, endorsed by, or connected to:
 
 - **Vector Informatik GmbH** — makers of CANalyzer, CANdb++, and the BLF /
   ASC file formats
+- **PEAK-System Technik GmbH** — makers of PCAN-View, PCAN-Explorer, and the TRC
+  trace file format
 - **ASAM e.V.** — authors of the MDF specification
 - **Qt Group** — makers of the Qt framework
 

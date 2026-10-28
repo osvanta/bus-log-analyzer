@@ -171,6 +171,13 @@ def _ranges(vb):
     return [x0, x1], [y0, y1]
 
 
+def _assert_view_unchanged(vb, before):
+    """Each axis on its own: pytest.approx compares flat sequences only
+    (from pytest 9.2 it refuses nested ones)."""
+    for now, then in zip(_ranges(vb), before, strict=True):
+        assert now == pytest.approx(then)
+
+
 def _pixels(vb):
     """A view's size of two pixels, in its time and its values."""
     (x0, x1), (y0, y1) = vb.viewRange()
@@ -321,7 +328,7 @@ def test_a_box_too_flat_to_mean_anything_zooms_nowhere(qapp, window):
 
     _drag(qapp, panel, (2.0, 50.0), (4.0, flat.y()), row=0)
 
-    assert _ranges(row0) == pytest.approx(before)
+    _assert_view_unchanged(row0, before)
 
 
 def test_a_click_still_places_cursor1_once_no_second_click_follows(qapp, window):
@@ -338,7 +345,7 @@ def test_a_click_still_places_cursor1_once_no_second_click_follows(qapp, window)
 
     assert window.btn_cursor1.isChecked()
     assert panel.v_line.value() == pytest.approx(6.0, abs=_pixels(row0)[0])
-    assert _ranges(row0) == pytest.approx(before)
+    _assert_view_unchanged(row0, before)
 
 
 def test_a_shift_click_still_places_cursor2_and_zooms_nowhere(qapp, window):
@@ -354,7 +361,7 @@ def test_a_shift_click_still_places_cursor2_and_zooms_nowhere(qapp, window):
     assert window.btn_cursor2.isChecked()
     assert panel.v_line2.value() == pytest.approx(6.0, abs=tx)
     # Switching Cursor 2 on builds the rows again.
-    assert _ranges(panel._stacked_plots[0].vb) == pytest.approx(before)
+    _assert_view_unchanged(panel._stacked_plots[0].vb, before)
 
 
 def test_two_clicks_too_far_apart_for_a_double_click_both_count(qapp, window):
@@ -464,7 +471,7 @@ def test_without_rectangle_zoom_a_double_click_leaves_the_view(qapp, window):
 
     _double_click(qapp, panel, (3.0, 50.0))
 
-    assert _ranges(row0) == pytest.approx(before)
+    _assert_view_unchanged(row0, before)
     assert window.btn_cursor1.isChecked()   # placed at once, as before
 
 

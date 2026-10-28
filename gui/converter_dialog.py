@@ -28,7 +28,7 @@ from core.signal_selection import (apply_selection, read_selection, selection_of
                                    write_selection)
 from gui.user_settings import read_setting, write_setting
 
-_INPUT_FILTER = 'Measurements (*.mf4 *.mdf *.dat *.blf *.asc);;All files (*)'
+_INPUT_FILTER = 'Measurements (*.mf4 *.mdf *.dat *.blf *.asc *.trc);;All files (*)'
 _OUTPUT_FILTERS = {'.mf4': 'MF4 (*.mf4)', '.csv': 'CSV (*.csv)',
                    '.blf': 'BLF (*.blf)', '.asc': 'ASC (*.asc)'}
 _LIST_FILTER = 'Signal lists (*.txt);;All files (*)'
@@ -438,10 +438,11 @@ class ConverterDialog(QDialog):
             widget.setEnabled(mdf)
         self.signals_note.setText(
             (f'{len(self.keep)} signals chosen' if self.keep else 'All signals') if mdf
-            else 'BLF and ASC hold frames: no signals to choose')
+            else 'BLF, ASC and TRC hold frames: no signals to choose')
         kind = self._kind()
         if self.inputs() and kind is None:
-            self.status.setText('Join files of one format only: all MF4/MDF, all BLF or all ASC.')
+            self.status.setText('Join files of one format only: all MF4/MDF, all BLF, all ASC '
+                                'or all TRC.')
         else:
             outputs = MDF_OUTPUTS if kind == 'mdf' else RAW_OUTPUTS
             self.status.setText(

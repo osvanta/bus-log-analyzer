@@ -32,6 +32,7 @@ Trace, the raw CAN and LIN frames:
 |---|---|---|
 | BLF (`.blf`) | Raw CAN frames | DBC or ARXML required |
 | ASC (`.asc`) | Raw CAN frames | DBC or ARXML required |
+| TRC (`.trc`) | Raw CAN frames (PEAK trace, versions 1.0 to 3.0) | DBC or ARXML required |
 | MDF4/MDF3 (`.mf4`, `.mdf`) | Raw CAN bus logging or pre-decoded signals | Required only for raw bus logging |
 | CSV (`.csv`) | Raw CAN export, narrow signals, or wide signals | Required only for raw CAN data |
 
@@ -40,7 +41,7 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 
 ## Current capabilities
 
-- Fast bulk loading and decoding for BLF, ASC, MDF/MF4, and CSV measurements.
+- Fast bulk loading and decoding for BLF, ASC, TRC, MDF/MF4, and CSV measurements.
 - Searchable channel/message/signal tree with multi-select plotting and drag-and-drop.
 - Indexed **Trace** of the raw CAN and LIN frames, with filtering and on-demand signal decode. Its **Δt** column shows the time since the previous frame with the same ID on the same channel, the bytes that changed since that frame are highlighted, and it can follow plot Cursor 1 both ways.
 - Formula-based **Calculated Signal** with arithmetic, comparisons, logical expressions, temporal operations, and a stateful diagnostic counter; **Insert function** (`Shift+F3`) lists every function by category, with how to use each. The definitions are saved in configurations.
@@ -49,7 +50,7 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 - Named **markers** on the plot: add one where you right-click or at Cursor 1 (`M`), drag, rename, go to; they are saved in configurations and written into MF4 exports as events.
 - **File ▸ Measurement info** (`Ctrl+I`): the file's format, size, start time and duration, and for MF4 its header, events and attachments. MF4 events can be drawn on the plot.
 - Export of the plotted signals to CSV or Excel (`.xlsx`), on a selected signal's timestamps or a recurrence time you enter, or to MF4; **File ▸ Save decoded measurement as MF4** writes every decoded signal.
-- **Tools ▸ Convert files**: join, cut and resample measurements, keep chosen signals, and convert between BLF, ASC, MF4 and CSV. Signal selections can be saved by name and reused on other files, or shared as text files.
+- **Tools ▸ Convert files**: join, cut and resample measurements, keep chosen signals, and convert between BLF, ASC, MF4 and CSV (TRC as an input). Signal selections can be saved by name and reused on other files, or shared as text files.
 - JSON configuration save/load for measurement paths, database mapping, calculated signals, plotted order, groups, colors, visibility, axes, cursors, markers, and display settings.
 - YAML rule-based diagnostics for expressions, ranges, fault flags, and message loss; optional GitHub Models analysis is available through `Ctrl+Shift+A`.
 
@@ -140,7 +141,7 @@ Output is written to `dist\BusLogAnalyzer\`. Pushing a `v*.*.*` tag runs the Win
 
 ```text
 app.py                 Application entry point and version
-core/readers/          BLF, ASC, MDF/MF4, and CSV readers
+core/readers/          BLF, ASC, TRC, MDF/MF4, and CSV readers
 core/                  Decode, signal storage, export, and generated-signal logic
 core/diagnostics/      Rule engine and optional AI-assisted diagnostics
 gui/                   Main window, plots, database manager, CAN Trace, diagnostics

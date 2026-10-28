@@ -15,8 +15,8 @@ bus-log-analyzer/
 │   ├── blf_reader.py             # BLF decompression into packed column batches; CAN + LIN objects
 │   ├── export.py                 # CSV export
 │   ├── mf4_writer.py             # Decoded signals → MF4 (asammdf); marks each group's bus channel so the file reopens with the same keys; plot markers become MF4 marker events
-│   ├── converter.py              # Tools ▸ Convert files: join / cut / keep signals / resample; MF4·MDF via asammdf, BLF·ASC frames via python-can
-│   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line
+│   ├── converter.py              # Tools ▸ Convert files: join / cut / keep signals / resample; MF4·MDF via asammdf, BLF·ASC frames via python-can, TRC via its reader
+│   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line; TRC version, start, connections, events
 │   ├── signal_statistics.py      # Min / max / mean / std dev / RMS / samples of a signal over a time range
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
 │   ├── signal_selection.py       # Convert files' saved signal selections: match by name or pattern, read/write .txt lists
@@ -28,6 +28,7 @@ bus-log-analyzer/
 │   │   ├── blf_can_reader.py     # BLF packed-batch + DBC/ARXML vectorized pipeline
 │   │   ├── blf_content.py        # Which buses a BLF holds; catches logs that read as empty
 │   │   ├── asc_can_reader.py     # Direct classic CAN/CAN-FD/LIN ASC column-array parser
+│   │   ├── trc_can_reader.py     # PEAK trace (.trc) 1.0–3.0 column-array parser, written from PEAK's published format
 │   │   ├── mdf_reader.py         # Pre-decoded MDF batched arrays + CAN/LIN bus-logging probe
 │   │   ├── mdf_can_reader.py     # Native asammdf CAN+LIN bus extraction; python-can raw fallback
 │   │   └── csv_reader.py         # Wide and narrow CSV
@@ -137,6 +138,17 @@ whose signals cross to the GUI thread); `core/` imports no Qt at all, which
 - **ASC + database:** `ASCCANReader.iter_raw_batches()` parses classic CAN,
   CAN-FD and LIN ASC text directly into packed column batches without
   allocating a `can.Message` or `RawFrame` per record.
+- **TRC + database:** `TRCCANReader.iter_raw_batches()` does the same for PEAK
+  trace files, every version from 1.0 to 3.0, choosing the line layout from the
+  `$FILEVERSION` (and, from 2.0, the `$COLUMNS`) header line. python-can's
+  `TRCReader` is not used: it fails on 1.2, 3.0 and 1.0 files with error frames.
+  Times are absolute (`$STARTTIME`, local wall clock, as BLF's start) from 1.1
+  on. What the store cannot hold — CAN XL frames, CAN XL protocol exceptions,
+  J1939 messages over 64 bytes, unreadable lines — is counted in
+  `load_warnings`. Other programs save `.trc` files too (text logs starting
+  `@ TEXT @`, for one): a file none of whose first 20 lines of data reads as a PEAK trace
+  line is refused when its header is read, so Load, Measurement info and
+  Convert files say why instead of loading nothing.
 - **BLF + database:** `BLFReaderService.iter_raw_batches()` uses python-can for
   BLF container decompression and emits packed column batches without
   per-frame tuples at the LoadWorker boundary. LIN objects, which python-can
@@ -237,12 +249,15 @@ empty measurement with no error and nothing to point at.
    CAN FD frame sent with bit rate switch. Readers set them where the file
    records them: BLF (RTR bit, BRS bit, `CAN_ERROR`, `CAN_ERROR_EXT`,
    `CAN_FD_ERROR_64`), ASC (`ErrorFrame`, `r` frames, the CAN FD BRS column),
+   TRC (`ER`/`Error` lines, `RR`/`RTR` frames, the `FB`/`BI` types),
    MF4 bus logging (`CAN_ErrorFrame`, `CAN_RemoteFrame`, `CAN_DataFrame.BRS`)
    and raw CAN CSV (`BRS`, `RTR` columns).
 6. What a logger records about the bus rather than a frame becomes a
    `BusStatus` record on `RawFrameStore.bus_status`, on the frames' time base:
    BLF driver statistics, driver errors (TEC/REC) and overload frames; ASC
-   `Statistic:` and controller status lines. Rare, so a plain list.
+   `Statistic:` and controller status lines; TRC hardware status (`ST`,
+   `Warng`), error counters (`EC`, and the counters of an error frame) and
+   overload frames (`OF`). Rare, so a plain list.
 7. An MF4 written by this application (`core.mf4_writer`) names each channel
    group's bus channel in its acquisition source ("CAN1"), with the application
    as the source's name. `MDFSampleSource.group_channels` reads it back and the
