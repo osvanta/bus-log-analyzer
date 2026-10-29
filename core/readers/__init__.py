@@ -10,12 +10,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from core.asammdf_fixes import install as _install_asammdf_fixes
 from core.asammdf_guard import install as _install_asammdf_guard
 from core.bus_types import BusChannel, BusType, sort_key
 from core.readers.base import MeasurementReader, UnsupportedFormatError
 
-# Before any reader touches asammdf: some measurements made it overrun memory.
+# Before any reader touches asammdf: some measurements made it overrun memory,
+# and its bus-logging decode must give what the other formats give.
 _install_asammdf_guard()
+_install_asammdf_fixes()
 
 
 # ── Formats that always require DBC (regardless of file content) ──────────

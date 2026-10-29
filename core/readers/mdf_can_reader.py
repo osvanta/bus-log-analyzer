@@ -86,19 +86,20 @@ def _record_chunks(source, group_idx, index, group):
         )
 
 
-def _bus_logging_keys(mdf) -> dict[str, list[int]]:
+def _bus_channels(mdf) -> dict[str, list[int]]:
     """
-    The keys asammdf's ``bus_logging_map`` would have, read a chunk at a time.
+    The CAN and LIN bus channels in a bus log, read a chunk at a time.
 
-    asammdf builds that map while opening a file unless told not to
+    asammdf builds a bus-logging map while opening a file unless told not to
     (``process_bus_logging=False``), from per-frame arrays of each whole
-    bus-logging group: for a long log, memory in proportion to it. Only the
-    keys are used here: the CAN bus channels in the data, and (asammdf's own
-    LIN layout) the LIN frame IDs of groups without an attached database.
+    bus-logging group: for a long log, memory in proportion to it. Its CAN
+    keys are the bus channels, but its LIN keys are frame IDs, so the
+    channels are read from the frames here. A LIN group without
+    ``BusChannel`` is on channel 1, as asammdf takes it.
     """
     from asammdf.blocks import v4_constants as v4c
 
-    keys: dict[str, set[int]] = {"CAN": set(), "LIN": set()}
+    channels: dict[str, set[int]] = {"CAN": set(), "LIN": set()}
     for group_idx, group in enumerate(getattr(mdf, "groups", ())):
         channel_group = getattr(group, "channel_group", None)
         if channel_group is None or not channel_group.flags & v4c.FLAG_CG_BUS_EVENT:
@@ -113,14 +114,16 @@ def _bus_logging_keys(mdf) -> dict[str, list[int]]:
             source.bus_type in (v4c.BUS_TYPE_CAN, v4c.BUS_TYPE_OTHER)
             and "CAN_DataFrame" in names
         ):
-            reads.append(("CAN", "CAN_DataFrame.BusChannel", None))
+            reads.append(("CAN", "CAN_DataFrame.BusChannel"))
         if (
             source.bus_type in (v4c.BUS_TYPE_LIN, v4c.BUS_TYPE_OTHER)
             and "LIN_Frame" in names
-            and group.channels[names.index("LIN_Frame")].attachment is None
         ):
-            reads.append(("LIN", "LIN_Frame.ID", 0x1FFFFFFF))
-        for bus, channel_name, mask in reads:
+            if "LIN_Frame.BusChannel" in names:
+                reads.append(("LIN", "LIN_Frame.BusChannel"))
+            elif cycles:
+                channels["LIN"].add(1)
+        for bus, channel_name in reads:
             for offset in range(0, cycles, _TRACE_CHUNK_RECORDS):
                 values = mdf.get(
                     channel_name,
@@ -129,11 +132,8 @@ def _bus_logging_keys(mdf) -> dict[str, list[int]]:
                     record_count=min(_TRACE_CHUNK_RECORDS, cycles - offset),
                     samples_only=True,
                 )[0]
-                values = np.unique(values)
-                if mask is not None:
-                    values = np.unique(values.astype("<u4") & mask)
-                keys[bus].update(int(value) for value in values)
-    return {bus: sorted(found) for bus, found in keys.items()}
+                channels[bus].update(int(value) for value in np.unique(values))
+    return {bus: sorted(found) for bus, found in channels.items()}
 
 
 #: SampleCache numbers a DBC-decoded group g as DBC_GROUP_BASE + g, apart from
@@ -171,7 +171,9 @@ class _ShortFrames:
     out of that frame, as cantools and the CAN Trace do. For each decoded
     group with short frames this keeps the length of the frame behind each
     sample and the bytes each signal needs, so the same samples are left out
-    wherever the group is read.
+    wherever the group is read. asammdf also fills a LIN bus's group with the
+    frames of its ID from every bus; another bus's frame counts as holding
+    nothing, so all of its samples are left out.
     """
 
     def __init__(self) -> None:
@@ -646,9 +648,9 @@ class MDFCANReader:
             # database and the fallback database from both decoding the same bus.
             if channel_config is not None:
                 try:
-                    bus_logging_map = _bus_logging_keys(source)
+                    bus_channels = _bus_channels(source)
                     for bus in (BusType.CAN, BusType.LIN):
-                        discovered = bus_logging_map.get(bus.value, ())
+                        discovered = bus_channels.get(bus.value, ())
                         concrete = []
                         for channel in discovered:
                             path = channel_config.dbc_path_for(bus, int(channel))
@@ -1102,12 +1104,14 @@ class MDFCANReader:
         Find the samples asammdf decoded from frames too short for them.
 
         Each CAN group asammdf decoded holds one message's frames from one bus:
-        those with its frame ID, or for J1939 its PGN and source address. The
-        raw frames of that message shorter than it are read (ID, length and
-        time only), and a decoded sample came from a short frame when one of
-        them has its time stamp: asammdf copies the raw time stamps as they
-        are. Only short frames are kept, so memory follows how many there are,
-        not the length of the log.
+        those with its frame ID, or for J1939 its PGN and source address. A
+        LIN group holds every frame with its frame ID, from all bus channels;
+        the other buses' frames are left out of it as frames holding nothing.
+        The raw frames of that message shorter than it are read (ID, length
+        and time only), and a decoded sample came from a short frame when one
+        of them has its time stamp: asammdf copies the raw time stamps as they
+        are. Only short frames are kept, and another LIN bus's, so memory
+        follows how many there are, not the length of the log.
         """
         short = _ShortFrames()
         # By key: the message's name and length, and the length below which
@@ -1127,9 +1131,12 @@ class MDFCANReader:
             channel, message_name, message_id = self._decoded_group_metadata(
                 extracted, group_idx, names[0], channel_config
             )
-            if channel is None or channel[0] is not BusType.CAN:
+            if channel is None or channel[0] not in (BusType.CAN, BusType.LIN):
                 continue
-            if group_idx in j1939_groups:
+            if channel[0] is BusType.LIN:
+                frame_id, extended = message_id, False
+                key = ("lin", channel[1], message_id)
+            elif group_idx in j1939_groups:
                 frame_id, extended = j1939_groups[group_idx][2], True
                 pgn, sa = _j1939_pgn_and_sa(np.array([frame_id], dtype=np.int64))
                 key = ("j1939", channel[1], int(pgn[0]), int(sa[0]))
@@ -1156,37 +1163,42 @@ class MDFCANReader:
             return short
 
         found = self._short_raw_frames(source, messages)
-        for key, (_times, lengths) in found.items():
+        for key, (_times, lengths, own) in found.items():
             name, length, _limit = messages[key]
-            count = int((lengths < length).sum())
+            count = int(((lengths < length) & own).sum())
             if count:
                 short.frames += count
                 short.messages.add(name)
         for group_idx, (key, needed) in group_keys.items():
             if key not in found:
                 continue
-            times, lengths = found[key]
+            times, lengths, own = found[key]
             master = np.asarray(extracted.get_master(group_idx), dtype=np.float64)
             at = np.minimum(np.searchsorted(times, master), len(times) - 1)
             hit = times[at] == master
             if not hit.any():
                 continue
-            # A frame not among the short ones held the whole message.
+            # A frame not among those found held the whole message; one from
+            # another LIN bus holds none of it.
             sample_lengths = np.full(len(master), 255, dtype=np.uint8)
-            sample_lengths[hit] = lengths[at[hit]]
+            sample_lengths[hit] = np.where(own, lengths, 0)[at[hit]]
             shortest = int(sample_lengths.min())
             if any(need > shortest for need in needed.values()):
                 short.add(group_idx, sample_lengths, needed)
         return short
 
     @staticmethod
-    def _short_raw_frames(source, messages) -> dict[tuple, tuple[np.ndarray, np.ndarray]]:
+    def _short_raw_frames(
+        source, messages
+    ) -> dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """
-        By key of *messages*: the time stamps, in order, and lengths of its raw
-        frames shorter than its limit. Frames are matched to a key as asammdf
-        matches them to a message: by bus, frame ID and IDE, or for J1939 by
-        bus, PGN and source address. A group without ``DataLength`` is skipped:
-        its frames' lengths are unknown.
+        By key of *messages*: its raw frames shorter than its limit, and for
+        LIN those of another bus, as their time stamps in order, their lengths
+        and whether each is on the key's own bus. Frames are matched to a key
+        as asammdf matches them to a message: by bus, frame ID and IDE, for
+        J1939 by bus, PGN and source address, and for LIN by frame ID alone. A
+        group without ``DataLength`` is skipped: its frames' lengths are
+        unknown.
         """
         def code(key) -> int:
             # One number per key: the bus above, then the frame ID and IDE,
@@ -1206,18 +1218,34 @@ class MDFCANReader:
                     np.asarray([messages[key][2] for key in keys], dtype=np.int64),
                     keys,
                 )
+        # LIN by frame ID: the key of each bus with a message for it.
+        lin_keys: dict[int, list[tuple]] = {}
+        for key in messages:
+            if key[0] == "lin":
+                lin_keys.setdefault(key[2], []).append(key)
 
         collected: dict[tuple, list] = {}
         for group_idx, group in enumerate(getattr(source, "groups", ())):
             names = [getattr(channel, "name", "") for channel in group.channels]
-            if not {
+            if {
                 "CAN_DataFrame.BusChannel", "CAN_DataFrame.ID", "CAN_DataFrame.DataLength",
             } <= set(names):
+                if not tables:
+                    continue
+                lin = False
+                wanted = ["CAN_DataFrame.ID", "CAN_DataFrame.DataLength",
+                          "CAN_DataFrame.BusChannel"]
+                if "CAN_DataFrame.IDE" in names:
+                    wanted.append("CAN_DataFrame.IDE")
+            elif {"LIN_Frame.ID", "LIN_Frame.DataLength"} <= set(names):
+                if not lin_keys:
+                    continue
+                lin = True
+                wanted = ["LIN_Frame.ID", "LIN_Frame.DataLength"]
+                if "LIN_Frame.BusChannel" in names:
+                    wanted.append("LIN_Frame.BusChannel")
+            else:
                 continue
-            wanted = ["CAN_DataFrame.BusChannel", "CAN_DataFrame.ID",
-                      "CAN_DataFrame.DataLength"]
-            if "CAN_DataFrame.IDE" in names:
-                wanted.append("CAN_DataFrame.IDE")
             cycles = int(getattr(group.channel_group, "cycles_nr", 0) or 0)
             for offset in range(0, cycles, _TRACE_CHUNK_RECORDS):
                 # The columns and their time stamps in one pass over the
@@ -1227,18 +1255,33 @@ class MDFCANReader:
                     record_offset=offset,
                     record_count=min(_TRACE_CHUNK_RECORDS, cycles - offset),
                 )
-                buses, ids, lengths = (
-                    np.asarray(signal.samples) for signal in signals[:3]
-                )
-                buses = buses.astype(np.uint64)
+                ids, lengths = (np.asarray(signal.samples) for signal in signals[:2])
                 ids = ids.astype(np.uint64)
-                if len(signals) > 3:
-                    ide = np.asarray(signals[3].samples).astype(np.uint64) & np.uint64(1)
+                if len(signals) > 2:
+                    buses = np.asarray(signals[2].samples).astype(np.uint64)
                 else:
-                    ide = (ids >> np.uint64(31)) & np.uint64(1)
+                    buses = np.ones(len(ids), dtype=np.uint64)   # as asammdf has it
+                if not lin:
+                    if len(signals) > 3:
+                        ide = np.asarray(signals[3].samples).astype(np.uint64) & np.uint64(1)
+                    else:
+                        ide = (ids >> np.uint64(31)) & np.uint64(1)
                 ids &= np.uint64(0x1FFFFFFF)
                 lengths = lengths.astype(np.int64)
                 times = np.asarray(signals[0].timestamps, dtype=np.float64)
+                if lin:
+                    for frame_id, keys in lin_keys.items():
+                        of_id = ids == np.uint64(frame_id)
+                        if not of_id.any():
+                            continue
+                        for key in keys:
+                            own = buses == np.uint64(key[1])
+                            rows = of_id & (~own | (lengths < messages[key][2]))
+                            if rows.any():
+                                collected.setdefault(key, []).append(
+                                    (times[rows], lengths[rows], own[rows])
+                                )
+                    continue
                 for kind, (codes_sorted, limits_sorted, keys_sorted) in tables.items():
                     if kind == "id":
                         codes = (buses << np.uint64(32)) | (ide << np.uint64(31)) | ids
@@ -1252,15 +1295,16 @@ class MDFCANReader:
                     for position in np.unique(at[rows]).tolist():
                         mine = rows & (at == position)
                         collected.setdefault(keys_sorted[position], []).append(
-                            (times[mine], lengths[mine])
+                            (times[mine], lengths[mine], np.ones(int(mine.sum()), dtype=bool))
                         )
 
         found = {}
         for key, parts in collected.items():
             times = np.concatenate([part[0] for part in parts])
             lengths = np.concatenate([part[1] for part in parts])
+            own = np.concatenate([part[2] for part in parts])
             order = np.argsort(times, kind="stable")
-            found[key] = (times[order], lengths[order].astype(np.uint8))
+            found[key] = (times[order], lengths[order].astype(np.uint8), own[order])
         return found
 
     @staticmethod

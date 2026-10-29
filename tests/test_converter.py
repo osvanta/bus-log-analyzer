@@ -79,6 +79,118 @@ def test_frames_are_copied_into_another_format(tmp_path, source, target):
     assert [f[1:] for f in _frames(out)] == [f[1:] for f in _frames(src)]
 
 
+# ── Raw frames: which bus they are on ────────────────────────────────────
+#
+# python-can numbers channels from 0 in its readers and adds the 1 back in its
+# BLF and ASC writers, but its MF4 writer stores the number as it is: the
+# application, like every logger, reads BusChannel n as CHn. The tests open
+# the files again through the application, so a shifted bus shows up as a
+# different "CH<n>::" key.
+
+#: (offset s, bus from 1, raw EngSpeed): the even frames on CH1, the odd on CH2.
+_BUS_FRAMES = [(i * 0.1, 1 + i % 2, (2000 if i % 2 == 0 else 4000) + i) for i in range(12)]
+
+
+def _bus_log(path):
+    """The frames above, as a BLF, ASC or TRC log of EngineControl (0x100)."""
+    import can
+    if path.suffix == '.trc':
+        lines = [';$FILEVERSION=2.1', ';$STARTTIME=45000.0', ';$COLUMNS=N,O,T,B,I,d,R,L,D']
+        for n, (offset, bus, speed) in enumerate(_BUS_FRAMES, start=1):
+            data = speed.to_bytes(2, 'little') + bytes(6)
+            lines.append(f'{n:8d} {offset * 1000:12.3f} DT {bus} {0x100:8X} Rx -  8    '
+                         + ' '.join(f'{b:02X}' for b in data))
+        path.write_bytes(('\r\n'.join(lines) + '\r\n').encode('latin-1'))
+        return path
+    writer = can.BLFWriter(str(path)) if path.suffix == '.blf' else can.ASCWriter(str(path))
+    for offset, bus, speed in _BUS_FRAMES:
+        writer.on_message_received(can.Message(
+            timestamp=1_700_000_000.0 + offset, arbitration_id=0x100, is_extended_id=False,
+            data=speed.to_bytes(2, 'little') + bytes(6), channel=bus - 1))   # python-can: from 0
+    writer.stop()
+    return path
+
+
+def _decoded(path, sample_dbc_path):
+    """{signal key: values} of *path*, loaded and decoded as the application does."""
+    from core.channel_config import ChannelConfig
+    from gui.load_worker import LoadWorker
+
+    worker = LoadWorker(str(path), ChannelConfig.from_single_dbc(str(sample_dbc_path)))
+    stores, failures = [], []
+    worker.finished.connect(stores.append)
+    worker.failed.connect(failures.append)
+    worker.run()
+    assert not failures, failures
+    store = stores[0]
+    try:
+        return {key: list(store.get_series(key).numpy_values()) for key in store.all_keys()}
+    finally:
+        if getattr(store, 'raw_frame_store', None) is not None:
+            store.raw_frame_store.close()
+        cache = getattr(store, 'sample_cache', None)
+        if cache is not None and hasattr(cache, 'close'):
+            cache.close()
+
+
+def _expected_speeds():
+    return {f'CH{bus}::EngineControl::EngSpeed':
+            [speed * 0.5 for _, b, speed in _BUS_FRAMES if b == bus] for bus in (1, 2)}
+
+
+@pytest.mark.parametrize('source', ['.asc', '.blf', '.trc'])
+def test_mf4_made_from_frames_opens_on_the_same_buses(tmp_path, sample_dbc_path, source):
+    from core.bus_types import BusType
+    from core.readers import prescan_measurement
+
+    src = _bus_log(tmp_path / f'in{source}')
+    out = convert(ConvertJob([src], tmp_path / 'out.mf4'))
+
+    assert prescan_measurement(str(out)).channels == [(BusType.CAN, 1), (BusType.CAN, 2)]
+    speeds = {key: values for key, values in _decoded(out, sample_dbc_path).items()
+              if key.endswith('::EngSpeed')}
+    assert speeds == _expected_speeds() == {
+        key: values for key, values in _decoded(src, sample_dbc_path).items()
+        if key.endswith('::EngSpeed')}
+
+
+@pytest.mark.parametrize('target', ['.blf', '.asc'])
+@pytest.mark.parametrize('source', ['.asc', '.blf', '.trc'])
+def test_blf_and_asc_made_from_frames_keep_their_buses(tmp_path, sample_dbc_path, source, target):
+    src = _bus_log(tmp_path / f'in{source}')
+    out = convert(ConvertJob([src], tmp_path / f'out{target}'))
+    assert {key: values for key, values in _decoded(out, sample_dbc_path).items()
+            if key.endswith('::EngSpeed')} == _expected_speeds()
+
+
+@pytest.mark.parametrize('target, expected', [('.mf4', [1, 2, None, 'can4']),
+                                              ('.blf', [0, 1, None, 'can4']),
+                                              ('.asc', [0, 1, None, 'can4'])])
+def test_only_an_integer_channel_is_shifted_and_only_for_mf4(tmp_path, monkeypatch, target, expected):
+    """None and a name are handed on as they came: there is no number to shift."""
+    import can
+    from core import converter
+
+    written = []
+
+    class Recorder:
+        def on_message_received(self, message):
+            written.append(message.channel)
+
+        def stop(self):
+            pass
+
+    channels = [0, 1, None, 'can4']
+    frames = [can.Message(timestamp=1_700_000_000.0 + i, arbitration_id=0x100, channel=channel,
+                          is_extended_id=False, data=bytes(8)) for i, channel in enumerate(channels)]
+    monkeypatch.setattr(converter, '_reader', lambda path: iter(frames))
+    monkeypatch.setattr(converter, '_writer', lambda path: Recorder())
+    src = tmp_path / 'in.asc'
+    src.write_bytes(b'')
+    convert(ConvertJob([src], tmp_path / f'out{target}'))
+    assert written == expected
+
+
 def test_files_are_joined_in_order(tmp_path):
     a = _raw(tmp_path / 'a.blf', 1_700_000_000.0, 10)
     b = _raw(tmp_path / 'b.blf', 1_700_000_001.0, 10)
@@ -131,6 +243,37 @@ def test_mdf_to_csv_has_one_time_column(tmp_path):
     out = convert(ConvertJob([src], tmp_path / 'out.csv'))
     header = out.read_text().splitlines()[0]
     assert header.lower().startswith('timestamps') and 'Speed' in header and 'Temp' in header
+
+
+def _logger_mf4(path):
+    """The frames of ``_BUS_FRAMES`` as a logger writes them: BusChannel 1 and 2."""
+    import can
+    writer = can.MF4Writer(str(path))
+    for offset, bus, speed in _BUS_FRAMES:
+        writer.on_message_received(can.Message(
+            timestamp=1_700_000_000.0 + offset, arbitration_id=0x100, is_extended_id=False,
+            data=speed.to_bytes(2, 'little') + bytes(6), channel=bus))      # MF4: from 1
+    writer.stop()
+    return path
+
+
+def test_mf4_converted_to_mf4_keeps_its_buses(tmp_path, sample_dbc_path):
+    """The shift is for frames python-can read; an MF4 already counts from 1."""
+    src = _logger_mf4(tmp_path / 'logger.mf4')
+    out = convert(ConvertJob([src], tmp_path / 'out.mf4'))
+    for path in (src, out):
+        assert {key: values for key, values in _decoded(path, sample_dbc_path).items()
+                if key.endswith('::EngSpeed')} == _expected_speeds()
+
+
+def test_mf4_converted_to_csv_keeps_its_bus_numbers(tmp_path):
+    import csv
+    src = _logger_mf4(tmp_path / 'logger.mf4')
+    out = convert(ConvertJob([src], tmp_path / 'out.csv'))
+    with open(out, newline='') as stream:
+        rows = list(csv.DictReader(stream))
+    (column,) = [name for name in rows[0] if name.endswith('CAN_DataFrame.BusChannel')]
+    assert {float(row[column]) for row in rows if row[column]} == {1.0, 2.0}
 
 
 def test_signals_are_listed_without_time_channels(tmp_path):

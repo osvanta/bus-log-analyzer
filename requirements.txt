@@ -2,7 +2,8 @@
 # LGPL library shipped (Qt/PySide6, python-can, asammdf), and a release must
 # ship those versions. PySide6 pins PySide6_Essentials, PySide6_Addons and
 # shiboken6 to match. Upgrading one means regenerating the notices and its
-# file in licenses/; for asammdf, also rerun tests/test_asammdf_guard.py.
+# file in licenses/; for asammdf, also rerun tests/test_asammdf_guard.py and
+# tests/test_asammdf_fixes.py.
 # A release installs requirements-release.txt, generated from this file with
 # every version and hash fixed: regenerate it after a change here (see
 # requirements-release.in).

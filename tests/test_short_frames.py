@@ -200,11 +200,12 @@ _WRITERS = {'.asc': _write_asc, '.blf': _write_blf, '.trc': _write_trc, '.mf4': 
 _FORMATS = list(_WRITERS)
 
 
-def _load(measurement: Path, dbc: Path):
+def _load(measurement: Path, dbc: Path | None = None, config=None):
     from core.channel_config import ChannelConfig
     from gui.load_worker import LoadWorker
 
-    worker = LoadWorker(str(measurement), ChannelConfig.from_single_dbc(str(dbc)))
+    worker = LoadWorker(
+        str(measurement), config or ChannelConfig.from_single_dbc(str(dbc)))
     messages: list[str] = []
     result: dict = {}
     worker.progress.connect(messages.append)
@@ -401,20 +402,19 @@ def test_an_mf4_without_short_frames_is_unchanged(qapp, tmp_path, hard_dbc, monk
     assert decoded == before
 
 
-def test_the_lazy_and_the_eager_mf4_read_agree(qapp, tmp_path, hard_dbc):
-    from core.channel_config import ChannelConfig
+def _lazy_and_eager(path: Path, database: Path, config):
+    """By (message, signal): the values of the eager and of the lazy read of
+    a bus-logging MF4; and the signal tree's rows, announced before any
+    sample is read."""
     from core.readers.mdf_can_reader import MDFCANReader
-
-    path = _write_hard_mf4(tmp_path / 'both.mf4', None)
-    config = ChannelConfig.from_single_dbc(str(hard_dbc))
 
     eager = {
         (meta[1], meta[3]): list(np.asarray(values, dtype=float))
         for meta, _ts, values, _display in
-        MDFCANReader(path, str(hard_dbc)).iter_decoded_channel_arrays(config)
+        MDFCANReader(path, str(database)).iter_decoded_channel_arrays(config)
     }
-    tree = []   # the signal tree's rows, announced before any sample is read
-    sources = MDFCANReader(path, str(hard_dbc)).open_decoded_sources(
+    tree = []
+    sources = MDFCANReader(path, str(database)).open_decoded_sources(
         config, metadata_ready=tree.extend)
     try:
         groups = sorted({signal[0] for signal in sources.signals})
@@ -427,6 +427,16 @@ def test_the_lazy_and_the_eager_mf4_read_agree(qapp, tmp_path, hard_dbc):
             lazy[(message, name)] = values
     finally:
         sources.source.close()
+    return eager, lazy, tree
+
+
+def test_the_lazy_and_the_eager_mf4_read_agree(qapp, tmp_path, hard_dbc):
+    from core.channel_config import ChannelConfig
+
+    path = _write_hard_mf4(tmp_path / 'both.mf4', None)
+    config = ChannelConfig.from_single_dbc(str(hard_dbc))
+
+    eager, lazy, tree = _lazy_and_eager(path, hard_dbc, config)
 
     assert lazy == eager
     assert ('MuxMsg', 'Far') in lazy and ('Motor', 'Temp') in lazy
@@ -445,3 +455,197 @@ def test_the_bytes_a_signal_needs_are_what_cantools_decides(unit_db, name):
         for signal in message.signals:
             assert (signal.name in decoded) == (length >= _bytes_needed(signal)), \
                 (name, signal.name, length)
+
+
+# ── LIN bus-logging MF4, decoded by asammdf ──────────────────────────────
+#
+# asammdf reads a LIN frame at its message's full length too, and fills each
+# bus's group with the frames of its ID from every bus channel. Both are left
+# out the same way. The MF4 records are filled up with 0xFF, so a value read
+# past a frame's end would show.
+
+def _lin_writers():
+    from tests.fixtures._generate import write_lin_asc, write_lin_blf, write_lin_mf4
+    return {'.asc': write_lin_asc, '.blf': write_lin_blf,
+            '.mf4': lambda path, frames, **kw: write_lin_mf4(path, frames, padding=0xFF, **kw)}
+
+
+def _lin_frames(longest: int = 2) -> list[tuple[float, int, int, bytes]]:
+    """sample.ldf's DoorCmd (2 bytes) whole, cut to 1 byte and empty, at most
+    *longest* bytes; DoorStatus (1 byte) always whole. All on LIN 1."""
+    frames = []
+    for i in range(9):
+        t = 0.010 * (i + 1)
+        cmd = bytes([10 + i, i // 3])
+        frames.append((t, 1, 0x20, cmd[:min(longest, 2 - i % 3)]))
+        frames.append((t + 0.001, 1, 0x21, bytes([20 + i])))
+    return frames
+
+
+def _two_bus_frames() -> list[tuple[float, int, int, bytes]]:
+    """The traffic of sample_lin.blf: LIN 1 and LIN 2 carry the same frame
+    IDs at opposite lengths."""
+    from tests.fixtures._generate import _LIN_BUS_FRAMES
+    frames = []
+    for _repeat in range(2):
+        for channel, payloads in _LIN_BUS_FRAMES.items():
+            for frame_id, payload in payloads:
+                frames.append((0.010 * (len(frames) + 1), channel, frame_id, payload))
+    return frames
+
+
+@pytest.fixture()
+def lin_ldf(sample_ldf_path) -> Path:
+    from core.readers.db_format import ldf_support_available
+    available, message = ldf_support_available()
+    if not available:
+        pytest.skip(f'LDF support unavailable: {message}')
+    return sample_ldf_path
+
+
+def _lin_config(*databases: Path):
+    from core.bus_types import BusType
+    from core.channel_config import ChannelConfig
+    return ChannelConfig(name='LIN', channels={
+        (BusType.LIN, number): str(path) for number, path in enumerate(databases, 1)
+    })
+
+
+def _every_lin_channel(database: Path):
+    """*database* on all LIN channels, as the Database Manager assigns it."""
+    from core.bus_types import BusType
+    from core.channel_config import ChannelConfig, all_channels_key
+    return ChannelConfig(name='LIN', channels={all_channels_key(BusType.LIN): str(database)})
+
+
+def _short_frame_warning(lines) -> str:
+    return next(line for line in lines if 'shorter than the message' in line)
+
+
+def _with_channels(store) -> dict[str, list]:
+    return {key: list(series.values) for key, series in store._series_by_key.items()}
+
+
+@pytest.mark.parametrize('reference', ['.asc', '.blf'])
+def test_a_lin_mf4_decodes_exactly_as_the_same_frames(qapp, tmp_path, lin_ldf, reference):
+    frames = _lin_frames()
+    writers = _lin_writers()
+    expected, _store, report = _load(
+        writers[reference](tmp_path / f'lin{reference}', frames), config=_lin_config(lin_ldf))
+
+    decoded, store, _report = _load(
+        writers['.mf4'](tmp_path / 'lin.mf4', frames), config=_lin_config(lin_ldf))
+
+    assert decoded == expected
+    # Not vacuous: each cut left something out, and kept the rest.
+    assert decoded['DoorCmd::LockState'] == [0.0, 1.0, 2.0]
+    assert decoded['DoorCmd::WindowPos'] == [10.0, 11.0, 13.0, 14.0, 16.0, 17.0]
+    assert len(decoded['DoorStatus::MirrorAngle']) == 9
+    warning = _short_frame_warning(store.load_warnings)
+    assert '6 frame(s)' in warning and '(DoorCmd)' in warning
+    assert '6 frame(s)' in _short_frame_warning(report)
+
+
+def test_the_lazy_and_the_eager_lin_mf4_read_agree(qapp, tmp_path, lin_ldf, alt_ldf_path):
+    """LIN 1 sends DoorCmd, never whole, and DoorStatus; LIN 2 only Seat
+    (0x21, as DoorStatus). asammdf gives LIN 2 a Latch group of LIN 1's 0x20
+    frames, and each 0x21 group both buses' frames."""
+    frames = _lin_frames(longest=1) + [
+        (0.010 * (i + 1) + 0.005, 2, 0x21, bytes([50 + i, i])) for i in range(4)]
+    path = _lin_writers()['.mf4'](tmp_path / 'both.mf4', sorted(frames))
+
+    eager, lazy, tree = _lazy_and_eager(path, lin_ldf, _lin_config(lin_ldf, alt_ldf_path))
+
+    assert lazy == eager
+    assert lazy[('DoorCmd', 'WindowPos')] == [10.0, 11.0, 13.0, 14.0, 16.0, 17.0]
+    assert lazy[('DoorStatus', 'MirrorAngle')] == [20.0 + i for i in range(9)]
+    assert lazy[('Seat', 'SeatHeat')] == [0.0, 1.0, 2.0, 3.0]
+    # In no frame of their own bus long enough: not offered at all.
+    assert ('DoorCmd', 'LockState') not in lazy
+    assert not any(message == 'Latch' for message, _signal in lazy)
+    assert {(row[1], row[3]) for row in tree} == set(lazy)
+
+
+def test_a_lin_mf4_without_short_frames_is_unchanged(qapp, tmp_path, lin_ldf, monkeypatch):
+    from core.readers import mdf_can_reader
+
+    frames = [frame for frame in _lin_frames() if len(frame[3]) == (2 if frame[2] == 0x20 else 1)]
+    path = _lin_writers()['.mf4'](tmp_path / 'whole.mf4', frames)
+
+    decoded, store, _report = _load(path, config=_lin_config(lin_ldf))
+    monkeypatch.setattr(mdf_can_reader.MDFCANReader, '_find_short_frames',
+                        lambda *args: mdf_can_reader._ShortFrames())
+    before = _load(path, config=_lin_config(lin_ldf))[0]
+
+    assert decoded == before
+    assert decoded['DoorCmd::LockState'] == [0.0, 1.0, 2.0]
+    assert store.load_warnings == []
+
+
+@pytest.mark.parametrize('swapped', [False, True])
+def test_a_two_bus_lin_mf4_decodes_exactly_as_the_same_frames(
+        qapp, tmp_path, lin_ldf, alt_ldf_path, swapped):
+    """LIN 1 and LIN 2 both send 0x20 and 0x21, at opposite lengths, each
+    decoded with its own LDF. asammdf gives each bus's group every frame of
+    its ID: the other bus's frames are left out. Swapped, the databases make
+    each bus's frames short for one message, and the same frames are reported."""
+    frames = _two_bus_frames()
+    writers = _lin_writers()
+    config = _lin_config(*((alt_ldf_path, lin_ldf) if swapped else (lin_ldf, alt_ldf_path)))
+    blf_store, report = _load(writers['.blf'](tmp_path / 'buses.blf', frames), config=config)[1:]
+
+    store = _load(writers['.mf4'](tmp_path / 'buses.mf4', frames), config=config)[1]
+
+    decoded = _with_channels(store)
+    assert decoded == _with_channels(blf_store)
+    if swapped:
+        assert decoded['LIN1::Seat::SeatPos'] == [20.0, 40.0] * 2   # LIN 1's only
+        assert 'LIN1::Seat::SeatHeat' not in decoded                # never whole
+        warning = _short_frame_warning(store.load_warnings)
+        assert '8 frame(s)' in warning and '(DoorCmd, Seat)' in warning
+        assert '8 frame(s)' in _short_frame_warning(report)
+    else:
+        assert decoded['LIN1::DoorCmd::WindowPos'] == [10.0, 30.0] * 2
+        assert decoded['LIN2::Latch::LatchState'] == [7.0, 9.0] * 2
+        assert not any('shorter than the message' in line for line in store.load_warnings)
+
+
+def test_a_lin_frame_id_on_one_bus_is_not_decoded_on_another(qapp, tmp_path, lin_ldf):
+    """One LDF on all LIN channels; LIN 1 sends only DoorCmd and LIN 2 only
+    DoorStatus. asammdf still gives each bus a group for each ID."""
+    frames = sorted(
+        [(0.010 * (i + 1), 1, 0x20, bytes([10 + i, i % 3])) for i in range(4)]
+        + [(0.010 * (i + 1) + 0.005, 2, 0x21, bytes([20 + i])) for i in range(4)])
+    writers = _lin_writers()
+    config = _every_lin_channel(lin_ldf)
+    expected = _with_channels(
+        _load(writers['.blf'](tmp_path / 'apart.blf', frames), config=config)[1])
+
+    decoded = _with_channels(
+        _load(writers['.mf4'](tmp_path / 'apart.mf4', frames), config=config)[1])
+
+    assert decoded == expected
+    assert set(decoded) == {'LIN1::DoorCmd::WindowPos', 'LIN1::DoorCmd::LockState',
+                            'LIN2::DoorStatus::MirrorAngle'}
+
+
+def test_a_lin_mf4_without_bus_channels_is_on_lin_1(qapp, tmp_path, lin_ldf, alt_ldf_path):
+    """A one-bus recorder may leave out LIN_Frame.BusChannel: asammdf then
+    takes every frame as LIN 1, and so does the reader. The LDF on LIN 1
+    decodes it, not the one on all LIN channels."""
+    from core.bus_types import BusType
+    from core.channel_config import ChannelConfig, all_channels_key
+
+    frames = _lin_frames()
+    writers = _lin_writers()
+    config = ChannelConfig(name='LIN', channels={
+        (BusType.LIN, 1): str(lin_ldf), all_channels_key(BusType.LIN): str(alt_ldf_path)})
+    expected = _with_channels(
+        _load(writers['.asc'](tmp_path / 'one.asc', frames), config=config)[1])
+
+    store = _load(writers['.mf4'](tmp_path / 'one.mf4', frames, bus_channel=False),
+                  config=config)[1]
+
+    assert _with_channels(store) == expected
+    assert expected['LIN1::DoorCmd::LockState'] == [0.0, 1.0, 2.0]
+    assert '6 frame(s)' in _short_frame_warning(store.load_warnings)

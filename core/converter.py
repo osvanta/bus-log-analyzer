@@ -184,12 +184,22 @@ def _writer(path: Path):
     return can.MF4Writer(str(path))
 
 
+def _from_one(message):
+    """python-can's readers number buses from 0 and its BLF and ASC writers add
+    the 1 back, but its MF4 writer stores the number as it is, and MF4 counts
+    from 1: shift an integer channel, leave any other value as it is."""
+    if isinstance(message.channel, int):
+        message.channel += 1
+    return message
+
+
 def _convert_raw(job: ConvertJob, progress) -> None:
     total_bytes = sum(Path(p).stat().st_size for p in job.inputs) or 1
     done_bytes = 0
     first: float | None = None
     copied = 0
     writer = _writer(Path(job.output))
+    to_mf4 = Path(job.output).suffix.lower() == '.mf4'
     try:
         for path in job.inputs:
             path = Path(path)
@@ -203,7 +213,7 @@ def _convert_raw(job: ConvertJob, progress) -> None:
                         # Files are joined in order: nothing later can be in range.
                         break
                     if job.start is None or t >= job.start:
-                        writer.on_message_received(message)
+                        writer.on_message_received(_from_one(message) if to_mf4 else message)
                     copied += 1
                     if copied % _REPORT_EVERY == 0:
                         # Within a file, progress by its share of the bytes.

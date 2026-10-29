@@ -925,6 +925,10 @@ class SignalStore:
             # Labels are read from the stored values, wherever they are.
             series.raw_values = raw_values.rebase(series.values)
         elif has_labels and raw_values:
+            if isinstance(raw_values, ChoiceLabels):
+                # Another table's labels: read them from the part just stored,
+                # since labels handed over in parts are bound to no values yet.
+                raw_values = raw_values.rebase(series.values)[labelled:]
             if not series.raw_values and not isinstance(raw_values, list):
                 # MDF native extraction supplies a lazy text sequence so the
                 # signal list is not blocked by millions of byte->str decodes.

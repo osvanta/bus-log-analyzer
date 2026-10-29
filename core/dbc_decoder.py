@@ -16,6 +16,11 @@ import xml.etree.ElementTree as ET
 import cantools
 from cantools.database.errors import DecodeError
 
+try:  # a cantools internal: see decode_known_branches
+    from cantools.database.utils import decode_data as _cantools_decode_data
+except ImportError:  # pragma: no cover - only if cantools moves it
+    _cantools_decode_data = None
+
 from core.models import RawFrame, DecodedSignalSample
 from core.readers.db_format import db_format_label
 
@@ -272,6 +277,63 @@ def _choice_key(signal, value: float) -> int | None:
     return key if abs(raw - key) <= 1e-6 * max(1.0, abs(key)) else None
 
 
+def decode_known_branches(
+    message,
+    data: bytes,
+    decode_choices: bool = False,
+    scaling: bool = True,
+    allow_truncated: bool = True,
+    allow_excess: bool = True,
+    decode_containers: bool = False,
+) -> dict | None:
+    """
+    Decode *data* as ``message.decode`` does, but leave out a multiplexed
+    branch whose multiplexer value the database does not define.
+
+    cantools raises ``DecodeError`` for such a frame, so every signal in it
+    is lost, the non-multiplexed ones too. asammdf keeps them, and so does
+    this: the multiplexer itself and every signal outside the undefined
+    branch get their values; that branch's signals get none. A nested
+    multiplexer is handled at each level.
+
+    It is cantools' own ``Message._decode``, on the same internals
+    (``_codecs``, ``_get_mux_number``, ``utils.decode_data``), identical in
+    cantools 43 and 44. Returns None when they are missing or have changed,
+    and for a container message (*decode_containers* is accepted only so a
+    ``message.decode`` keyword dict can be passed as it is): the caller then
+    keeps cantools' result. Any other error raises as cantools raises it.
+    """
+    codecs = getattr(message, "_codecs", None)
+    get_mux_number = getattr(message, "_get_mux_number", None)
+    if (
+        _cantools_decode_data is None
+        or not isinstance(codecs, dict)
+        or get_mux_number is None
+        or getattr(message, "is_container", False)
+    ):
+        return None
+    length = message.length
+
+    def decode_node(node) -> dict:
+        decoded = _cantools_decode_data(
+            data, length, node["signals"], node["formats"],
+            decode_choices, scaling, allow_truncated, allow_excess,
+        )
+        for mux_name, branches in node["multiplexers"].items():
+            if allow_truncated and mux_name not in decoded:
+                continue
+            branch = branches.get(get_mux_number(decoded, mux_name))
+            if branch is not None:
+                decoded.update(decode_node(branch))
+        return decoded
+
+    try:
+        return decode_node(codecs)
+    except (KeyError, TypeError, AttributeError):
+        # The internals' shape has changed: not ours to guess at.
+        return None
+
+
 class DBCDecoder:
     def __init__(self, dbc_path: str | Path) -> None:
         self.dbc_path = Path(dbc_path)
@@ -457,7 +519,17 @@ class DBCDecoder:
                 except Exception:
                     self.stats["decode_fail"] += 1
                     continue
-            except (DecodeError, Exception):
+            except DecodeError:
+                # Most often a multiplexer value the database does not
+                # define: keep the signals outside that branch.
+                try:
+                    decoded = decode_known_branches(message, payload, **kwargs)
+                except Exception:
+                    decoded = None
+                if decoded is None:
+                    self.stats["decode_fail"] += 1
+                    continue
+            except Exception:
                 self.stats["decode_fail"] += 1
                 continue
 
