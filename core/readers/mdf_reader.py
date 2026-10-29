@@ -149,6 +149,94 @@ class LazyTextValues:
         return (self._decode(value) for value in self._values)
 
 
+def _numeric_default(conversion):
+    """
+    The numeric conversion an MDF4 value table falls back to, or None.
+
+    asammdf writes a DBC value table as a range-to-text conversion whose
+    default is the signal's scaling. Read with ``raw=False`` such a channel
+    gives NaN for every value in the table and no text, or, when every value
+    is in it, text and the raw number. Its physical value is the default
+    applied to the raw value, as the other formats give it.
+    """
+    if conversion is None or getattr(conversion, "id", None) != b"##CC":
+        return None
+    from asammdf.blocks import v4_constants as v4c
+
+    if conversion.conversion_type not in (
+        v4c.CONVERSION_TYPE_TABX, v4c.CONVERSION_TYPE_RTABX,
+    ):
+        return None
+    default = (getattr(conversion, "referenced_blocks", None) or {}).get("default_addr")
+    if getattr(default, "conversion_type", None) in (
+        v4c.CONVERSION_TYPE_NON, v4c.CONVERSION_TYPE_LIN, v4c.CONVERSION_TYPE_RAT,
+        v4c.CONVERSION_TYPE_ALG, v4c.CONVERSION_TYPE_TABI, v4c.CONVERSION_TYPE_TAB,
+        v4c.CONVERSION_TYPE_RTAB,
+    ):
+        return default
+    return None
+
+
+class TableLabels:
+    """
+    The display labels of a value table with a numeric default: the table's
+    text where the raw value is in it, the physical value elsewhere (the
+    default's result), as the decoder labels the other formats. Worked out
+    from the raw samples when shown, so nothing is kept per sample but the
+    raw value.
+    """
+
+    __slots__ = ("_raw", "_conversion")
+
+    _CHUNK = 65_536
+
+    def __init__(self, raw, conversion) -> None:
+        self._raw = raw
+        self._conversion = conversion
+
+    def __len__(self) -> int:
+        return len(self._raw)
+
+    def __bool__(self) -> bool:
+        return len(self._raw) > 0
+
+    def _labels(self, raw) -> list:
+        return [
+            LazyTextValues._decode(label)
+            if isinstance(label, (bytes, bytearray, np.bytes_, str)) else float(label)
+            for label in self._conversion.convert(raw, as_object=True).tolist()
+        ]
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return self._labels(self._raw[index])
+        value = self._raw[index]   # IndexError as a list would
+        return self._labels(np.array([value], dtype=self._raw.dtype))[0]
+
+    def __iter__(self):
+        for start in range(0, len(self._raw), self._CHUNK):
+            yield from self._labels(self._raw[start:start + self._CHUNK])
+
+
+def _table_arrays(raw: np.ndarray, conversion, default):
+    """A value table's physical values and labels from its raw samples."""
+    return (
+        np.asarray(default.convert(raw), dtype=np.float64),
+        TableLabels(raw, conversion),
+    )
+
+
+def _raw_samples(raw_sig, count: int):
+    """*raw_sig*'s samples when it holds *count* numbers, else None."""
+    samples = getattr(raw_sig, "samples", None)
+    if (
+        not isinstance(samples, np.ndarray) or len(samples) != count
+        or samples.dtype.kind not in "biuf"
+    ):
+        return None
+    return samples
+
+
 class MDFReader:
     """
     Reads ASAM MDF version 3 (.mdf) and version 4 (.mf4) measurement files.
@@ -646,11 +734,17 @@ class MDFReader:
                     enum_mask.append(False)
                     if channel_error is not None:
                         channel_error(grp_name, ch_list[i][1], exc)
+            tables = [
+                MDFReader._value_table(mdf, group_idx, ch_idx) for ch_idx, _name in ch_list
+            ]
 
             # One file-block read for all enum channels in this group (raw=True).
             # Batched to avoid double-decompress per enum channel (Bottleneck 5).
             raw_map: dict[int, object] = {}   # position → raw Signal
-            enum_positions = [i for i, is_e in enumerate(enum_mask) if is_e]
+            enum_positions = [
+                i for i, is_e in enumerate(enum_mask)
+                if (is_e or tables[i] is not None) and sigs[i] is not None
+            ]
             if enum_positions:
                 raw_specs = [
                     (ch_list[i][1], group_idx, ch_list[i][0])
@@ -700,8 +794,16 @@ class MDFReader:
                     continue
 
                 ts_arr = np.asarray(ts_arr, dtype=np.float64)
+                table_raw = (
+                    _raw_samples(raw_map.get(i), len(ts_arr))
+                    if tables[i] is not None else None
+                )
 
-                if enum_mask[i]:
+                if table_raw is not None:
+                    # ── Value table with a numeric default ────────────────
+                    num_arr, disp_list = _table_arrays(table_raw, *tables[i])
+
+                elif enum_mask[i]:
                     # ── Enum / text channel ───────────────────────────────
                     raw_sig = raw_map.get(i)
                     raw_int = None
@@ -782,7 +884,14 @@ class MDFReader:
                     channel_error(
                         MDFReader._group_name(mdf, group_idx), ch_name, exc
                     )
-        enum_positions = [i for i, is_enum in enumerate(enum_mask) if is_enum]
+        tables = [
+            MDFReader._value_table(mdf, group_idx, ch_idx)
+            for group_idx, ch_idx, _ch_name in flat_channels
+        ]
+        enum_positions = [
+            i for i, is_enum in enumerate(enum_mask)
+            if (is_enum or tables[i] is not None) and sigs[i] is not None
+        ]
         raw_map: dict[int, object] = {}
         if enum_positions:
             raw_specs = [select_specs[i] for i in enum_positions]
@@ -836,7 +945,13 @@ class MDFReader:
 
             ts_arr = np.asarray(ts_arr, dtype=np.float64)
             unit = str(getattr(sig, "unit", "") or "")
-            if enum_mask[i]:
+            table_raw = (
+                _raw_samples(raw_map.get(i), len(ts_arr))
+                if tables[i] is not None else None
+            )
+            if table_raw is not None:
+                num_arr, disp_values = _table_arrays(table_raw, *tables[i])
+            elif enum_mask[i]:
                 raw_sig = raw_map.get(i)
                 raw_int = getattr(raw_sig, "samples", None)
                 if raw_int is not None and len(raw_int) == len(ts_arr):
@@ -886,6 +1001,18 @@ class MDFReader:
         except Exception:
             pass
         return f"Group_{group_idx}"
+
+    @staticmethod
+    def _value_table(mdf, group_idx: int, ch_idx: int):
+        """``(conversion, default)`` of a channel whose value table falls
+        back to a numeric conversion (_numeric_default), from its metadata;
+        None for any other channel."""
+        try:
+            conversion = mdf.groups[group_idx].channels[ch_idx].conversion
+            default = _numeric_default(conversion)
+        except Exception:
+            return None
+        return None if default is None else (conversion, default)
 
     @staticmethod
     def _written_bus_channel(mdf, group_idx: int):
@@ -1252,6 +1379,9 @@ def _physical_arrays(raw: np.ndarray, conversion):
     A channel's values and display values from its raw samples, as
     ``_iter_arrays_all_groups`` makes them from ``select(raw=False)``.
     """
+    default = _numeric_default(conversion)
+    if default is not None:
+        return _table_arrays(raw, conversion, default)
     eng = conversion.convert(raw) if conversion else raw
     if _is_text(eng):
         # Text through a conversion: the raw number, and the text to show.

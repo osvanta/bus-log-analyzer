@@ -214,6 +214,32 @@ def test_one_sender_on_two_priorities_loads_in_time_order(tmp_path, suffix):
     assert names == {0x18FECAEF: {"DM1"}, 0x1CFECAEF: {"DM1"}}
 
 
+@pytest.mark.parametrize("suffix", ["asc", "mf4"])
+def test_one_sender_on_two_priorities_keeps_one_label_per_sample(tmp_path, suffix):
+    # The ASC loader adds the series one frame ID at a time, each part with
+    # its labels: they must stay one per sample, in time order.
+    writer = _write_asc if suffix == "asc" else _write_mf4
+    measurement = writer(tmp_path / f"priorities.{suffix}", _two_priority_frames())
+    dbc = _dbc(tmp_path, [("DM1", 0x18FECAFE)])
+    with dbc.open("a", encoding="utf-8") as file:
+        file.write(f'VAL_ {0x18FECAFE | 0x80000000} DM1_DTC1 0 "None" 61765 "Fault" ;\n')
+
+    worker = LoadWorker(str(measurement), ChannelConfig.from_single_dbc(str(dbc)))
+    result: dict = {}
+    worker.finished.connect(lambda store: result.setdefault("store", store))
+    worker.failed.connect(lambda error: result.setdefault("error", error))
+    worker.run()
+    assert "error" not in result, result.get("error")
+    store = result["store"]
+    try:
+        (series,) = store._series_by_key.values()
+        assert series.has_labels
+        assert [str(x) for x in series.raw_values] == (
+            ["None"] + ["Fault"] * 6 + ["None"] * 3)
+    finally:
+        store.raw_frame_store.close()
+
+
 def _trace_names(measurement, dbc_path) -> dict[int, set[str]]:
     """The message names the CAN Trace gives each frame ID."""
     worker = LoadWorker(str(measurement), ChannelConfig.from_single_dbc(str(dbc_path)))
