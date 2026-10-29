@@ -231,6 +231,17 @@ empty measurement with no error and nothing to point at.
   number), matches them to asammdf's samples by time stamp, and leaves out
   the same samples in the lazy and the eager read, reporting the count among
   the load warnings. CAN only: a LIN bus-logging MF4 still reads padding.
+- **A value table names raw values; a signal plots its physical values.**
+  Each sample's label is the table's text for its raw value, or the physical
+  value where the table has none, as cantools gives it with
+  `decode_choices=True`. The decoder's labels (`ChoiceLabels`,
+  `DBCDecoder.decode_frame`) turn the physical value back into its raw one
+  with the signal's scale and offset before the lookup. asammdf writes a
+  bus-logging MF4's table as a range-to-text conversion whose default is the
+  scaling; `MDFReader` reads such a channel raw, takes the default's result as
+  its values and the conversion's text as its labels (`TableLabels`, worked
+  out when shown). A table with a text default, as this application's own
+  MF4 export writes, keeps the stored value.
 - `blf_content.py` scans object types — stopping at the first CAN object, so a
   normal CAN log costs one container — and `reader_factory` refuses a BLF
   holding *neither* CAN nor LIN. That check runs **before** the database check:

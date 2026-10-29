@@ -43,46 +43,68 @@ def _heap_copy(arr) -> _array.array:
     return copy
 
 
+def choice_keys(values, scale: float = 1.0, offset: float = 0.0):
+    """
+    The raw value behind each physical *value*, as the integer a DBC value
+    table is keyed by, and whether there is one.
+
+    A value table names raw values, and a scaled or offset signal's physical
+    value is not its raw one. NaN, and a value whose raw value is not a whole
+    number (a float signal's), have no key.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        raw = values if (scale, offset) == (1.0, 0.0) else (values - offset) / scale
+        keys = np.rint(raw)
+        exact = np.abs(raw - keys) <= 1e-6 * np.maximum(1.0, np.abs(keys))
+        exact &= np.abs(keys) < 2.0 ** 62
+        return np.where(exact, keys, 0).astype(np.int64), exact
+
+
 class ChoiceLabels:
     """
     The display labels of an enum signal, read from its numeric values.
 
     One label per sample, as the decoder's lookup table gives it: the choice
-    text where the value has one, the value itself where it has none, and ''
-    where the value is NaN. Nothing is kept per sample, so the labels cost no
-    memory however long the signal, and they follow the values wherever the
-    store keeps them.
+    text where the value's raw value has one, the value itself where it has
+    none, and '' where the value is NaN. Nothing is kept per sample, so the
+    labels cost no memory however long the signal, and they follow the values
+    wherever the store keeps them.
     """
 
-    __slots__ = ("_values", "_lut", "_valid", "_count")
+    __slots__ = ("_values", "_lut", "_valid", "_count", "_scaling")
 
     _CHUNK = 65_536
 
-    def __init__(self, values, lut: np.ndarray, valid: np.ndarray) -> None:
+    def __init__(self, values, lut: np.ndarray, valid: np.ndarray,
+                 scaling: tuple[float, float, int] = (1.0, 0.0, 0)) -> None:
         self._values = values
-        self._lut = lut          # object array: label per integer value
+        self._lut = lut          # object array: label per raw value - base
         self._valid = valid      # bool array: whether that value has a label
         self._count = None
+        self._scaling = scaling  # the signal's scale and offset, the lut's base
 
     @classmethod
-    def unbound(cls, lut: np.ndarray, valid: np.ndarray, count: int) -> "ChoiceLabels":
+    def unbound(cls, lut: np.ndarray, valid: np.ndarray, count: int,
+                scaling: tuple[float, float, int] = (1.0, 0.0, 0)) -> "ChoiceLabels":
         """
         Labels for *count* values the store has yet to put together.
 
         For a signal handed to add_series_bulk() in parts: the store binds the
         labels to the stored values. Only len() works before that.
         """
-        labels = cls(None, lut, valid)
+        labels = cls(None, lut, valid, scaling)
         labels._count = count
         return labels
 
     def rebase(self, values) -> "ChoiceLabels":
         """The same choices over *values*."""
-        return ChoiceLabels(values, self._lut, self._valid)
+        return ChoiceLabels(values, self._lut, self._valid, self._scaling)
 
     def same_choices(self, other) -> bool:
         return (
             isinstance(other, ChoiceLabels)
+            and other._scaling == self._scaling
             and len(other._lut) == len(self._lut)
             and bool(np.array_equal(other._valid, self._valid))
             and all(
@@ -93,17 +115,17 @@ class ChoiceLabels:
     def _labels(self, numeric) -> np.ndarray:
         numeric = np.asarray(numeric, dtype=np.float64)
         nan_mask = np.isnan(numeric)
-        with np.errstate(invalid="ignore"):
-            int_arr = numeric.astype(np.int64)
-        max_key = len(self._lut) - 1
-        safe_idx = np.clip(int_arr, 0, max_key)
-        in_range = ~nan_mask & (int_arr >= 0) & (int_arr <= max_key)
-        valid = self._valid[safe_idx]
+        scale, offset, base = self._scaling
+        keys, exact = choice_keys(numeric, scale, offset)
+        index = keys - base
+        max_index = len(self._lut) - 1
+        safe_idx = np.clip(index, 0, max_index)
+        has_val = exact & (index >= 0) & (index <= max_index)
+        has_val &= self._valid[safe_idx]
         result = np.empty(len(numeric), dtype=object)
         result[nan_mask] = ''
-        result[~nan_mask & ~in_range] = numeric[~nan_mask & ~in_range]
-        result[in_range & ~valid] = numeric[in_range & ~valid]
-        has_val = in_range & valid
+        plain = ~nan_mask & ~has_val
+        result[plain] = numeric[plain]
         if has_val.any():
             result[has_val] = self._lut[safe_idx[has_val]]
         return result
@@ -891,13 +913,14 @@ class SignalStore:
             series.timestamps = self._extend(series.timestamps, *ts_parts)
             if len(series.timestamps) == n and isinstance(timestamps, (np.ndarray, list)):
                 self._last_bulk_ts = (timestamps, series.timestamps, key)
+        # Counted before the values grow: ChoiceLabels read from the stored
+        # values, which grow in place in the heap, and would count the new
+        # part as labelled already.
+        labelled = len(series.raw_values)
         series.values = self._extend(series.values, *value_parts)
         if has_labels and isinstance(raw_values, ChoiceLabels) and (
-            len(series.raw_values) + len(raw_values) == len(series.values)
-            and (
-                not len(series.raw_values)
-                or raw_values.same_choices(series.raw_values)
-            )
+            labelled + len(raw_values) == len(series.values)
+            and (not labelled or raw_values.same_choices(series.raw_values))
         ):
             # Labels are read from the stored values, wherever they are.
             series.raw_values = raw_values.rebase(series.values)
@@ -908,7 +931,7 @@ class SignalStore:
                 series.raw_values = raw_values
             else:
                 if not hasattr(series.raw_values, "extend"):
-                    series.raw_values = list(series.raw_values)
+                    series.raw_values = list(series.raw_values[:labelled])
                 series.raw_values.extend(raw_values)
 
         self.total_samples  += n

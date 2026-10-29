@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Hashable, Iterable
 import inspect
+import math
 import xml.etree.ElementTree as ET
 
 import cantools
@@ -255,6 +256,22 @@ def multi_sender_messages(matches: Iterable[tuple[Hashable, int]]) -> set[Hashab
     return {key for key, addresses in sources.items() if len(addresses) > 1}
 
 
+def _choice_key(signal, value: float) -> int | None:
+    """
+    The raw value behind *signal*'s physical *value*, as the integer its value
+    table is keyed by; None when that is not a whole number. A value table
+    names raw values, which a scaled or offset signal's physical ones are not
+    (core.signal_store.choice_keys does the same for arrays).
+    """
+    scale = float(getattr(signal, "scale", 1) or 1)
+    offset = float(getattr(signal, "offset", 0) or 0)
+    raw = value if (scale, offset) == (1.0, 0.0) else (value - offset) / scale
+    if not math.isfinite(raw) or abs(raw) >= 2.0 ** 62:
+        return None
+    key = round(raw)
+    return key if abs(raw - key) <= 1e-6 * max(1.0, abs(key)) else None
+
+
 class DBCDecoder:
     def __init__(self, dbc_path: str | Path) -> None:
         self.dbc_path = Path(dbc_path)
@@ -471,7 +488,7 @@ class DBCDecoder:
                 # Use pre-cached choices dict (avoids getattr per sample per frame)
                 choices = self._choices_cache.get((msg_name, sig_name))
                 if choices and numeric_value is not None:
-                    label = choices.get(int(numeric_value))
+                    label = choices.get(_choice_key(signal, numeric_value))
                     display_value: Any = str(label) if label is not None else raw
                 else:
                     display_value = raw

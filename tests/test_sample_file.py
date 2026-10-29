@@ -165,21 +165,20 @@ def test_heap_stays_at_the_budget_however_much_is_decoded():
 # ── Labels ───────────────────────────────────────────────────────────────
 
 def _old_labels(numeric_arr, lut, lut_valid):
-    """The per-sample list the decoder built before ChoiceLabels."""
-    max_key = len(lut) - 1
-    nan_mask = np.isnan(numeric_arr)
-    with np.errstate(invalid="ignore"):
-        int_arr = numeric_arr.astype(np.int64)
-    safe_idx = np.clip(int_arr, 0, max_key)
-    in_range = ~nan_mask & (int_arr >= 0) & (int_arr <= max_key)
-    has_val = in_range & lut_valid[safe_idx]
-    result = np.empty(len(numeric_arr), dtype=object)
-    result[nan_mask] = ''
-    result[~nan_mask & ~in_range] = numeric_arr[~nan_mask & ~in_range]
-    result[in_range & ~lut_valid[safe_idx]] = numeric_arr[in_range & ~lut_valid[safe_idx]]
-    if has_val.any():
-        result[has_val] = lut[safe_idx[has_val]]
-    return result.tolist()
+    """A per-sample list of the labels, one value at a time: the table's text
+    for a whole value it has, the value itself otherwise (cantools labels a
+    value only on an exact key), '' for NaN."""
+    result = []
+    for value in numeric_arr.tolist():
+        if np.isnan(value):
+            result.append('')
+        elif np.isfinite(value) and value == int(value):
+            key = int(value)
+            in_table = 0 <= key < len(lut) and lut_valid[key]
+            result.append(lut[key] if in_table else value)
+        else:
+            result.append(value)
+    return result
 
 
 def test_choice_labels_match_the_old_list():
@@ -188,6 +187,8 @@ def test_choice_labels_match_the_old_list():
     values = np.array([0, 1, 2, 3, 4, -1, np.nan, 2.7, -0.5, 1e6, np.inf, -np.inf])
     labels = ChoiceLabels(values, lut, valid)
     old = _old_labels(values, lut, valid)
+    # 2.7 and -0.5 are no raw value in the table (once cut to Neutral, Park).
+    assert old[7:9] == [2.7, -0.5]
     assert list(labels) == old
     assert [labels[i] for i in range(len(values))] == old
     assert labels[-3] == old[-3]

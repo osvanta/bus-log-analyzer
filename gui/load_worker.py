@@ -131,51 +131,59 @@ def _group_frames(combined):
     return sort_idx, boundaries
 
 
-def _choice_labels(choices, values, count=None):
+def _choice_labels(choices, values, count=None, scale=1.0, offset=0.0):
     """
     Display labels for an enum signal's *values*, or [] for a plain signal.
 
     *values* is one array, or a list of parts (with their total *count*) that
-    the store puts together. Integer choice keys below 65 536 — every DBC seen
-    so far — give a ChoiceLabels, which reads each label from the stored
-    values when asked (Bottleneck 5: no per-sample Python list). Other keys
-    fall back to a per-sample list.
+    the store puts together. The choices are keyed by raw value, so each
+    physical value is turned back into its raw one with the signal's *scale*
+    and *offset* first. Integer choice keys spanning fewer than 65 536 values
+    from zero or below — every DBC seen so far — give a ChoiceLabels, which
+    reads each label from the stored values when asked (Bottleneck 5: no
+    per-sample Python list). Other keys fall back to a per-sample list.
     """
     import numpy as np
-    from core.signal_store import ChoiceLabels
+    from core.signal_store import ChoiceLabels, choice_keys
 
     if not choices:
         return []
     try:
         int_keys = {
             k: str(v) for k, v in choices.items()
-            if isinstance(k, int) and k >= 0
+            if isinstance(k, int)
         }
+        base = min(min(int_keys), 0) if int_keys else 0
         max_key = max(int_keys) if int_keys else -1
     except (TypeError, ValueError):
         int_keys = {}
+        base = 0
         max_key  = -1
 
-    if int_keys and max_key < 65536:
-        lut       = np.empty(max_key + 1, dtype=object)
-        lut_valid = np.zeros(max_key + 1, dtype=bool)
+    scaling = (float(scale), float(offset), base)
+    if int_keys and max_key - base < 65536:
+        lut       = np.empty(max_key - base + 1, dtype=object)
+        lut_valid = np.zeros(max_key - base + 1, dtype=bool)
         for k, v in int_keys.items():
-            lut[k]       = v
-            lut_valid[k] = True
+            lut[k - base]       = v
+            lut_valid[k - base] = True
         if isinstance(values, list):
-            return ChoiceLabels.unbound(lut, lut_valid, count)
-        return ChoiceLabels(values, lut, lut_valid)
+            return ChoiceLabels.unbound(lut, lut_valid, count, scaling)
+        return ChoiceLabels(values, lut, lut_valid, scaling)
 
     # Fallback: Python loop (non-integer / very large keys)
-    parts = values if isinstance(values, list) else [values]
-    return [
-        '' if np.isnan(v)
-        else (str(choices[int(v)])
-              if int(v) in choices
-              else float(v))
-        for part in parts
-        for v in np.asarray(part, dtype=np.float64)
-    ]
+    labels = []
+    for part in values if isinstance(values, list) else [values]:
+        part = np.asarray(part, dtype=np.float64)
+        keys, exact = choice_keys(part, scale, offset)
+        for v, key, has_key in zip(part.tolist(), keys.tolist(), exact.tolist()):
+            if np.isnan(v):
+                labels.append('')
+            elif has_key and key in choices:
+                labels.append(str(choices[key]))
+            else:
+                labels.append(float(v))
+    return labels
 
 
 def _frame_keys(flags, channels, arb_ids):
@@ -780,7 +788,9 @@ class LoadWorker(QObject):
                     else:
                         signal_ts = ts_arr[valid_mask]
                         numeric_arr = numeric_arr[valid_mask]
-                    raw_values = _choice_labels(ext.choices, numeric_arr)
+                    raw_values = _choice_labels(
+                        ext.choices, numeric_arr, scale=ext.scale, offset=ext.offset
+                    )
                     store.add_series_bulk(
                         channel      = ch_key,
                         message_name = msg_name,
@@ -807,7 +817,9 @@ class LoadWorker(QObject):
                     unit         = ext.unit,
                     timestamps   = shared_ts if own_ts is None else own_ts,
                     values       = value_parts,
-                    raw_values   = _choice_labels(ext.choices, value_parts, count),
+                    raw_values   = _choice_labels(
+                        ext.choices, value_parts, count, ext.scale, ext.offset
+                    ),
                     has_labels   = bool(ext.choices),
                 )
             del parts, shared_ts
