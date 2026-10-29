@@ -26,7 +26,7 @@ import core.readers.mdf_can_reader as mdf_can_reader
 from core.bus_types import BusType
 from core.channel_config import ChannelConfig
 from core.raw_frame_store import RawFrameStore
-from core.readers.mdf_can_reader import MDFCANReader, _bus_logging_keys
+from core.readers.mdf_can_reader import MDFCANReader, _bus_channels
 from core.signal_store import LazySignalSeries
 
 asammdf = pytest.importorskip("asammdf")
@@ -137,18 +137,21 @@ def test_reading_the_trace_in_chunks_bounds_its_memory(tmp_path, monkeypatch):
 
 # ── Bus channels without asammdf's map ───────────────────────────────────
 
-def test_bus_logging_keys_match_asammdfs_map(tmp_path):
+def test_bus_channels_match_asammdfs_map_for_can(tmp_path):
     path = _write_mf4(tmp_path / "bus.mf4", _can_rows(20, channels=(1, 3)),
                       [(START + i * 0.02, 1, bytes(8)) for i in range(5)])
     full = asammdf.MDF(str(path), use_display_names=False)
-    want = {bus: sorted(int(key) for key in full._mdf.bus_logging_map[bus])
-            for bus in ("CAN", "LIN")}
+    can = sorted(int(key) for key in full._mdf.bus_logging_map["CAN"])
+    lin_keys = sorted(int(key) for key in full._mdf.bus_logging_map["LIN"])
     full.close()
     lean = asammdf.MDF(str(path), use_display_names=False, process_bus_logging=False)
     try:
-        assert _bus_logging_keys(lean) == want == {"CAN": [1, 3], "LIN": [LIN_ID]}
+        assert _bus_channels(lean) == {"CAN": can, "LIN": [1]}
     finally:
         lean.close()
+    assert can == [1, 3]
+    # asammdf's LIN keys are frame IDs: read as channels, LIN 33 here.
+    assert lin_keys == [LIN_ID]
 
 
 # ── Whole loads: left in the decoded file equals read into memory ───────

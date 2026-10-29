@@ -473,14 +473,21 @@ def test_a_signal_added_twice_keeps_one_label_per_sample(budget, parts):
     store.close()
 
 
-def test_a_second_part_with_another_table_keeps_each_parts_labels():
+@pytest.mark.parametrize("parts", [False, True], ids=["whole", "parts"])
+@pytest.mark.parametrize("budget", [None, 0], ids=["heap", "file"])
+def test_a_second_part_with_another_table_keeps_each_parts_labels(budget, parts):
+    # Handed over in parts (a long signal decoded in slices), the second
+    # part's labels are bound to no values yet: reading them failed.
     from core.signal_store import SignalStore
 
     store = SignalStore()
-    _add_level(store, [0.0, 0.1], [0.5, 1.0], {1: "Low", 2: "High"})
-    series = _add_level(store, [0.2], [0.5], {1: "Lo"})
+    if budget is not None:
+        store.memory_budget = budget
+    _add_level(store, [0.0, 0.1], [0.5, 1.0], {1: "Low", 2: "High"}, parts)
+    series = _add_level(store, [0.2, 0.3], [0.5, 1.0], {1: "Lo"}, parts)
 
-    assert [str(x) for x in series.raw_values] == ["Low", "High", "Lo"]
+    assert len(series.raw_values) == len(series.values) == 4
+    assert [str(x) for x in series.raw_values] == ["Low", "High", "Lo", "1.0"]
     store.close()
 
 

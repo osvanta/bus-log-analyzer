@@ -16,6 +16,7 @@ bus-log-analyzer/
 │   ├── export.py                 # CSV export
 │   ├── mf4_writer.py             # Decoded signals → MF4 (asammdf); marks each group's bus channel so the file reopens with the same keys; plot markers become MF4 marker events
 │   ├── converter.py              # Tools ▸ Convert files: join / cut / keep signals / resample; MF4·MDF via asammdf, BLF·ASC frames via python-can, TRC via its reader
+│   ├── asammdf_fixes.py          # asammdf's bus-logging decode made to match the decoder: signed 8-bit off a byte boundary, J1939 "not available" kept, no −0.0
 │   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line; TRC version, start, connections, events
 │   ├── signal_statistics.py      # Min / max / mean / std dev / RMS / samples of a signal over a time range
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
@@ -230,7 +231,10 @@ empty measurement with no error and nothing to point at.
   message from `DataLength` (keeping only those, so memory follows their
   number), matches them to asammdf's samples by time stamp, and leaves out
   the same samples in the lazy and the eager read, reporting the count among
-  the load warnings. CAN only: a LIN bus-logging MF4 still reads padding.
+  the load warnings. LIN too: asammdf gathers a LIN frame ID's frames from
+  every LIN bus into each bus's group, so `MDFCANReader` also leaves out the
+  samples from another bus's frames, and reads the LIN bus channels from the
+  frames themselves (asammdf's LIN keys are frame IDs, not channels).
 - **A value table names raw values; a signal plots its physical values.**
   Each sample's label is the table's text for its raw value, or the physical
   value where the table has none, as cantools gives it with
@@ -242,6 +246,15 @@ empty measurement with no error and nothing to point at.
   its values and the conversion's text as its labels (`TableLabels`, worked
   out when shown). A table with a text default, as this application's own
   MF4 export writes, keeps the stored value.
+- **asammdf decodes a bus-logging MF4 as the decoder decodes the same frames.**
+  `core/asammdf_fixes.py`, installed with the overrun guard by
+  `core/readers/__init__.py`, corrects asammdf 8.8.27 where it differs: a
+  signed 8-bit signal off a byte boundary is sign-extended (0xFC is −4, not
+  252); a J1939 signal "not available" in every sample is kept, as BLF and ASC
+  show it, since the application never applies asammdf's J1939 invalidation
+  marks; and a linear conversion with a negative factor and no offset gives
+  0.0 for raw 0, not −0.0 (MDF3 too). Rerun `tests/test_asammdf_fixes.py`
+  after any asammdf upgrade.
 - `blf_content.py` scans object types — stopping at the first CAN object, so a
   normal CAN log costs one container — and `reader_factory` refuses a BLF
   holding *neither* CAN nor LIN. That check runs **before** the database check:
@@ -256,6 +269,10 @@ empty measurement with no error and nothing to point at.
 2. `VectorizedDBC` groups frames by `(channel, arbitration_id)` and performs
    NumPy signal extraction. Simple little-endian multiplexing is vectorized;
    inactive multiplex branches and failed rows are not inserted as samples.
+   A frame whose multiplexer value the database does not define keeps its
+   multiplexer and non-multiplexed signals, as asammdf does; only that
+   branch's signals get no value (`dbc_decoder.decode_known_branches` where
+   cantools would reject the frame, in the CAN Trace too).
    Unsupported layouts use the verified cantools fallback.
 3. `SignalStore.add_series_bulk()` receives complete timestamp/value arrays.
    Do not alter `core/signal_store.py` as part of loading/decoding work without

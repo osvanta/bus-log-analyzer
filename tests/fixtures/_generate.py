@@ -154,28 +154,44 @@ _LIN_FRAMES = [
 
 def generate_lin_mf4(out_path: Path) -> None:
     """Write a small LIN bus-logging MF4 that pairs with sample.ldf."""
+    write_lin_mf4(out_path, [
+        (index * 0.01, bus, frame_id, bytes(payload[:length]))
+        for index, (bus, frame_id, length, payload) in enumerate(_LIN_FRAMES)
+    ])
+    print(f"Written: {out_path} ({len(_LIN_FRAMES)} LIN frames)")
+
+
+def write_lin_mf4(out_path: Path, frames, padding: int = 0,
+                  bus_channel: bool = True) -> Path:
+    """Write *frames*, ``(time s, bus channel, frame ID, payload)``, as a LIN
+    bus-logging MF4. ``DataLength`` is each payload's length, and the 8-byte
+    ``DataBytes`` record is filled up with *padding*, as a logger fills it.
+    Without *bus_channel* the records have no ``BusChannel``, as a one-bus
+    recorder may write them."""
     import numpy as np
     from asammdf import MDF, Signal
     from asammdf.blocks import v4_constants as v4c
     from asammdf.blocks.v4_blocks import SourceInformation
 
-    count = len(_LIN_FRAMES)
+    count = len(frames)
     record = np.zeros(count, dtype=np.dtype([
-        ("LIN_Frame.BusChannel", "<u1"),
+        *([("LIN_Frame.BusChannel", "<u1")] if bus_channel else []),
         ("LIN_Frame.ID", "<u1"),
         ("LIN_Frame.DataLength", "<u1"),
         ("LIN_Frame.DataBytes", "(8,)u1"),
     ]))
-    for index, (bus, frame_id, length, payload) in enumerate(_LIN_FRAMES):
-        record["LIN_Frame.BusChannel"][index] = bus
+    for index, (_t, bus, frame_id, payload) in enumerate(frames):
+        if bus_channel:
+            record["LIN_Frame.BusChannel"][index] = bus
         record["LIN_Frame.ID"][index] = frame_id
-        record["LIN_Frame.DataLength"][index] = length
-        for byte_index, value in enumerate(payload):
-            record["LIN_Frame.DataBytes"][index, byte_index] = value
+        record["LIN_Frame.DataLength"][index] = len(payload)
+        record["LIN_Frame.DataBytes"][index] = (
+            list(payload) + [padding] * (8 - len(payload))
+        )
 
     signal = Signal(
         samples=record,
-        timestamps=np.arange(count, dtype=np.float64) * 0.01,
+        timestamps=np.array([frame[0] for frame in frames], dtype=np.float64),
         name="LIN_Frame",
     )
     signal.source = SourceInformation(
@@ -191,7 +207,7 @@ def generate_lin_mf4(out_path: Path) -> None:
         mdf.save(out_path, overwrite=True)
     finally:
         mdf.close()
-    print(f"Written: {out_path} ({count} LIN frames)")
+    return out_path
 
 
 # ── LIN-only BLF ──────────────────────────────────────────────────────────
@@ -290,8 +306,6 @@ def _lin_event_object(timestamp_ns: int, object_type: int) -> bytes:
 
 
 def generate_lin_blf(out_path: Path) -> None:
-    import zlib
-
     parts = []
     tick = 0
     for repeat in range(8):
@@ -307,8 +321,25 @@ def generate_lin_blf(out_path: Path) -> None:
             for event_type in _LIN_EVENT_TYPES:
                 tick += 1
                 parts.append(_lin_event_object(tick * 10_000_000, event_type))
-    objects = b"".join(parts)
+    _write_blf(out_path, parts)
+    print(f"Written: {out_path} ({len(parts)} LIN frames, no CAN)")
 
+
+def write_lin_blf(out_path: Path, frames) -> Path:
+    """Write *frames*, ``(time s, bus channel, frame ID, payload)``, as a
+    LIN-only BLF."""
+    _write_blf(out_path, [
+        _lin_message2_object(round(t * 1e9), channel, frame_id, bytes(payload))
+        for t, channel, frame_id, payload in frames
+    ])
+    return out_path
+
+
+def _write_blf(out_path: Path, parts: list[bytes]) -> None:
+    """Write BLF objects in one compressed container."""
+    import zlib
+
+    objects = b"".join(parts)
     compressed = zlib.compress(objects)
     container_size = _BLF_OBJ_HEADER.size + _BLF_LOG_CONTAINER.size + len(compressed)
     container = b"".join((
@@ -330,7 +361,22 @@ def generate_lin_blf(out_path: Path) -> None:
     header += b"\0" * (_BLF_FILE_HEADER_SIZE - len(header))
 
     out_path.write_bytes(header + container)
-    print(f"Written: {out_path} ({count} LIN frames, no CAN)")
+
+
+def write_lin_asc(out_path: Path, frames) -> Path:
+    """Write *frames*, ``(time s, bus channel, frame ID, payload)``, as a LIN
+    ASC log in its plainest line form."""
+    lines = [
+        "date Mon Jan 15 10:00:00 am 2024",
+        "base hex  timestamps absolute",
+        "internal events logged",
+        "// version 13.0.0",
+    ]
+    for t, channel, frame_id, payload in frames:
+        data = " ".join(f"{byte:02x}" for byte in payload)
+        lines.append(f"{t:12.6f} Li {channel}  {frame_id:x} Rx {len(payload)} {data}")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path
 
 
 def generate_lin_asc(out_path: Path) -> None:

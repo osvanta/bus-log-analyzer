@@ -165,6 +165,28 @@ def test_lin_message_names_come_from_the_database(lin_mf4_path, sample_ldf_path)
     assert not any(name.startswith("LIN_Frame_") for name in message_names)
 
 
+def test_an_ldf_on_every_lin_channel_decodes_as_on_lin_1(lin_mf4_path, sample_ldf_path):
+    """The Database Manager's "all channels" and the release test give a
+    lone LDF to every LIN channel. asammdf's LIN keys are frame IDs, not bus
+    channels: read as channels they sent the LDF to LIN 32 and LIN 33, and
+    nothing decoded."""
+    _require_ldf_support()
+    from core.channel_config import all_channels_key
+
+    config = ChannelConfig(
+        name="LIN", channels={all_channels_key(BusType.LIN): str(sample_ldf_path)}
+    )
+    reader = reader_factory(str(lin_mf4_path), str(sample_ldf_path))
+    decoded = {
+        (meta[0], meta[1], meta[3]): list(values)
+        for meta, _timestamps, values, _display
+        in reader.iter_decoded_channel_arrays(config)
+    }
+
+    assert decoded == _decode(lin_mf4_path, sample_ldf_path)
+    assert decoded[(LIN1, "DoorCmd", "WindowPos")] == [10.0, 30.0]
+
+
 def test_lin_database_is_not_applied_to_can_extraction(lin_mf4_path, sample_ldf_path):
     """An All-LIN fallback must never reach CAN, and vice versa.
 

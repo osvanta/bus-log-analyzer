@@ -25,14 +25,23 @@ Coverage
   * non-byte-aligned floats
   * multiplexed signals with scaled/nonstandard multiplexer selectors
   * anything that fails the per-message correctness check (compared against
-    `message.decode()` on the first row)
+    `message.decode()` on the first row it decodes)
 
 Correctness
 -----------
 For each cantools message, the vectorized decoder runs once on the first
-frame and compares its output against `cantools.message.decode()`. If any
-signal disagrees beyond a tiny tolerance, the entire message falls back to
-the per-row cantools decoder for the rest of the frames in that group.
+frame cantools decodes, within the first 32, and compares its output against
+`cantools.message.decode()`. If any signal disagrees beyond a tiny
+tolerance, the entire message falls back to the per-row cantools decoder for
+the rest of the frames in that group.
+
+Undefined multiplexer values
+----------------------------
+A frame whose multiplexer value the database does not define keeps its
+other signals, as asammdf keeps them: the fast path leaves only that
+branch's signals out, and the slow path decodes a row cantools rejects with
+`core.dbc_decoder.decode_known_branches`. cantools alone would drop the
+whole frame.
 
 Short frames
 ------------
@@ -47,6 +56,11 @@ from typing import Any
 
 import numpy as np
 
+from core.dbc_decoder import decode_known_branches
+
+# How many rows the correctness check may look through for one cantools
+# decodes: rows with an undefined multiplexer value are skipped.
+_VERIFY_ROWS = 32
 
 # ── Single-signal extractor ──────────────────────────────────────────────
 
@@ -154,6 +168,32 @@ class SignalExtractor:
 # ── Per-message decoder (composes signal extractors) ─────────────────────
 
 
+def _branches_parents_first(extractors: list[SignalExtractor]) -> list[SignalExtractor]:
+    """
+    The multiplexed signals, each after the multiplexer it depends on.
+
+    cantools lists a message's signals by start bit, so an inner multiplexer
+    can come after the signals of its own branches. Matched in that order, a
+    branch would take the inner multiplexer's raw bits on a row where the
+    outer multiplexer has left it out, and get values cantools never gives.
+    """
+    by_name = {ext.name: ext for ext in extractors}
+
+    def depth(ext: SignalExtractor) -> int:
+        levels, seen = 0, set()
+        parent = ext.multiplexer_signal
+        while parent in by_name and parent not in seen:
+            seen.add(parent)
+            levels += 1
+            parent = by_name[parent].multiplexer_signal
+        return levels
+
+    return sorted(
+        (ext for ext in extractors if ext.multiplexer_ids and ext.multiplexer_signal),
+        key=depth,
+    )
+
+
 class MessageVectorDecoder:
     """
     Vectorized decoder for one cantools Message.
@@ -164,7 +204,7 @@ class MessageVectorDecoder:
 
     __slots__ = (
         'message', 'signals', 'extractors', 'fully_fast',
-        'expected_length', '_decode_kwargs', '_verified',
+        'expected_length', '_decode_kwargs', '_verified', 'branches',
     )
 
     def __init__(self, message: Any, decode_kwargs: dict | None = None) -> None:
@@ -189,6 +229,7 @@ class MessageVectorDecoder:
             'allow_truncated': True, 'allow_excess': True,
         }
         self._verified = False   # per-message correctness check status
+        self.branches = _branches_parents_first(self.extractors)
 
     # ── Public decode ─────────────────────────────────────────────────────
 
@@ -242,10 +283,9 @@ class MessageVectorDecoder:
         # Keep only rows where a multiplexed branch is active.  NaNs are
         # removed by LoadWorker before bulk insertion, producing the same
         # sparse time series as cantools/asammdf instead of one padded series
-        # per branch for every message occurrence.
-        for ext in self.extractors:
-            if not ext.multiplexer_ids or not ext.multiplexer_signal:
-                continue
+        # per branch for every message occurrence.  A nested multiplexer is
+        # cut before the branches below it are matched against its values.
+        for ext in self.branches:
             mux_result = out.get(ext.multiplexer_signal)
             if mux_result is None:
                 continue
@@ -272,7 +312,12 @@ class MessageVectorDecoder:
             try:
                 decoded = msg.decode(payload, **kwargs)
             except Exception:
-                continue
+                # A multiplexer value the database does not define: cantools
+                # rejects the row, but the signals outside that branch stay.
+                try:
+                    decoded = decode_known_branches(msg, payload, **kwargs)
+                except Exception:
+                    continue
             if not isinstance(decoded, dict):
                 continue
             for sig_name, (_ext, arr) in per_sig.items():
@@ -286,18 +331,27 @@ class MessageVectorDecoder:
     # ── First-row correctness check ──────────────────────────────────────
 
     def _verify_fast_path(self, data_arr: np.ndarray) -> bool:
-        """Compare vectorised output against cantools on the first row."""
+        """Compare vectorised output against cantools on the first row it
+        decodes, among the first ``_VERIFY_ROWS``."""
         self._verified = True
         if data_arr.shape[0] == 0:
             return True
-        try:
-            payload = data_arr[0, :self.expected_length].tobytes()
-            cantools_decoded = self.message.decode(payload, **self._decode_kwargs)
-        except Exception:
+        # cantools rejects a row whose multiplexer value the database does
+        # not define, so there is nothing to check such a row against: a
+        # measurement starting on one would otherwise lose the fast path
+        # for the whole message.
+        for row in range(min(data_arr.shape[0], _VERIFY_ROWS)):
+            try:
+                payload = data_arr[row, :self.expected_length].tobytes()
+                cantools_decoded = self.message.decode(payload, **self._decode_kwargs)
+            except Exception:
+                continue
+            break
+        else:
             return False
         if not isinstance(cantools_decoded, dict):
             return False
-        view = data_arr[:1, :self.expected_length]
+        view = data_arr[row:row + 1, :self.expected_length]
         for ext in self.extractors:
             try:
                 vec_val = float(ext.extract_fast(view)[0])
