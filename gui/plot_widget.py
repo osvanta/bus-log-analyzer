@@ -16,12 +16,12 @@ from typing import Any
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import (
-    Qt, QTimer, Signal, QRectF, QPointF, QSize, QByteArray, QMimeData,
+    Qt, QTimer, Signal, QRect, QRectF, QPointF, QSize, QByteArray, QMimeData,
     QItemSelectionModel, QEvent,
 )
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QCursor, QDrag, QDragEnterEvent, QDropEvent, QFont,
-    QKeySequence, QPen, QPainter, QPalette,
+    QKeySequence, QPen, QPainter, QPalette, QPixmap,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -52,6 +53,7 @@ from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
 from gui.tabular_view import TabularView
 from gui.edge_tab import _mix
+from gui.plot_icons import drawing_pixmap
 from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
 
@@ -171,6 +173,135 @@ class _MarkerLine(pg.InfiniteLine):
             panel.rename_marker_interactively(self.marker)
             return
         super().mouseClickEvent(ev)
+
+
+class _MarkerListMenu(QMenu):
+    """Go to marker: a row per marker, "name · time s", that goes to it, with
+    a waste bin right after the name that deletes it. The menu stays open on
+    the markers left, so several go in a row of clicks; Delete deletes the
+    highlighted one."""
+
+    _BIN = 16                  # the bin's side, in pixels
+    _BIN_AREA = 24             # its click target's width; the row's height high
+    _BIN_GAP = 6               # from the end of the text to the click target
+    _TEXT_LEFT = 12            # the text's indent, as the plot menus' style has it
+    _BIN_HOT = '#c62828'       # behind the bin under the pointer, drawn white
+    # The text's indent, and room past the longest text for its bin.
+    _BIN_ROOM = (f'QMenu::item {{ padding-left: {_TEXT_LEFT}px; '
+                 f'padding-right: {_BIN_GAP + _BIN_AREA + 6}px; }}')
+
+    def __init__(self, panel: 'PlotPanel', parent: QMenu) -> None:
+        super().__init__('Go to marker', parent)
+        self._panel = weakref.ref(panel)
+        self._rows: dict[QAction, PlotMarker] = {}
+        self._hot: QAction | None = None       # the row whose bin is under the pointer
+        self._pixmaps: dict[tuple[int, float], QPixmap] = {}
+        self.setStyleSheet(self._BIN_ROOM)
+        self.setMouseTracking(True)
+        for marker in panel.markers():
+            action = self.addAction(f'{marker.name}  ·  {marker.time:.3f} s',
+                                    lambda *_, m=marker: panel.go_to_marker(m))
+            self._rows[action] = marker
+        self.setEnabled(bool(self._rows))
+
+    def bin_area(self, action: QAction) -> QRect:
+        """Just after the text of action's row: the bin, and its click target."""
+        row = self.actionGeometry(action)
+        text_end = (row.left() + self._TEXT_LEFT
+                    + self.fontMetrics().horizontalAdvance(action.text()))
+        return QRect(text_end + self._BIN_GAP, row.top(), self._BIN_AREA, row.height())
+
+    def delete_row(self, action: QAction) -> None:
+        """Delete action's marker and take its row out; the menu stays open
+        on the rest, and closes once none is left."""
+        marker = self._rows.pop(action, None)
+        panel = self._panel()
+        if marker is None or panel is None:
+            return
+        panel.remove_marker(marker)
+        self.removeAction(action)
+        action.deleteLater()
+        self._hot = None
+        if not self._rows:
+            self.setEnabled(False)
+            self.hide()
+            return
+        # The next row moves up under the pointer: its bin is the one now.
+        self._set_hot(self._bin_row_at(self.mapFromGlobal(QCursor.pos())))
+
+    def _bin_row_at(self, pos) -> QAction | None:
+        # A list taller than the screen wraps into columns (the styles used
+        # here do not scroll menus), so every row and its bin stay in view.
+        action = self.actionAt(pos)
+        if action in self._rows and self.bin_area(action).contains(pos):
+            return action
+        return None
+
+    def _set_hot(self, action: QAction | None) -> None:
+        if action is not self._hot:
+            self._hot = action
+            self.update()
+
+    def _bin_pixmap(self, color: QColor) -> QPixmap:
+        scale = self.devicePixelRatioF()
+        key = (color.rgba(), scale)
+        if key not in self._pixmaps:
+            self._pixmaps[key] = drawing_pixmap('clear_plot', self._BIN, color, scale)
+        return self._pixmaps[key]
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for action in self._rows:
+            area = self.bin_area(action)
+            if action is self._hot:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(self._BIN_HOT))
+                square = min(area.width(), area.height()) - 4
+                hot = QRectF(0, 0, square, square)
+                hot.moveCenter(QRectF(area).center())
+                painter.drawRoundedRect(hot, 4, 4)
+                color = QColor(Qt.GlobalColor.white)
+            else:
+                color = self.palette().color(QPalette.ColorRole.Text)
+            painter.drawPixmap(area.left() + (area.width() - self._BIN) // 2,
+                               area.top() + (area.height() - self._BIN) // 2,
+                               self._bin_pixmap(color))
+        painter.end()
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        self._set_hot(self._bin_row_at(event.position().toPoint()))
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._set_hot(None)
+
+    def mouseReleaseEvent(self, event) -> None:
+        action = self._bin_row_at(event.position().toPoint())
+        if action is None or event.button() != Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        event.accept()
+        self.delete_row(action)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Delete and self.activeAction() in self._rows:
+            event.accept()
+            self.delete_row(self.activeAction())
+            return
+        super().keyPressEvent(event)
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.Type.ToolTip:
+            action = self._bin_row_at(event.pos())
+            if action is None:
+                QToolTip.hideText()
+            else:
+                QToolTip.showText(event.globalPos(), f'Delete {self._rows[action].name}', self)
+            return True
+        return super().event(event)
 
 
 class _LeftAxis(pg.AxisItem):
@@ -934,6 +1065,8 @@ class PlotPanel(QWidget):
     clearRequested = Signal()
     # "Properties…" in a signal's menu: the main window shows its definition.
     propertiesRequested = Signal(str)
+    # A marker was added or deleted, or all of them were replaced.
+    markersChanged = Signal()
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -3062,6 +3195,7 @@ class PlotPanel(QWidget):
                                          or self._next_marker_name(parsed)))
         self._markers = sorted(parsed, key=lambda m: m.time)
         self._draw_markers()
+        self.markersChanged.emit()
 
     def _next_marker_name(self, markers: list[PlotMarker] | None = None) -> str:
         """M1, M2, …: the first not taken."""
@@ -3076,6 +3210,7 @@ class PlotPanel(QWidget):
         self._markers.append(marker)
         self._markers.sort(key=lambda m: m.time)
         self._draw_markers()
+        self.markersChanged.emit()
         return marker
 
     def add_marker_at_cursor1(self) -> PlotMarker | None:
@@ -3099,6 +3234,10 @@ class PlotPanel(QWidget):
         if marker in self._markers:
             self._markers.remove(marker)
             self._draw_markers()
+            self.markersChanged.emit()
+
+    def remove_all_markers(self) -> None:
+        self.set_markers([])
 
     def go_to_marker(self, marker: PlotMarker) -> None:
         """Centre the view on *marker*, keeping the zoom."""
@@ -3114,9 +3253,22 @@ class PlotPanel(QWidget):
         menu.addAction('Delete marker', lambda *_: self.remove_marker(marker))
         return menu
 
+    def delete_markers_menu(self) -> QMenu:
+        """Delete all markers, then each marker to delete it alone: the menu
+        of the plot buttons' Delete Markers."""
+        menu = self._make_menu()
+        menu.addAction(f'Delete all markers ({len(self._markers)})',
+                       lambda *_: self.remove_all_markers())
+        menu.addSeparator()
+        for marker in self._markers:
+            menu.addAction(f'{marker.name}  ·  {marker.time:.3f} s',
+                           lambda *_, m=marker: self.remove_marker(m))
+        return menu
+
     def _add_marker_actions(self, menu: QMenu, time_s: float | None = None) -> None:
         """Add marker here (given a time), Add marker at Cursor 1, Go to
-        marker and Show measurement events, to a right-click menu."""
+        marker (each row with a bin that deletes it) and Show measurement
+        events, to a right-click menu."""
         if time_s is not None:
             menu.addAction('Add marker here', lambda *_: self.add_marker(time_s))
         at_cursor = menu.addAction('Add marker at Cursor 1',
@@ -3124,11 +3276,7 @@ class PlotPanel(QWidget):
         at_cursor.setShortcut(QKeySequence('M'))
         at_cursor.setShortcutVisibleInContextMenu(True)
         at_cursor.setEnabled(self._cursor1_enabled)
-        go_to = menu.addMenu('Go to marker')
-        go_to.setEnabled(bool(self._markers))
-        for marker in self._markers:
-            go_to.addAction(f'{marker.name}  ·  {marker.time:.3f} s',
-                            lambda *_, m=marker: self.go_to_marker(m))
+        menu.addMenu(_MarkerListMenu(self, menu))
         menu.addAction(self.events_action)
 
     def _draw_markers(self) -> None:

@@ -39,6 +39,7 @@ _SAMPLES = ('<g fill="currentColor" stroke="none">'
             '<circle cx="14" cy="15" r="2"/><circle cx="20" cy="7" r="2"/></g>')
 _TWO_SAMPLES = ('<g fill="currentColor" stroke="none">'
                 '<circle cx="6" cy="17" r="2.2"/><circle cx="16" cy="7" r="2.2"/></g>')
+_BIN = '<path d="M4 6.5h16M9.5 6.5V4h5v2.5M6 6.5l1 14h10l1-14M10 10.5v6M14 10.5v6"/>'
 
 # Drawn on a 24 x 24 grid.
 DRAWINGS: dict[str, str] = {
@@ -67,7 +68,11 @@ DRAWINGS: dict[str, str] = {
     # The samples alone: the line is hidden.
     'hide_line': _SAMPLES,
     # A waste bin: every signal leaves the plot.
-    'clear_plot': '<path d="M4 6.5h16M9.5 6.5V4h5v2.5M6 6.5l1 14h10l1-14M10 10.5v6M14 10.5v6"/>',
+    'clear_plot': _BIN,
+    # A marker, dashed as on the plot, beside a smaller bin: markers are deleted.
+    'delete_markers': ('<path d="M4.5 3v18" stroke-dasharray="3 3"/>'
+                       '<g transform="translate(6.7 3.3) scale(.72)" stroke-width="2.4">'
+                       + _BIN + '</g>'),
     # For the top row's Decode: square bus pulses that become a smooth signal,
     # drawn heavier to stand beside its bold text.
     'decode': '<path stroke-width="2.3" d="M2 16h2.5V8H7.5v8H10c1.8 0 2.4-8 5-8s3.2 8 5 8h2"/>',
@@ -91,6 +96,21 @@ def icon_button(name: str, label: str, tooltip: str) -> QPushButton:
     button.setAccessibleName(label)
     button.setToolTip(tooltip)
     return button
+
+
+def drawing_pixmap(name: str, side: int, color: QColor, scale: float = 1.0) -> QPixmap:
+    """DRAWINGS[name] in one colour, side logical pixels square at scale."""
+    pixels = max(1, round(side * scale))
+    image = QImage(pixels, pixels, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    svg = (_HEAD + DRAWINGS[name] + '</svg>').replace('currentColor', color.name())
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    QSvgRenderer(QByteArray(svg.encode())).render(painter, QRectF(0, 0, pixels, pixels))
+    painter.end()
+    pixmap = QPixmap.fromImage(image)
+    pixmap.setDevicePixelRatio(scale)
+    return pixmap
 
 
 def _color(mode: QIcon.Mode, state: QIcon.State) -> QColor:
@@ -118,7 +138,6 @@ class _PlotIconEngine(QIconEngine):
     def __init__(self, name: str) -> None:
         super().__init__()
         self._name = name
-        self._svg = _HEAD + DRAWINGS[name] + '</svg>'
         self._rendered: dict[tuple[int, int, float], QPixmap] = {}
 
     def clone(self) -> QIconEngine:
@@ -131,14 +150,7 @@ class _PlotIconEngine(QIconEngine):
         key = (side, color.rgba(), scale)
         pixmap = self._rendered.get(key)
         if pixmap is None:
-            image = QImage(side, side, QImage.Format.Format_ARGB32_Premultiplied)
-            image.fill(Qt.GlobalColor.transparent)
-            svg = self._svg.replace('currentColor', color.name())
-            painter = QPainter(image)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            QSvgRenderer(QByteArray(svg.encode())).render(painter, QRectF(0, 0, side, side))
-            painter.end()
-            pixmap = QPixmap.fromImage(image)
+            pixmap = drawing_pixmap(self._name, side, color)
             pixmap.setDevicePixelRatio(scale)
             self._rendered[key] = pixmap
         return pixmap

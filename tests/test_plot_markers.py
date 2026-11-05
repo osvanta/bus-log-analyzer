@@ -166,6 +166,140 @@ def test_go_to_marker_lists_them_and_centres_keeping_the_zoom(panel):
     assert high - low == pytest.approx(10.0, rel=0.01)
 
 
+def _open_go_to(panel):
+    """The Go to marker list of a plot menu, open; the menu is returned too,
+    as the list is its child and goes with it."""
+    from PySide6.QtCore import QPoint
+    menu = panel._make_menu()                          # styled, as the plot's menus are
+    panel._add_marker_actions(menu)
+    go_to = next(a for a in menu.actions() if a.text() == 'Go to marker').menu()
+    go_to.popup(QPoint(0, 0))
+    return menu, go_to
+
+
+def _send_mouse(menu, kind, pos):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+    held = (Qt.MouseButton.LeftButton if kind == QEvent.Type.MouseButtonPress
+            else Qt.MouseButton.NoButton)
+    button = Qt.MouseButton.NoButton if kind == QEvent.Type.MouseMove else Qt.MouseButton.LeftButton
+    QApplication.sendEvent(menu, QMouseEvent(kind, QPointF(pos), QPointF(menu.mapToGlobal(pos)),
+                                             button, held, Qt.KeyboardModifier.NoModifier))
+
+
+def _click(menu, pos):
+    from PySide6.QtCore import QEvent
+    _send_mouse(menu, QEvent.Type.MouseButtonPress, pos)
+    _send_mouse(menu, QEvent.Type.MouseButtonRelease, pos)
+
+
+def _name_of(menu, row):
+    from PySide6.QtCore import QPoint
+    return menu.actionGeometry(row).topLeft() + QPoint(20, 5)
+
+
+def test_each_go_to_row_has_a_bin_that_deletes_just_its_marker(panel):
+    panel.add_marker(10.0, 'spike 1')
+    target = panel.add_marker(20.0, 'spike 2')        # as the assistant names them
+    panel.add_marker(30.0)
+    menu, go_to = _open_go_to(panel)
+    _click(go_to, go_to.bin_area(go_to.actions()[1]).center())
+    assert target not in panel.markers()
+    assert [m.name for m in panel.markers()] == ['spike 1', 'M1']
+    assert len(_lines(panel)) == 2
+    # The list stays open on the rest, so the next goes with another click.
+    assert go_to.isVisible()
+    assert _texts(go_to) == ['spike 1  ·  10.000 s', 'M1  ·  30.000 s']
+    _click(go_to, go_to.bin_area(go_to.actions()[0]).center())
+    assert [m.name for m in panel.markers()] == ['M1']
+    go_to.hide()
+
+
+def test_a_click_on_a_rows_name_goes_to_its_marker_and_keeps_it(panel):
+    panel.add_marker(70.0, 'Early')
+    panel.add_marker(90.0, 'Late')
+    panel.plot.plotItem.vb.setXRange(10.0, 20.0, padding=0)
+    menu, go_to = _open_go_to(panel)
+    _click(go_to, _name_of(go_to, go_to.actions()[0]))
+    assert [m.name for m in panel.markers()] == ['Early', 'Late']
+    low, high = panel._visible_x_range()
+    assert (low + high) / 2 == pytest.approx(70.0, abs=0.01)
+
+
+def test_the_last_bin_closes_the_list(panel):
+    panel.add_marker(5.0)
+    menu, go_to = _open_go_to(panel)
+    _click(go_to, go_to.bin_area(go_to.actions()[0]).center())
+    assert panel.markers() == []
+    assert not go_to.isVisible() and not go_to.isEnabled()
+
+
+def test_delete_deletes_the_highlighted_marker(panel):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+    keep = panel.add_marker(5.0)
+    panel.add_marker(6.0)
+    menu, go_to = _open_go_to(panel)
+    go_to.setActiveAction(go_to.actions()[1])
+    QApplication.sendEvent(go_to, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete,
+                                            Qt.KeyboardModifier.NoModifier))
+    assert panel.markers() == [keep]
+    assert go_to.isVisible()
+    go_to.hide()
+
+
+def test_the_bins_are_drawn_where_they_are_clicked_and_light_up_under_the_pointer(panel):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QColor
+    panel.add_marker(5.0)
+    panel.add_marker(6.0)
+    menu, go_to = _open_go_to(panel)
+    first, second = go_to.actions()
+
+    def colors(area):
+        image = go_to.grab().toImage()
+        return [QColor(image.pixel(x, y)) for x in range(area.left(), area.right())
+                for y in range(area.top(), area.bottom())]
+
+    def red(color):
+        return color.red() > 150 and color.green() < 80 and color.blue() < 80
+
+    _send_mouse(go_to, QEvent.Type.MouseMove, go_to.bin_area(first).center())
+    assert go_to._hot is first
+    hot, idle = colors(go_to.bin_area(first)), colors(go_to.bin_area(second))
+    assert sum(map(red, hot)) > 40                    # its red square
+    assert not any(map(red, idle))
+    assert sum(c.lightness() > 150 for c in idle) > 10   # the bin, in the text colour
+    _send_mouse(go_to, QEvent.Type.MouseMove, _name_of(go_to, first))
+    assert go_to._hot is None
+    go_to.hide()
+
+
+def test_each_bin_sits_just_after_its_rows_text(panel):
+    panel.add_marker(1.0)                                     # short: M1
+    panel.add_marker(123456.789, 'A rather long marker name')
+    menu, go_to = _open_go_to(panel)
+    image = go_to.grab().toImage()
+
+    def lit(x, top, bottom):                              # text and bin are light on dark
+        from PySide6.QtGui import QColor
+        return any(QColor(image.pixel(x, y)).lightness() > 128 for y in range(top, bottom))
+
+    for row in go_to.actions():
+        geometry, area = go_to.actionGeometry(row), go_to.bin_area(row)
+        top, bottom = geometry.top() + 1, geometry.bottom()
+        text_end = max(x for x in range(geometry.left(), area.left()) if lit(x, top, bottom))
+        assert 0 < area.left() - text_end <= 12            # beside the text ...
+        assert not any(lit(x, top, bottom) for x in range(area.left(), area.left() + 4))
+        assert any(lit(x, top, bottom) for x in range(area.left(), area.right()))   # ... not over it
+        assert area.right() <= geometry.right()            # and inside the row
+    short, long_ = go_to.actions()
+    assert go_to.bin_area(short).left() < go_to.bin_area(long_).left()
+    go_to.hide()
+
+
 def test_right_click_on_the_plot_puts_the_commands_on_top(panel, recorded):
     shown = recorded
     vb = panel.plot.plotItem.vb
@@ -222,6 +356,52 @@ def test_double_click_renames_and_right_click_opens_the_menu(panel, monkeypatch,
     line.mouseClickEvent(click(Qt.MouseButton.RightButton))
     assert [_texts(menu) for menu in recorded] == [
         ['Rename…', 'Move Cursor 1 here', 'Delete marker']]
+
+
+# ── Deleting many ────────────────────────────────────────────────────────
+
+
+def test_the_delete_markers_menu_deletes_one_or_all(panel):
+    panel.add_marker(10.0)
+    middle = panel.add_marker(20.0, 'Brake')
+    panel.add_marker(30.0)
+    menu = panel.delete_markers_menu()
+    assert _texts(menu) == ['Delete all markers (3)', 'M1  ·  10.000 s',
+                            'Brake  ·  20.000 s', 'M2  ·  30.000 s']
+    entries = [a for a in menu.actions() if not a.isSeparator()]
+    entries[2].trigger()                               # Brake only
+    assert middle not in panel.markers()
+    assert [m.name for m in panel.markers()] == ['M1', 'M2']
+    assert len(_lines(panel)) == 2
+    menu = panel.delete_markers_menu()
+    assert _texts(menu)[0] == 'Delete all markers (2)'
+    menu.actions()[0].trigger()
+    assert panel.markers() == [] and _lines(panel) == []
+    assert panel.markers_config() == []
+
+
+def test_deleting_all_markers_takes_them_off_every_row(panel):
+    panel.set_stacked(True)
+    panel.add_marker(10.0)
+    panel.add_marker(20.0)
+    assert len(_lines(panel)) == 2 * len(panel._stacked_plots)
+    panel.remove_all_markers()
+    assert _lines(panel) == []
+    for plot_item in panel._stacked_plots:
+        assert not [item for item in plot_item.items
+                    if type(item).__name__ == '_MarkerLine']
+
+
+def test_markers_changed_follows_every_add_and_delete(panel):
+    changes = []
+    panel.markersChanged.connect(lambda: changes.append(len(panel.markers())))
+    marker = panel.add_marker(1.0)
+    panel.add_marker(2.0)
+    panel.remove_marker(marker)
+    panel.remove_marker(marker)                        # already gone: no change
+    panel.set_markers([(3.0, 'A'), (4.0, 'B')])
+    panel.remove_all_markers()
+    assert changes == [1, 2, 1, 2, 0]
 
 
 # ── Clearing, undo, configuration ────────────────────────────────────────
@@ -329,6 +509,56 @@ def test_a_new_measurement_drops_the_markers(window):
     window.plot_panel.add_marker(2.0)
     window._reset_for_new_measurement()
     assert window.plot_panel.markers() == []
+
+
+def test_delete_markers_is_enabled_only_while_there_are_markers(window):
+    button = window.btn_delete_markers
+    panel = window.plot_panel
+    assert not button.isEnabled()                      # none at start
+    marker = panel.add_marker(2.0)
+    assert button.isEnabled()
+    panel.remove_marker(marker)
+    assert not button.isEnabled()
+    panel.set_markers([{'time': 1.0, 'name': 'From config'}])
+    assert button.isEnabled()
+    window._reset_for_new_measurement()
+    assert not button.isEnabled()
+
+
+def test_delete_markers_opens_its_menu_and_deletes_them_all(window, monkeypatch):
+    panel = window.plot_panel
+    shown = []
+    monkeypatch.setattr(panel, '_make_menu', lambda parent=None: _RecordingMenu())
+    _RecordingMenu.shown = shown
+    panel.add_marker(2.0)
+    panel.add_marker(4.0, 'Stop')
+    window.btn_delete_markers.click()
+    assert [_texts(menu)[0] for menu in shown] == ['Delete all markers (2)']
+    shown[0].actions()[0].trigger()
+    assert panel.markers() == []
+    assert not window.btn_delete_markers.isEnabled()
+    window.btn_delete_markers.click()                  # disabled: no menu
+    assert len(shown) == 1
+
+
+def test_delete_markers_works_from_the_overflow_menu(window, qapp, monkeypatch):
+    # Squeezed out of the row, the button is reached through "»", whose
+    # entry clicks it; the menu then opens at the pointer.
+    panel = window.plot_panel
+    monkeypatch.setattr(panel, '_make_menu', lambda parent=None: _RecordingMenu())
+    _RecordingMenu.shown = []
+    panel.add_marker(2.0)
+    window.show()
+    window.resize(300, 600)
+    qapp.processEvents()
+    row = window.plot_button_row
+    assert window.btn_delete_markers in row.overflowed_buttons()
+    row._fill_menu()
+    entry = next(a for a in row.more_menu.actions() if a.text() == 'Delete Markers')
+    assert entry.isEnabled()
+    entry.trigger()
+    _RecordingMenu.shown[0].actions()[0].trigger()
+    assert panel.markers() == []
 
 
 def test_exported_mf4_carries_the_markers(window, monkeypatch, tmp_path):

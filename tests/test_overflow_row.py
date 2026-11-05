@@ -243,7 +243,8 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
     row = window.plot_button_row
     modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack, window.btn_table]
     icons = [window.btn_fit, window.btn_fit_v, window.btn_zoom_rect, window.btn_cursor1,
-             window.btn_cursor2, window.btn_line_mode, window.btn_points, window.btn_hide_line]
+             window.btn_cursor2, window.btn_line_mode, window.btn_points, window.btn_hide_line,
+             window.btn_delete_markers]
 
     clear = window.btn_clear_plot
 
@@ -251,7 +252,7 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
     assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack', 'Table']
     assert [b.accessibleName() for b in icons + [clear]] == [
         'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
-        'Step Mode', 'Show Data Points', 'Hide Line', 'Clear Plot']
+        'Step Mode', 'Show Data Points', 'Hide Line', 'Delete Markers', 'Clear Plot']
     for button in icons + [clear]:
         assert button.text() == ''
         assert not button.icon().isNull()
@@ -260,9 +261,9 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
     multistack, fit = window.btn_multistack, window.btn_fit
     assert fit.x() - (multistack.x() + multistack.width()) > 2 * row.SPACING
     # Clear Plot, which empties the plot, stands apart from the view buttons.
-    hide_line = window.btn_hide_line
+    last_icon = icons[-1]
     assert not row.overflowed_buttons()
-    assert clear.x() - (hide_line.x() + hide_line.width()) > 2 * row.SPACING
+    assert clear.x() - (last_icon.x() + last_icon.width()) > 2 * row.SPACING
 
 
 def test_plot_buttons_are_level_with_the_table_header(window):

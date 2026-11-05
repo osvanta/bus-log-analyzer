@@ -47,7 +47,7 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 - Formula-based **Calculated Signal** with arithmetic, comparisons, logical expressions, temporal operations, and a stateful diagnostic counter; **Insert function** (`Shift+F3`) lists every function by category, with how to use each. The definitions are saved in configurations.
 - **Statistics** in the signal table: Min, Max, Mean, Std dev, RMS and Samples, over the visible range or between the cursors, and the **Δ C2−C1** difference between the cursors. Right-click the table header to choose the columns.
 - **Table**: the plotted signals as a table, right of the plot, a row per sample time.
-- Named **markers** on the plot: add one where you right-click or at Cursor 1 (`M`), drag, rename, go to; they are saved in configurations and written into MF4 exports as events.
+- Named **markers** on the plot: add one where you right-click or at Cursor 1 (`M`), drag, rename, go to, delete one from the waste bin beside its name in **Go to marker**, or all of them with **Delete Markers** above the plot; they are saved in configurations and written into MF4 exports as events.
 - **File ▸ Measurement info** (`Ctrl+I`): the file's format, size, start time and duration, and for MF4 its header, events and attachments. MF4 events can be drawn on the plot.
 - Export of the plotted signals to CSV or Excel (`.xlsx`), on a selected signal's timestamps or a recurrence time you enter, or to MF4; **File ▸ Save decoded measurement as MF4** writes every decoded signal.
 - **Tools ▸ Convert files**: join, cut and resample measurements, keep chosen signals, and convert between BLF, ASC, MF4 and CSV (TRC as an input). Signal selections can be saved by name and reused on other files, or shared as text files.
@@ -61,11 +61,12 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 - **MultiStack** has lanes that each hold several signals; drag signals into a lane to overlay them there.
 - Dual draggable cursors provide values and delta time; a click on the plot places Cursor 1 there and a Shift+click places Cursor 2. A cursor switched on always appears inside the visible window, and cursors are black on a light plot background and white on a dark one.
 - Fit-to-window and vertical-fit work across all plot modes while preserving the relevant view range.
-- After the plot mode buttons, Fit to Window, Fit Vertical, the cursors, the line mode, Show Data Points and Hide Line are black-and-white icons; pointing at one shows its name.
+- After the plot mode buttons, Fit to Window, Fit Vertical, the cursors, the line mode, Show Data Points, Hide Line and Delete Markers are black-and-white icons; pointing at one shows its name.
 - Signals can be grouped, reordered by dragging, recolored, hidden, or removed.
 - The line-mode button (`S`) switches between **Step Mode**, the default, where each value is held until the next sample, and **Interpolation Mode**, where straight lines join the samples. Its icon shows the mode the plot is in.
 - **Show Data Points** uses adaptive markers and thinner lines.
 - **Hide Line** is enabled only when data points are shown; when ON, it displays points without signal lines.
+- **Delete Markers** is enabled while there are markers; it offers **Delete all markers**, then each marker by name and time to delete it alone.
 
 ## Install and run
 

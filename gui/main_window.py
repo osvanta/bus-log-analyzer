@@ -14,8 +14,8 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QPoint, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QAction, QCursor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -442,6 +442,10 @@ class MainWindow(QMainWindow):
                                          'Hide Line: the data points only, once they are shown')
         self.btn_hide_line.setCheckable(True)
         self.btn_hide_line.setEnabled(False)
+        self.btn_delete_markers = icon_button(
+            'delete_markers', 'Delete Markers',
+            'Delete Markers: delete all the markers, or pick one to delete')
+        self.btn_delete_markers.setEnabled(False)  # enabled while there are markers
         self.btn_clear_plot = icon_button('clear_plot', 'Clear Plot',
                                           'Clear Plot: remove every signal from the plot.\n'
                                           'Undo (Ctrl+Z) brings them back.')
@@ -453,7 +457,7 @@ class MainWindow(QMainWindow):
         self.plot_button_row.add_gap(18)
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
                     self.btn_cursor2, self.btn_line_mode, self.btn_points,
-                    self.btn_hide_line, None,
+                    self.btn_hide_line, self.btn_delete_markers, None,
                     self.btn_clear_plot):
             if btn is None:
                 self.plot_button_row.add_gap(18)
@@ -474,6 +478,9 @@ class MainWindow(QMainWindow):
         self.btn_line_mode.clicked.connect(self._toggle_line_mode)
         self.btn_points.toggled.connect(self._toggle_points)
         self.btn_hide_line.toggled.connect(self._toggle_line)
+        self.btn_delete_markers.clicked.connect(self._show_delete_markers_menu)
+        self.plot_panel.markersChanged.connect(
+            lambda: self.btn_delete_markers.setEnabled(bool(self.plot_panel.markers())))
         self.btn_clear_plot.clicked.connect(self.clear_plot)
         self.plot_panel.clearRequested.connect(self.clear_plot)
         self.plot_panel.set_stacked(self.btn_stacked.isChecked())
@@ -1668,6 +1675,13 @@ class MainWindow(QMainWindow):
             self.btn_hide_line.setChecked(False)
         self.btn_hide_line.setEnabled(checked)
         self._update_status('Plot markers updated', 'Continue plotting, fit view, or save configuration')
+
+    def _show_delete_markers_menu(self) -> None:
+        """Under the button, or at the pointer when it is in the "»" menu."""
+        button = self.btn_delete_markers
+        at = (button.mapToGlobal(QPoint(0, button.height())) if button.isVisible()
+              else QCursor.pos())
+        self.plot_panel.delete_markers_menu().exec(at)
 
     def _toggle_line(self, checked: bool) -> None:
         # The control is enabled only while data points are visible, ensuring
