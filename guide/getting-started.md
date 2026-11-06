@@ -112,6 +112,12 @@ the unit, and the statistics **Min**, **Max**, **Mean**, **Std dev**, **RMS**
 and **Samples**. The statistics are between the cursors when both are on, and
 over the visible range otherwise.
 
+**Signal properties.** Right-click a signal in the tree or in the signal table
+and choose **Properties…** to see what its database says about it: start bit,
+length, byte order, factor and offset, range, unit, value table, its message
+and the database file it came from. **Copy** puts it all on the clipboard, for
+a bug report.
+
 **Markers.** Right-click the plot and choose **Add marker here**, or press ++m++
 to add one at Cursor 1. Drag a marker to move it, double-click it to rename
 it, and right-click it to move Cursor 1 there or delete it. **Go to marker**

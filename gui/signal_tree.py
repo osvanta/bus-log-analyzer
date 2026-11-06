@@ -67,6 +67,7 @@ class SignalTreeWidget(QWidget):
     generatedRenameRequested = Signal(str)
     generatedEditRequested = Signal(str)
     generatedDeleteRequested = Signal(str)
+    propertiesRequested = Signal(str)
     MIME_TYPE = SignalTree.MIME_TYPE
     _GENERATED_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
@@ -295,6 +296,15 @@ class SignalTreeWidget(QWidget):
                 lambda _checked=False, generated_key=key: self.generatedDeleteRequested.emit(generated_key)
             )
             menu.addAction(delete_action)
+        # The signal under the mouse, or the one selected signal.
+        target = key or (keys[0] if len(keys) == 1 else None)
+        if target:
+            menu.addSeparator()
+            properties_action = QAction("Properties…", self.tree)
+            properties_action.triggered.connect(
+                lambda _checked=False, signal_key=target: self.propertiesRequested.emit(signal_key)
+            )
+            menu.addAction(properties_action)
         return menu
 
     def selected_signal_keys(self) -> list[str]:
