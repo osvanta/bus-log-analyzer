@@ -52,6 +52,16 @@ theme:
 extra_css:
   - stylesheets/extra.css
 
+# The footer's links: the source and the tutorial videos.
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/osvanta/bus-log-analyzer
+      name: Source code on GitHub
+    - icon: fontawesome/brands/youtube
+      link: https://www.youtube.com/@osvanta
+      name: Tutorial videos on YouTube
+
 markdown_extensions:
   - admonition
   - attr_list

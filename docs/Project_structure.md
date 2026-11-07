@@ -1,28 +1,30 @@
 bus-log-analyzer/
 ├── app.py                        # Entry point, APP_NAME="Osvanta Bus Log Analyzer", APP_VERSION
-├── config/
-│   └── diagnostics/
-│       ├── motor_control.yaml    # Fault rules for motor/inverter domain (user-editable)
-│       └── README.md             # Rule authoring guide
 ├── core/
 │   ├── models.py                 # RawFrame, DecodedSignalSample dataclasses
 │   ├── bus_types.py              # BusType (CAN/LIN), (bus, channel) identity, label/sort/encode helpers
 │   ├── channel_config.py         # ChannelConfig: {(bus, channel) → DBC/ARXML/LDF}, decoder cache, save/load .osvanta_ch (v3)
 │   ├── signal_store.py           # SignalStore, SignalSeries (array.array storage)
+│   ├── sample_file.py            # Decoded samples kept in a temporary file instead of the heap, so memory does not grow with the measurement
 │   ├── raw_frame_store.py        # Batched CAN+LIN Trace store: compact metadata + 64 B/frame mmap payload; error/remote/BRS flags, BusStatus records
 │   ├── dbc_decoder.py            # DBCDecoder with 3-level cache — .dbc, .arxml, .ldf (via DBC conversion)
 │   ├── vectorized_decoder.py     # NumPy DBC decode, sparse multiplex filtering, short frames decode only what fits, cantools fallback
 │   ├── blf_reader.py             # BLF decompression into packed column batches; CAN + LIN objects
+│   ├── blf_bulk_reader.py        # BLF read into packed frame columns with NumPy and threads instead of a Python loop
 │   ├── export.py                 # CSV export
 │   ├── mf4_writer.py             # Decoded signals → MF4 (asammdf); marks each group's bus channel so the file reopens with the same keys; plot markers become MF4 marker events
 │   ├── converter.py              # Tools ▸ Convert files: join / cut / keep signals / resample; MF4·MDF via asammdf, BLF·ASC frames via python-can, TRC via its reader
 │   ├── asammdf_fixes.py          # asammdf's bus-logging decode made to match the decoder: signed 8-bit off a byte boundary, J1939 "not available" kept, no −0.0
+│   ├── asammdf_guard.py          # Stops asammdf writing past the end of a channel's sample buffer (upstream overrun)
 │   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line; TRC version, start, connections, events
 │   ├── signal_statistics.py      # Min / max / mean / std dev / RMS / samples of a signal over a time range
+│   ├── debug_inspector.py        # Read-only forensic probes of a measurement that failed to load; the readers stay untouched
 │   ├── signal_properties.py      # Right-click ▸ Properties: a signal's definition, looked up again in its channel's database; file-decoded and calculated signals; why none was found
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
 │   ├── signal_selection.py       # Convert files' saved signal selections: match by name or pattern, read/write .txt lists
 │   ├── formula_catalog.py        # Insert Function's list: every formula function, operator and constant, by category, with argument help and examples
+│   ├── calculated_signals.py     # Calculated signals: formula parsing and checking (never eval), NumPy evaluation, the diagnostic counter
+│   ├── formula_library.py        # Formula libraries: calculated-signal definitions saved and loaded as a file of their own
 │   ├── readers/
 │   │   ├── __init__.py           # reader_factory(), dbc_required_for(), bus-tagged prescan_measurement()
 │   │   ├── db_format.py          # SUPPORTED_DB_SUFFIXES (.dbc/.arxml/.ldf), LDF→DBC conversion, message lengths
@@ -33,58 +35,44 @@ bus-log-analyzer/
 │   │   ├── trc_can_reader.py     # PEAK trace (.trc) 1.0–3.0 column-array parser, written from PEAK's published format
 │   │   ├── mdf_reader.py         # Pre-decoded MDF batched arrays + CAN/LIN bus-logging probe
 │   │   ├── mdf_can_reader.py     # Native asammdf CAN+LIN bus extraction; python-can raw fallback
+│   │   ├── mdf_recovery.py       # Bounded, non-destructive recovery of a partially corrupt MF4, in a temporary copy
 │   │   └── csv_reader.py         # Wide and narrow CSV
-│   └── diagnostics/              # AI-powered diagnostics engine (Ctrl+Shift+A)
-│       ├── __init__.py
-│       ├── config_loader.py      # YAML domain parser — infers rule type, auto-generates id/title
-│       ├── context.py            # DiagnosticContext — read-only SignalStore adapter for rule processors
-│       ├── engine.py             # DiagnosticEngine — orchestrates rule runs and evidence building
-│       ├── evidence.py           # EvidenceBuilder — reduces large data to <5 KB LLM snippets
-│       ├── models.py             # Finding, Severity, AnalysisResult dataclasses
-│       ├── rules/
-│       │   ├── __init__.py       # RULE_PROCESSORS dispatch table
-│       │   ├── expression.py     # Free-form condition evaluation (>, <, =, !=, and, or)
-│       │   ├── fault_signal.py   # fault_when operator evaluation
-│       │   ├── range_check.py    # min/max boundary check
-│       │   └── message_loss.py   # Gap detection between CAN samples
-│       └── llm/
-│           ├── __init__.py
-│           ├── client.py         # GitHubModelsClient — streaming OpenAI-compatible REST
-│           └── prompts.py        # Analysis and chat follow-up prompt builders
 ├── gui/
 │   ├── main_window.py            # MainWindow, top row, config save/load, plot_finding()
 │   ├── load_worker.py            # LoadWorker (QThread): native MDF arrays + batched CAN-raw vectorized decode paths
 │   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Δ C2−C1, statistics), Table view, measurement events
+│   ├── plot_tag.py               # The user's tag under the signal table: their text, user name and date, kept beside the application
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
 │   ├── measurement_info.py       # File ▸ Measurement info dialog
+│   ├── load_debug_window.py      # Session-only plain-text window for measurement load forensics (Debug mode)
 │   ├── signal_properties_dialog.py # Right-click a signal ▸ Properties window: Signal and Value table tabs, Copy
 │   ├── converter_dialog.py       # Tools ▸ Convert files dialog (runs core.converter off the GUI thread)
 │   ├── user_settings.py          # One setting at a time in the user's settings file
 │   ├── overflow_row.py           # OverflowButtonRow: plot buttons that do not fit move into a "»" menu
+│   ├── edge_tab.py               # EdgeTab: the small flat handle on a panel edge that shows or hides it
 │   ├── plot_icons.py             # Monochrome plot button icons, drawn from SVG in the palette's text colour
 │   ├── brand_logo.py             # BrandLogo: the Osvanta logo at the status bar's right end, in the light or dark theme's colours
 │   ├── signal_tree.py            # SignalTreeWidget with live search
 │   ├── raw_frame_dialog.py       # Sliding-window CAN/LIN Trace (RawFrameStore, no cap); Δt, changed-byte highlight, follows plot Cursor 1
 │   ├── dbc_manager.py            # Database Manager dialog: per-bus-channel DBC/ARXML/LDF, match quality bars
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
+│   ├── gc_guard.py               # Runs Python's cyclic garbage collector on the GUI thread only
 │   ├── app_data.py               # Where logs and settings live: %LOCALAPPDATA%\Osvanta\BusLogAnalyzer when packaged, next to app.py from source
 │   ├── crash_log.py              # BLA_crash.log: Qt fatal errors, native crashes, freezes, uncaught exceptions
+│   ├── app_log.py                # busloganalyzer_applog.log: every Log line and the warnings behind them, rotated at 1 MB
 │   ├── session_restore.py        # Last session: asks Save / Don't save / Cancel on close, keeps osvanta_last_session.json (refreshed each minute), offers it at start
 │   ├── survey_prompt.py          # User survey request on the 10th start, and the top row's link after "Remind me later"; state in osvanta_user_settings.json
 │   ├── top_row.py                # The top row's File and Tools menus and its Decode button: bold, its icon beside the word
+│   ├── window_frame.py           # TitleRow: the top row in place of the title bar, with the window buttons drawn as Windows 11 draws them
 │   ├── insert_function_dialog.py # Calculated Signal ▸ Insert function (Shift+F3): categories, functions, how to use each
+│   ├── calculated_signal_dialog.py # Calculated Signal dialog: formula editor, help, formula-library picker, calculation off the GUI thread
 │   ├── help_menu.py              # The top row's Help menu: Getting started (F1), keyboard shortcuts, GitHub Discussions and issues, the log folder, the survey, About
+│   ├── about_dialog.py           # About: version, licence, the bundled third-party licence texts, the survey link
 │   ├── release_test/             # Hidden --release-test: drives the built app through real measurements; --known-good adds timing against fixed limits (timing.py)
 │   │   ├── plan.py               # Folder layout → measurements, databases, scenarios
 │   │   ├── driver.py             # Works one scenario's toolbar steps inside the running app
 │   │   ├── runner.py             # Restarts the app once per scenario, progress window
 │   │   └── report.py             # Verdicts from exit codes and crash-log sessions; anonymised report
-│   └── diagnostics/              # Diagnostics UI (non-modal window)
-│       ├── activation.py         # Wires Ctrl+Shift+A shortcut in MainWindow
-│       ├── window.py             # DiagnosticsWindow — domain selector, run controls, auto-plot on fault
-│       ├── findings_panel.py     # Left panel — severity-coloured finding list + details pane
-│       ├── chat_panel.py         # Right panel — streaming LLM chat with status label
-│       └── worker.py             # AnalysisWorker / LLMWorker (background thread helpers)
 ├── resources/
 │   ├── splashscreen.png          # 1635 × 962 splash image
 │   ├── app_icon.png              # 1024 × 1024 app icon source
@@ -97,6 +85,7 @@ bus-log-analyzer/
 │   └── requirements.txt          # The guide's build tools, apart from the application's
 ├── mkdocs.yml                    # The guide's site: theme, navigation, address
 ├── requirements.txt              # What the application needs; LGPL libraries pinned
+├── requirements-dev.txt          # What the tests and the lint need on top of the application
 ├── requirements-release.in       # requirements.txt + PyInstaller: the input of the release lock
 ├── requirements-release.txt      # The release lock: every package, version and hash CI installs
 ├── BusLogAnalyzer.spec           # PyInstaller spec, bundles resources/, config/ and ldfparser grammars;
@@ -111,7 +100,7 @@ bus-log-analyzer/
 
 The BLF, ASC, MF4, and MDF loading/decoding implementation described below is
 fully tested and accepted. It must not be changed without explicit permission
-from the project owner. See `AGENTS.md` for the complete protected-file list.
+from the project owner. See `PR_Policy.md` for the complete protected-file list.
 
 ### Entry and format selection
 
