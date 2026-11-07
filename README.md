@@ -73,7 +73,7 @@ MDF and CSV content is detected automatically. The Database Manager assigns a DB
 
 - **Stacked** is the default mode and gives each signal its own lane and Y scale.
 - **Multi-Axis** overlays the signals, with one axis per unit and an optional individual axis per signal.
-- **MultiStack** has lanes that each hold several signals; drag signals into a lane to overlay them there.
+- **MultiStack** has lanes that each hold several signals; drag signals into a lane to overlay them there. The signal table splits into one part per lane, level with it, so each lane's signals, cursor values and units sit beside it; drag a signal between parts to move it to that lane.
 - Dual draggable cursors provide values and delta time; a click on the plot places Cursor 1 there and a Shift+click places Cursor 2. A cursor switched on always appears inside the visible window, and cursors are black on a light plot background and white on a dark one.
 - **Rectangle Zoom** (`Z`): drag a box to zoom into it, Shift+drag to zoom out, double-click to see the whole recording.
 - Fit-to-window and vertical-fit work across all plot modes while preserving the relevant view range.

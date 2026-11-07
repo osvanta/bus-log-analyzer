@@ -56,6 +56,7 @@ from gui.edge_tab import _mix
 from gui.plot_icons import drawing_pixmap
 from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
+from gui.stack_sections import StackSectionArea
 
 
 # A cursor is black on a light plot background and white on a dark one.
@@ -1297,6 +1298,18 @@ class PlotPanel(QWidget):
         _tbl_layout.setContentsMargins(0, 0, 0, 0)
         _tbl_layout.setSpacing(0)
         _tbl_layout.addWidget(self.table, stretch=1)
+        # MultiStack: the table shrinks to its header, and under it each
+        # stack gets a section of it, level with the stack.
+        self._tbl_layout = _tbl_layout
+        self._sections_on = False
+        self._stack_sections = StackSectionArea(self, lambda view: _CheckDelegate(self, view))
+        self._stack_sections.hide()
+        _tbl_layout.addWidget(self._stack_sections, stretch=0)
+        self._sections_timer = QTimer(self)
+        self._sections_timer.setSingleShot(True)
+        self._sections_timer.setInterval(0)
+        self._sections_timer.timeout.connect(self._place_stack_sections)
+        self.table_panel.installEventFilter(self)
         # As tall as what lies under the plot, its margin and the cursor
         # line, so the table ends level with the plot.
         self._table_bottom_gap = QWidget()
@@ -2703,6 +2716,9 @@ class PlotPanel(QWidget):
             stacked_menu = getattr(p, 'ctrlMenu', None)
             if stacked_menu is not None:
                 stacked_menu.addAction(self.events_action)
+            # MultiStack: its section of the table follows its plot area.
+            p.vb.sigResized.connect(self._schedule_stack_sections)
+            p.geometryChanged.connect(self._schedule_stack_sections)
             self._stacked_plots.append(p)
 
         # Each cursor's row lines light up together under the mouse.
@@ -3384,6 +3400,9 @@ class PlotPanel(QWidget):
             hidden = not (self._column_choices[name] and self._column_available(name))
             for col in columns:
                 self.table.setColumnHidden(col, hidden)
+        sections = getattr(self, '_stack_sections', None)
+        if sections is not None:
+            sections.mirror_columns()
 
     def _show_table_header_menu(self, position) -> None:
         self._table_header_menu().exec(self.table.horizontalHeader().mapToGlobal(position))
@@ -4095,6 +4114,7 @@ class PlotPanel(QWidget):
                 if not key.startswith('__'):
                     self._row_lookup[key] = row
         # widths are user-controlled — no resizeColumnsToContents
+        self._update_table_mode()
 
     def _refresh_table_and_cursors(self) -> None:
         """_refresh_table() blanks the Cursor 1/2 columns for every row —
@@ -4104,6 +4124,97 @@ class PlotPanel(QWidget):
             self._update_table_values(self.v_line.value(), col=2)
         if self._cursor2_enabled:
             self._update_table_values(self.v_line2.value(), col=3)
+
+    # ── MultiStack: a section of the table per stack ──────────────────────
+
+    def stack_sections(self) -> StackSectionArea:
+        """The table's per-stack sections (shown in MultiStack mode)."""
+        return self._stack_sections
+
+    def _table_header_height(self) -> int:
+        header = self.table.horizontalHeader()
+        return (max(header.height(), header.minimumHeight(), header.sizeHint().height())
+                + 2 * self.table.frameWidth())
+
+    def _update_table_mode(self) -> None:
+        """MultiStack shows the table as its header over one section per
+        stack (gui.stack_sections); every other layout, the whole table."""
+        sections = self._multistack_mode and bool(self._items)
+        if sections != self._sections_on:
+            self._sections_on = sections
+            policy = (Qt.ScrollBarPolicy.ScrollBarAlwaysOff if sections
+                      else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.table.setVerticalScrollBarPolicy(policy)
+            self.table.setHorizontalScrollBarPolicy(policy)
+            if not sections:                # _place_stack_sections shrinks it
+                self.table.setMinimumHeight(0)
+                self.table.setMaximumHeight(16777215)    # QWIDGETSIZE_MAX
+            self._tbl_layout.setStretchFactor(self.table, 0 if sections else 1)
+            self._tbl_layout.setStretchFactor(self._stack_sections, 1 if sections else 0)
+            self._stack_sections.setVisible(sections)
+        self._place_stack_sections()
+
+    def _schedule_stack_sections(self) -> None:
+        if self._sections_on:
+            self._sections_timer.start()
+
+    def _place_stack_sections(self) -> None:
+        """Put each stack's section level with the stack's plot area and as
+        tall as it; signals of stacks with no plot row go under the last."""
+        area = self._stack_sections
+        if not self._sections_on:
+            if area.sections() or area.hidden_section() is not None:
+                area.clear()
+            return
+        height = self._table_header_height()
+        if self.table.height() != height:
+            self.table.setFixedHeight(height)
+        stacks, shown = [], set()
+        for stack_id, plot in zip(self._stacked_stack_ids, self._stacked_plots):
+            try:
+                rect = self.glw.mapFromScene(plot.vb.sceneBoundingRect()).boundingRect()
+            except RuntimeError:          # a row being deleted by a rebuild
+                continue
+            shown.add(stack_id)
+            top = area.mapFromGlobal(self.glw.mapToGlobal(rect.topLeft())).y()
+            members = [key for key, item in self._items.items()
+                       if item.multistack_id == stack_id]
+            stacks.append((stack_id, members, top, rect.height()))
+        hidden = [key for key, item in self._items.items() if item.multistack_id not in shown]
+        area.set_stacks(stacks, hidden)
+
+    def drop_on_stack(self, keys: list[str], stack_id: int,
+                      before_key: str | None = None) -> bool:
+        """Signals dropped on a stack's section: they join that stack (with
+        the unit warning a drop on the plot gives) and sit before
+        *before_key*, or after the stack's last signal. One undo step."""
+        if not self._multistack_mode:
+            return False
+        wanted = set(keys)
+        moved = [key for key in self._items if key in wanted]
+        if not moved or not any(item.multistack_id == stack_id
+                                for item in self._items.values()):
+            return False
+        changed = [key for key in moved if self._items[key].multistack_id != stack_id]
+        if changed and not self.confirm_multistack_units(changed, stack_id):
+            return False
+        remaining = [key for key in self._items if key not in wanted]
+        if before_key in remaining:
+            at = remaining.index(before_key)
+        else:
+            members = [i for i, key in enumerate(remaining)
+                       if self._items[key].multistack_id == stack_id]
+            at = members[-1] + 1 if members else len(remaining)
+        order = remaining[:at] + moved + remaining[at:]
+        if not changed and order == list(self._items):
+            return True
+        self._push_undo()
+        for key in changed:
+            self._items[key].multistack_id = stack_id
+        self._items = {key: self._items[key] for key in order}
+        self._rebuild_curves(preserve_selection=True)
+        self._restore_selection(moved)
+        return True
 
     def _emit_selection(self) -> None:
         row = self.table.currentRow()
@@ -4214,6 +4325,7 @@ class PlotPanel(QWidget):
         # configuration sets them before its Decode clears the plot.
         self._clear_rendered_items()
         self.table.setRowCount(0)
+        self._update_table_mode()
         self._current_key = None
         self.plot.setLabel('left', 'Value')
         self.cursor_label.setText(self._cursor_label_base)
@@ -5341,6 +5453,10 @@ class PlotPanel(QWidget):
         if watched is self.view_stack and event.type() in (QEvent.Type.Resize,
                                                            QEvent.Type.Move):
             self._match_table_bottom_to_plot()
+            self._schedule_stack_sections()
+        elif watched is self.table_panel and event.type() in (QEvent.Type.Resize,
+                                                              QEvent.Type.Show):
+            self._schedule_stack_sections()
         elif watched is self._table_bottom_gap:
             if (event.type() == QEvent.Type.MouseButtonDblClick
                     and event.button() == Qt.MouseButton.LeftButton):
@@ -5424,6 +5540,9 @@ class PlotPanel(QWidget):
         bg = self._background_color
         header_bg, header_text, header_border = self._applied_header_colors = self._header_colors()
         tag_hint = _mix(QColor(header_bg), QColor(header_text), _TAG_HINT_SHADE).name()
+        # MultiStack: the line across the table where one stack meets the next.
+        self._stack_sections.set_line_color(
+            _mix(QColor(header_border), QColor(header_text), 0.5))
         # No frame, and no line above or left of the header: the table sits
         # flush in the panel's top-left corner, and the header row, the window
         # colour across the panel's width, joins the window around it as the
@@ -5432,7 +5551,7 @@ class PlotPanel(QWidget):
         self.table_panel.setStyleSheet(f'''
             QWidget {{ background-color: {bg}; }}
             QLabel  {{ background-color: {bg}; color: white; }}
-            QTableWidget {{
+            QTableView {{
                 background-color: {bg};
                 alternate-background-color: {bg};
                 gridline-color: {header_border};

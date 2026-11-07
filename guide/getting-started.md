@@ -113,7 +113,12 @@ Plot a signal from the tree in any of these ways:
 - **Stacked**, the default, gives each signal its own row and scale.
 - **Multi-Axis** draws the signals over each other, with an axis for each unit.
 - **MultiStack** has rows that hold several signals: drag signals into a row to
-  overlay them.
+  overlay them. The signal table splits to match: each row gets its own part of
+  the table, level with it and as tall as it, listing only its signals, with a
+  line where one row meets the next. A part with more signals than fit scrolls
+  on its own. Drag a signal from one part to another to move it to that row, or
+  within a part to change its order. Signals of a row whose signals are all
+  unticked are listed under the last row, so they can be ticked back on.
 
 **Table**, the fourth button, lists the plotted signals as a table beside the
 plot, a row per sample time.
