@@ -357,6 +357,34 @@ def test_sections_show_the_tables_values(stacks, qapp):
     assert _text(section, 'C', _STAT_FIRST) == '25.000'          # Min between the cursors
 
 
+def test_the_hex_column_shows_in_every_section(stacks, qapp):
+    from core.signal_properties import RawFormat
+    from gui.plot_widget import HEX_COLUMN, _HEX_COL
+    stacks.set_raw_format_lookup(lambda key, series: RawFormat(1.0, 0.0, 8, False, False))
+    stacks.set_cursor1_enabled(True)
+    stacks.move_cursor1(0.5)
+    _settle(qapp)
+    assert all(section.isColumnHidden(_HEX_COL)                       # off by default
+               for section in stacks.stack_sections().sections().values())
+    stacks.set_column_shown(HEX_COLUMN, True)
+    _settle(qapp)
+    header = stacks.table.horizontalHeader()
+    for key in ('A', 'B', 'C', 'D'):
+        section = _section(stacks, key)
+        own = section.horizontalHeader()
+        assert not section.isColumnHidden(_HEX_COL)
+        assert own.visualIndex(_HEX_COL) == header.visualIndex(_HEX_COL) \
+            == header.visualIndex(2) + 1                              # right after Cursor 1
+        shown = _text(section, key, _HEX_COL)
+        assert shown.startswith('0x') and len(shown) == 4             # 8 bits: two digits
+        assert shown == stacks.table.item(stacks._row_lookup[key], _HEX_COL).text()
+    before = _text(_section(stacks, 'C'), 'C', _HEX_COL)
+    stacks.move_cursor1(0.9)
+    _settle(qapp)
+    after = _text(_section(stacks, 'C'), 'C', _HEX_COL)
+    assert after == stacks.table.item(stacks._row_lookup['C'], _HEX_COL).text() != before
+
+
 def test_column_choices_widths_and_order_follow_the_header(stacks, qapp):
     stacks.set_column_shown('Unit', False)
     stacks.table.setColumnWidth(2, 133)

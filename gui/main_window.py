@@ -404,6 +404,7 @@ class MainWindow(QMainWindow):
         columns = read_setting(self._user_settings_path, 'signal_table_columns', {})
         self.plot_panel.set_column_choices(columns if isinstance(columns, dict) else {})
         self.plot_panel.columnChoicesChanged.connect(self._save_column_choices)
+        self.plot_panel.set_raw_format_lookup(self._raw_format_of)
         self.plot_panel.eventsToggled.connect(self._toggle_measurement_events)
 
         self.plot_button_row = OverflowButtonRow()
@@ -1178,6 +1179,15 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
         self._properties_dialog = SignalPropertiesDialog(properties, self)
         self._properties_dialog.show()
+
+    def _raw_format_of(self, key: str, series):
+        """The signal table's Hex column: how *key*'s raw value sits on the
+        bus, from the database Properties reads; None for a calculated signal
+        or one no database defines."""
+        from core.signal_properties import raw_format
+        if self.calculated_signals.definition(key) is not None:
+            return None
+        return raw_format(series, self.channel_config)
 
     def _toggle_measurement_events(self, on: bool) -> None:
         """Plot menu ▸ Show measurement events: read them from the file."""
