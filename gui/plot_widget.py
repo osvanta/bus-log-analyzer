@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.signal_properties import hex_text
 from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
 from gui.tabular_view import TabularView
@@ -452,6 +453,10 @@ def pen_style(name: object) -> Qt.PenStyle:
     return LINE_STYLES[normalise_line_style(name)][1]
 
 
+#: A PlottedSignal whose raw encoding (for the Hex column) is not looked up yet.
+_UNRESOLVED = object()
+
+
 @dataclass(slots=True)
 class PlottedSignal:
     key: str
@@ -468,6 +473,7 @@ class PlottedSignal:
     own_axis: bool = False      # multi-axis mode: detach onto individual Y axis
     multistack_id: int = -1     # MultiStack row; -1 means not assigned yet
     line_style: str = DEFAULT_LINE_STYLE   # key into LINE_STYLES
+    raw_format: Any = _UNRESOLVED   # core RawFormat or None, once the Hex column asks
 
 
 
@@ -846,14 +852,24 @@ _RANGE_CHUNK = 1 << 20
 #: until turned on from the table header's menu.
 STAT_COLUMNS = ('Min', 'Max', 'Mean', 'Std dev', 'RMS', 'Samples')
 _STAT_FIRST = 7
-#: Cursor 2 minus Cursor 1, per signal. Last by index, shown after Cursor 2.
+#: Cursor 2 minus Cursor 1, per signal. After the statistics by index, shown
+#: after Cursor 2.
 DELTA_COLUMN = 'Δ C2−C1'
 _DELTA_COL = _STAT_FIRST + len(STAT_COLUMNS)
+#: Cursor 1's value as the raw value on the bus, in hexadecimal. Last by
+#: index, shown after Cursor 1.
+HEX_COLUMN = 'Hex'
+_HEX_COL = _DELTA_COL + 1
+_HEX_TIP = ('Cursor 1 value as the raw value on the bus, in hexadecimal: '
+            '(value − offset) / factor from the database, padded to the signal\'s '
+            'length; a float signal shows its IEEE 754 bits. A signal no database '
+            'defines shows its value in hex when it is a whole number.')
 #: The columns the table header's menu shows and hides: name → (columns,
-#: shown by default). Cursor columns also need their cursors on, and Axis
-#: multi-axis mode; ☑ and Signal are always shown.
+#: shown by default). Cursor columns also need their cursors on (Hex
+#: Cursor 1's), and Axis multi-axis mode; ☑ and Signal are always shown.
 OPTIONAL_COLUMNS = {
     'Cursor 1': ((2,), True),
+    HEX_COLUMN: ((_HEX_COL,), False),
     'Cursor 2': ((3,), True),
     DELTA_COLUMN: ((_DELTA_COL,), True),
     'Unit': ((4,), True),
@@ -1104,6 +1120,8 @@ class PlotPanel(QWidget):
         self._multi_axis = False
         self._stacked_mode = False
         self._multistack_mode = False
+        # (key, series) -> core RawFormat or None; set by the main window.
+        self._raw_format_lookup = None
         self._extra_axes: list[tuple[Any, Any]] = []
         self._stacked_plots: list[pg.PlotItem] = []
         self._stacked_row_keys: list[list[str]] = []
@@ -1249,10 +1267,10 @@ class PlotPanel(QWidget):
         # v_line2 not added to plot until cursor 2 is enabled
 
         # ── Signal table ──────────────────────────────────────────────────
-        self.table = _ReorderTable(0, _DELTA_COL + 1)
+        self.table = _ReorderTable(0, _HEX_COL + 1)
         self.table.setHorizontalHeaderLabels(
             ['☑', 'Signal', 'Cursor 1', 'Cursor 2', 'Unit', 'Ax', 'Axis', *STAT_COLUMNS,
-             DELTA_COLUMN])
+             DELTA_COLUMN, HEX_COLUMN])
         self._column_choices = {name: shown for name, (_c, shown) in OPTIONAL_COLUMNS.items()}
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1285,9 +1303,12 @@ class PlotPanel(QWidget):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             self.table.setColumnWidth(col, 70)
         self.table.setColumnWidth(_DELTA_COL, 90)
+        self.table.setColumnWidth(_HEX_COL, 80)
         hdr.moveSection(hdr.visualIndex(_DELTA_COL), hdr.visualIndex(3) + 1)
+        hdr.moveSection(hdr.visualIndex(_HEX_COL), hdr.visualIndex(2) + 1)
         self.table.horizontalHeaderItem(_DELTA_COL).setToolTip(
             'Cursor 2 value minus Cursor 1 value.')
+        self.table.horizontalHeaderItem(_HEX_COL).setToolTip(_HEX_TIP)
         self._apply_column_visibility()
         hdr.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         hdr.customContextMenuRequested.connect(self._show_table_header_menu)
@@ -2058,6 +2079,7 @@ class PlotPanel(QWidget):
         if plotted is None:
             return False
         plotted.series = series
+        plotted.raw_format = _UNRESOLVED
         # Undo snapshots must not retain the previous calculated arrays.
         for snapshot, _current_key in self._undo_stack:
             if key in snapshot:
@@ -3363,13 +3385,14 @@ class PlotPanel(QWidget):
         self._apply_column_visibility()
         self._update_statistics()
         self._update_delta()
+        self._update_hex()
         self.columnChoicesChanged.emit(self.column_choices())
 
     def set_column_shown(self, name: str, shown: bool) -> None:
         self.set_column_choices({name: shown})
 
     def _column_available(self, name: str) -> bool:
-        if name == 'Cursor 1':
+        if name in ('Cursor 1', HEX_COLUMN):
             return self._cursor1_enabled
         if name == 'Cursor 2':
             return self._cursor2_enabled
@@ -3392,6 +3415,7 @@ class PlotPanel(QWidget):
         menu = self._make_menu()
         menu.setToolTipsVisible(True)
         needs = {'Cursor 1': 'Shown while Cursor 1 is on.',
+                 HEX_COLUMN: _HEX_TIP + ' Shown while Cursor 1 is on.',
                  'Cursor 2': 'Shown while Cursor 2 is on.',
                  DELTA_COLUMN: 'Cursor 2 value minus Cursor 1 value; '
                                'shown while both cursors are on.',
@@ -3506,6 +3530,8 @@ class PlotPanel(QWidget):
                     except (TypeError, ValueError):
                         cell.setText(str(value))
             self._update_delta()
+            if col == 2:
+                self._update_hex(x)
         finally:
             self.table.setUpdatesEnabled(True)
 
@@ -3533,6 +3559,51 @@ class PlotPanel(QWidget):
                         text = f'{float(values[i2]) - float(values[i1]):.3f}'
                     except (TypeError, ValueError, IndexError):
                         text = ''
+            cell.setText(text)
+
+    # ── Hex column ────────────────────────────────────────────────────────
+
+    def set_raw_format_lookup(self, lookup) -> None:
+        """Set how the Hex column finds a signal's raw encoding:
+        ``lookup(key, series)`` returns a core RawFormat, or None when no
+        database defines the signal. Without one, every signal is shown as
+        one no database defines."""
+        self._raw_format_lookup = lookup
+        for plotted in self._items.values():
+            plotted.raw_format = _UNRESOLVED
+        self._update_hex()
+
+    def _raw_format_of(self, plotted: PlottedSignal):
+        """The signal's raw encoding, looked up once and kept with it."""
+        if plotted.raw_format is _UNRESOLVED:
+            lookup = self._raw_format_lookup
+            plotted.raw_format = (lookup(plotted.key, plotted.series)
+                                  if lookup is not None else None)
+        return plotted.raw_format
+
+    def _update_hex(self, x: float | None = None) -> None:
+        """Fill the Hex column: each signal's Cursor 1 value, at the sample
+        the Cursor 1 column shows, as its raw value in hexadecimal."""
+        if self.table.isColumnHidden(_HEX_COL):
+            return
+        if x is None:
+            x = self.v_line.value()
+        for key, plotted in self._items.items():
+            if not plotted.visible:
+                continue
+            row = self._row_lookup.get(key)
+            cell = self.table.item(row, _HEX_COL) if row is not None else None
+            if cell is None:
+                continue
+            text = ''
+            idx = self._nearest_index(plotted.series.timestamps, x)
+            if idx is not None:
+                try:
+                    value = plotted.series.values[idx]
+                except IndexError:
+                    value = None
+                if value is not None:
+                    text = hex_text(value, self._raw_format_of(plotted))
             cell.setText(text)
 
     # ── Fit to window ─────────────────────────────────────────────────────
@@ -4045,11 +4116,12 @@ class PlotPanel(QWidget):
                 c1_item  = QTableWidgetItem('')
                 c2_item  = QTableWidgetItem('')
                 dl_item  = QTableWidgetItem('')
+                hx_item  = QTableWidgetItem('')
                 un_item  = QTableWidgetItem(plotted.series.unit)
                 brush = QBrush(QColor(
                     plotted.color if plotted.visible else '#606060'
                 ))
-                for item in (sig_item, c1_item, c2_item, dl_item, un_item):
+                for item in (sig_item, c1_item, c2_item, dl_item, hx_item, un_item):
                     item.setForeground(brush)
                 chk_item.setForeground(brush)
                 # Col 5: Ax — colored swatch showing the unit-group axis color
@@ -4079,6 +4151,7 @@ class PlotPanel(QWidget):
                 self.table.setItem(row_idx, 5, sw_item)
                 self.table.setItem(row_idx, 6, ax_item)
                 self.table.setItem(row_idx, _DELTA_COL, dl_item)
+                self.table.setItem(row_idx, _HEX_COL, hx_item)
         self.table.blockSignals(False)
         self._apply_collapse_state()
         self._schedule_statistics()

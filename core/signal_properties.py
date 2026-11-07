@@ -14,11 +14,16 @@ range, value table and message. A signal the measurement file decoded itself,
 or a calculated one, gets what is known about it instead, and a signal no
 database defines gets the reason.
 
+The signal table's Hex column uses the same lookup to turn a physical value
+back into the raw value on the bus (raw_format, hex_text).
+
 Deliberately free of Qt imports: nothing in ``core/`` may depend on Qt.
 """
 from __future__ import annotations
 
+import math
 import re
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -230,6 +235,82 @@ def _from_database(series, definition: _Definition) -> SignalProperties:
     table = [(str(raw), number(raw * scale + offset), str(label))
              for raw, label in sorted(choices.items())]
     return SignalProperties(signal.name, DATABASE, rows, table)
+
+
+@dataclass(frozen=True)
+class RawFormat:
+    """How a signal's raw value sits on the bus: what the Hex column needs."""
+    scale: float
+    offset: float
+    length: int
+    signed: bool
+    is_float: bool
+
+
+def raw_format(series, channel_config) -> RawFormat | None:
+    """
+    The database's encoding of *series*, or None when no database defines it.
+
+    A signal the measurement file decoded itself (no message ID) is not
+    matched to a database signal of the same name: its values come from the
+    file's own conversion, which need not be the database's.
+    """
+    if series is None or not series.message_id:
+        return None
+    definition, _reason = _find_definition(channel_config, series)
+    if definition is None:
+        return None
+    signal = definition.signal
+    return RawFormat(float(signal.scale), float(signal.offset), int(signal.length),
+                     bool(signal.is_signed), bool(signal.is_float))
+
+
+# How close to a whole number a raw value must come, relative to its size.
+_STEP_TOLERANCE = 1e-6
+# IEEE 754 float signals by their length in bits.
+_FLOAT_CODES = {16: ">e", 32: ">f", 64: ">d"}
+
+
+def hex_text(value, fmt: RawFormat | None) -> str:
+    """
+    The physical *value* as the signal table's Hex column shows it.
+
+    With *fmt*: the raw value on the bus, (value - offset) / scale, padded to
+    the signal's length - two's complement for a signed signal, the IEEE 754
+    bits for a float one. Without: *value* itself when it is a whole number.
+    '' when there is no such hex: no sample, or a value that is not a raw step
+    of the definition or does not fit its bits.
+    """
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(value):
+        return ""
+    if fmt is None:
+        if not value.is_integer():
+            return ""
+        whole = int(value)
+        return f"-0x{-whole:X}" if whole < 0 else f"0x{whole:X}"
+    if not fmt.scale or fmt.length <= 0:
+        return ""
+    raw = (value - fmt.offset) / fmt.scale
+    if fmt.is_float:
+        code = _FLOAT_CODES.get(fmt.length)
+        if code is None:
+            return ""
+        try:
+            return "0x" + struct.pack(code, raw).hex().upper()
+        except (OverflowError, struct.error):
+            return ""
+    whole = round(raw)
+    if abs(raw - whole) > _STEP_TOLERANCE * max(1.0, abs(raw)):
+        return ""
+    low, high = _raw_range(fmt.length, fmt.signed)
+    if not low <= whole <= high:
+        return ""
+    digits = -(-fmt.length // 4)
+    return f"0x{whole & ((1 << fmt.length) - 1):0{digits}X}"
 
 
 def _raw_range(length: int, signed: bool) -> tuple[int, int]:

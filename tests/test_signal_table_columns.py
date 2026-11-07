@@ -108,7 +108,7 @@ def test_the_menu_lists_every_optional_column_in_order(panel):
     from gui.plot_widget import OPTIONAL_COLUMNS
     names = [a.text() for a in panel._table_header_menu().actions() if not a.isSeparator()]
     assert names == list(OPTIONAL_COLUMNS) == [
-        'Cursor 1', 'Cursor 2', 'Δ C2−C1', 'Unit', 'Axis',
+        'Cursor 1', 'Hex', 'Cursor 2', 'Δ C2−C1', 'Unit', 'Axis',
         'Min', 'Max', 'Mean', 'Std dev', 'RMS', 'Samples']
     checked = {a.text() for a in panel._table_header_menu().actions() if a.isChecked()}
     assert checked == {'Cursor 1', 'Cursor 2', 'Δ C2−C1', 'Unit', 'Axis'}
