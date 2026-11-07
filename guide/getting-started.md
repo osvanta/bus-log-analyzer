@@ -121,8 +121,12 @@ a bug report.
 **Markers.** Right-click the plot and choose **Add marker here**, or press ++m++
 to add one at Cursor 1. Drag a marker to move it, double-click it to rename
 it, and right-click it to move Cursor 1 there or delete it. **Go to marker**
-in the plot's right-click menu brings one into view. Markers are saved in the
-configuration, and an MF4 export keeps them as events.
+in the plot's right-click menu lists them: click a name to bring that marker
+into view, or the waste bin just after its name to delete it. The list stays
+open, so several go in a row of clicks, and ++delete++ deletes the highlighted
+one. **Delete Markers**, the marker and waste bin icon above the plot, offers
+**Delete all markers**. Markers are saved in the configuration, and an MF4
+export keeps them as events.
 
 **Trace.** The **Δt** column is the time since the previous frame with the
 same ID on the same channel, and the bytes that changed since that frame are
