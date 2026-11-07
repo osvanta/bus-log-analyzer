@@ -41,6 +41,7 @@ bus-log-analyzer/
 │   ├── main_window.py            # MainWindow, top row, config save/load, plot_finding()
 │   ├── load_worker.py            # LoadWorker (QThread): native MDF arrays + batched CAN-raw vectorized decode paths
 │   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Hex, Δ C2−C1, statistics), Table view, measurement events
+│   ├── stack_sections.py         # MultiStack: the signal table split into one section per stack, level with it (filtered views of the table's model), a line between stacks
 │   ├── plot_tag.py               # The user's tag under the signal table: their text, user name and date, kept beside the application
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
 │   ├── measurement_info.py       # File ▸ Measurement info dialog
