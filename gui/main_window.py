@@ -387,6 +387,8 @@ class MainWindow(QMainWindow):
         self.signal_tree.generatedRenameRequested.connect(self.rename_generated_signal)
         self.signal_tree.generatedEditRequested.connect(self.edit_generated_signal)
         self.signal_tree.generatedDeleteRequested.connect(self.delete_generated_signal)
+        self.signal_tree.propertiesRequested.connect(self.show_signal_properties)
+        self.plot_panel.propertiesRequested.connect(self.show_signal_properties)
         self.plot_panel.selectionChanged.connect(self._on_plot_selection_changed)
         self.plot_panel.signalDropped.connect(self.add_signals_to_plot)
         self.plot_panel.signalDroppedToStack.connect(
@@ -1151,6 +1153,24 @@ class MainWindow(QMainWindow):
             return
         self._info_dialog = MeasurementInfoDialog(info, self.store, self.channel_config, self)
         self._info_dialog.show()
+
+    def show_signal_properties(self, key: str) -> None:
+        """Right-click a signal ▸ Properties: its definition, read-only."""
+        from core.signal_properties import describe_signal
+        from gui.signal_properties_dialog import SignalPropertiesDialog
+        calculated = self.calculated_signals.definition(key)
+        if calculated is not None:
+            series = self.calculated_signals.cached_series(key)
+        else:
+            series = self.store.get_series(key) if self.store is not None else None
+        # A database not yet read for this measurement is read now.
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            properties = describe_signal(key, series, self.channel_config, calculated)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._properties_dialog = SignalPropertiesDialog(properties, self)
+        self._properties_dialog.show()
 
     def _toggle_measurement_events(self, on: bool) -> None:
         """Plot menu ▸ Show measurement events: read them from the file."""

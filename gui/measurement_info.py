@@ -35,7 +35,8 @@ def _when(value) -> str:
     return value.strftime('%Y-%m-%d %H:%M:%S') if value else ''
 
 
-def _table(headers, rows) -> QTableWidget:
+def info_table(headers, rows) -> QTableWidget:
+    """A read-only table of *rows* under *headers*, sized to its contents."""
     table = QTableWidget(len(rows), len(headers))
     table.setHorizontalHeaderLabels(headers)
     table.verticalHeader().setVisible(False)
@@ -100,6 +101,21 @@ def channel_rows(store, channel_config) -> list[tuple[str, str, str]]:
     return rows
 
 
+def tabs_as_text(tabs: QTabWidget) -> str:
+    """Every tab, as plain text: a title, then its rows tab-separated."""
+    lines = []
+    for t in range(tabs.count()):
+        table = tabs.widget(t)
+        if not isinstance(table, QTableWidget):
+            table = table.findChild(QTableWidget)
+        lines.append(f'[{tabs.tabText(t)}]')
+        for r in range(table.rowCount()):
+            lines.append('\t'.join(table.item(r, c).text() if table.item(r, c) else ''
+                                   for c in range(table.columnCount())))
+        lines.append('')
+    return '\n'.join(lines).rstrip() + '\n'
+
+
 class MeasurementInfoDialog(QDialog):
     def __init__(self, info: FileInfo, store=None, channel_config=None, parent=None) -> None:
         super().__init__(parent)
@@ -107,20 +123,20 @@ class MeasurementInfoDialog(QDialog):
         self.resize(640, 440)
         self.info = info
         self.tabs = QTabWidget()
-        self.general = _table(('Item', 'Value'), general_rows(info, store, channel_config))
+        self.general = info_table(('Item', 'Value'), general_rows(info, store, channel_config))
         self.tabs.addTab(self.general, 'General')
         channels = channel_rows(store, channel_config)
         if channels:
-            self.tabs.addTab(_table(('Channel', 'Frames', 'Database'), channels), 'Channels')
+            self.tabs.addTab(info_table(('Channel', 'Frames', 'Database'), channels), 'Channels')
         if info.header:
-            self.tabs.addTab(_table(('Item', 'Value'), info.header), 'Header')
+            self.tabs.addTab(info_table(('Item', 'Value'), info.header), 'Header')
         if info.events:
-            self.tabs.addTab(_table(('Time s', 'Name', 'Comment'),
+            self.tabs.addTab(info_table(('Time s', 'Name', 'Comment'),
                                     [(f'{e.time_s:.6f}', e.name, e.comment) for e in info.events]),
                              f'Events ({len(info.events)})')
         self.attachments = None
         if info.attachments:
-            self.attachments = _table(
+            self.attachments = info_table(
                 ('Name', 'Comment', 'Stored'),
                 [(a.file_name, a.comment, 'in the file' if a.embedded else 'linked')
                  for a in info.attachments])
@@ -148,18 +164,7 @@ class MeasurementInfoDialog(QDialog):
         layout.addWidget(buttons)
 
     def as_text(self) -> str:
-        """Every tab, as plain text: a title, then its rows tab-separated."""
-        lines = []
-        for t in range(self.tabs.count()):
-            table = self.tabs.widget(t)
-            if not isinstance(table, QTableWidget):
-                table = table.findChild(QTableWidget)
-            lines.append(f'[{self.tabs.tabText(t)}]')
-            for r in range(table.rowCount()):
-                lines.append('\t'.join(table.item(r, c).text() if table.item(r, c) else ''
-                                       for c in range(table.columnCount())))
-            lines.append('')
-        return '\n'.join(lines).rstrip() + '\n'
+        return tabs_as_text(self.tabs)
 
     def copy_all(self) -> None:
         QGuiApplication.clipboard().setText(self.as_text())

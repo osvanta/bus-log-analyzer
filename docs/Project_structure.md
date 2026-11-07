@@ -19,6 +19,7 @@ bus-log-analyzer/
 │   ├── asammdf_fixes.py          # asammdf's bus-logging decode made to match the decoder: signed 8-bit off a byte boundary, J1939 "not available" kept, no −0.0
 │   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line; TRC version, start, connections, events
 │   ├── signal_statistics.py      # Min / max / mean / std dev / RMS / samples of a signal over a time range
+│   ├── signal_properties.py      # Right-click ▸ Properties: a signal's definition, looked up again in its channel's database; file-decoded and calculated signals; why none was found
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
 │   ├── signal_selection.py       # Convert files' saved signal selections: match by name or pattern, read/write .txt lists
 │   ├── formula_catalog.py        # Insert Function's list: every formula function, operator and constant, by category, with argument help and examples
@@ -56,6 +57,7 @@ bus-log-analyzer/
 │   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Δ C2−C1, statistics), Table view, measurement events
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
 │   ├── measurement_info.py       # File ▸ Measurement info dialog
+│   ├── signal_properties_dialog.py # Right-click a signal ▸ Properties window: Signal and Value table tabs, Copy
 │   ├── converter_dialog.py       # Tools ▸ Convert files dialog (runs core.converter off the GUI thread)
 │   ├── user_settings.py          # One setting at a time in the user's settings file
 │   ├── overflow_row.py           # OverflowButtonRow: plot buttons that do not fit move into a "»" menu

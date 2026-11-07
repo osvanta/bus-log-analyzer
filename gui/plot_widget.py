@@ -932,6 +932,8 @@ class PlotPanel(QWidget):
     # "Remove all signals" in the signal table's menu: the main window clears
     # the plot, as its Clear Plot button does.
     clearRequested = Signal()
+    # "Properties…" in a signal's menu: the main window shows its definition.
+    propertiesRequested = Signal(str)
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -4902,6 +4904,14 @@ class PlotPanel(QWidget):
         menu.addAction(bg_act)
         menu.addSeparator()
         self._add_marker_actions(menu, time_s)
+        menu.addSeparator()
+        properties = QAction('Properties…', menu)
+        if has_one:
+            properties.triggered.connect(
+                lambda _checked=False, k=key_one: self.propertiesRequested.emit(k)
+            )
+        properties.setEnabled(has_one)
+        menu.addAction(properties)
         menu.exec(global_pos)
 
     def _add_remove_all_action(self, menu: QMenu) -> QAction:
