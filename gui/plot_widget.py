@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import cycle
 from pathlib import Path
@@ -712,11 +713,15 @@ class _CheckDelegate(QStyledItemDelegate):
         return model.setData(index, new_state, Qt.ItemDataRole.CheckStateRole)
 
 
+# Rows dragged out of a signal table: their signal keys, one to a line.
+ROW_MIME_TYPE = 'application/x-osvanta-row-reorder'
+
+
 class _ReorderTable(QTableWidget):
     """QTableWidget that fires a custom internal MIME drag so row-reorder drops
     are distinguishable from external SignalTree drops."""
 
-    _ROW_REORDER_MIME = 'application/x-osvanta-row-reorder'
+    _ROW_REORDER_MIME = ROW_MIME_TYPE
     # Present when the drag started on a group's row: the groups that move
     # whole, keeping their names, while _ROW_REORDER_MIME lists their signals.
     _GROUP_REORDER_MIME = 'application/x-osvanta-group-reorder'
@@ -1082,8 +1087,12 @@ class PlotPanel(QWidget):
     clearRequested = Signal()
     # "Properties…" in a signal's menu: the main window shows its definition.
     propertiesRequested = Signal(str)
-    # A marker was added or deleted, or all of them were replaced.
+    # A marker was added, deleted, renamed or dragged, or all of them were
+    # replaced: the other tabs take the same markers.
     markersChanged = Signal()
+    # Signals to move to another tab: their keys, and that tab's position,
+    # or -1 for a new tab.
+    moveToTabRequested = Signal(list, int)
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -1170,6 +1179,9 @@ class PlotPanel(QWidget):
         self._checkbox_target_keys: list[str] = []  # pre-click multi-row snapshot
         self._batch_mode: bool = False          # True while batch-adding signals; suppresses per-add rebuilds
         self._rebuild_seq: int = 0              # bumped each rebuild and by fit_to_window(); lets deferred restores detect staleness
+        # The other tabs signals can move to, as (position, name); set by the
+        # tabs. Without it the signal menu has no "Move to tab".
+        self.move_targets: Callable[[], list[tuple[int, str]]] | None = None
         self.setAcceptDrops(True)
 
         # ── Normal / multi-axis plot ──────────────────────────────────────
@@ -2081,6 +2093,38 @@ class PlotPanel(QWidget):
             # _rebuild_curves has already restored the saved view range.
             if was_empty:
                 self.fit_to_window()
+
+    def take_series(self, signals: list[PlottedSignal]) -> list[str]:
+        """Plot signals moved here from another tab, as they looked there.
+
+        Each keeps its colour, line style, visibility, group and axis, and
+        signals that shared a MultiStack row share one here too. A signal
+        already plotted here stays as it is. One undo step; returns the keys
+        added.
+        """
+        signals = [moved for moved in signals if moved.key not in self._items]
+        if not signals:
+            return []
+        rows: dict[int, int] = {}
+        self.begin_batch_add()
+        try:
+            for moved in signals:
+                self.add_series(moved.key, moved.series, color=moved.color)
+                plotted = self._items[moved.key]
+                plotted.visible = moved.visible
+                plotted.group = moved.group
+                plotted.axis_visible = moved.axis_visible
+                plotted.own_axis = moved.own_axis
+                plotted.line_style = moved.line_style
+                if moved.multistack_id >= 0:
+                    if moved.multistack_id not in rows:
+                        rows[moved.multistack_id] = (
+                            plotted.multistack_id if plotted.multistack_id >= 0
+                            else self._next_multistack_id())
+                    plotted.multistack_id = rows[moved.multistack_id]
+        finally:
+            self.end_batch_add()
+        return [moved.key for moved in signals]
 
     def replace_series(self, key: str, series: SignalSeries, redraw: bool = True) -> bool:
         """Replace plotted data without changing its visual or viewport state.
@@ -3262,6 +3306,7 @@ class PlotPanel(QWidget):
         if name and marker in self._markers:
             marker.name = name
             self._draw_markers()
+            self.markersChanged.emit()
 
     def rename_marker_interactively(self, marker: PlotMarker) -> None:
         name, ok = QInputDialog.getText(self, 'Rename marker', 'Name:', text=marker.name)
@@ -3349,6 +3394,7 @@ class PlotPanel(QWidget):
     def _on_marker_moved(self, line: _MarkerLine) -> None:
         line.marker.time = float(line.value())
         self._markers.sort(key=lambda m: m.time)
+        self.markersChanged.emit()
 
     # ── Table view ────────────────────────────────────────────────────────
 
@@ -3725,6 +3771,32 @@ class PlotPanel(QWidget):
         else:
             self.plot.setXRange(x0, x1, padding=0)
         self.fit_vertical()
+
+    # ── The time shown, which tabs share (see gui.plot_tabs) ────────────────
+
+    def time_range(self) -> tuple[float, float] | None:
+        """The time range on screen, or None while nothing is plotted."""
+        x_range = self._visible_x_range() if self._items else None
+        return (x_range[0], x_range[1]) if x_range else None
+
+    def show_time_range(self, x_min: float, x_max: float) -> None:
+        """Show time x_min to x_max, keeping each row's height as it is."""
+        # As zoom_to_time does, a range restore queued by an earlier rebuild
+        # must not overwrite this one.
+        self._rebuild_seq += 1
+        if self._stacked_mode:
+            if self._stacked_plots:
+                # The other rows follow row 0 through their X link.
+                self._stacked_plots[0].setXRange(x_min, x_max, padding=0)
+        else:
+            self.plot.setXRange(x_min, x_max, padding=0)
+            if self._multi_axis:
+                self._update_multi_axis_views()
+
+    def cursor_state(self) -> tuple[bool, float, bool, float]:
+        """Whether Cursor 1 is on and its time, then the same for Cursor 2."""
+        return (self._cursor1_enabled, float(self.v_line.value()),
+                self._cursor2_enabled, float(self.v_line2.value()))
 
     def center_on_time(
         self,
@@ -5195,6 +5267,8 @@ class PlotPanel(QWidget):
         rm.setEnabled(has_sel)
         menu.addAction(rm)
         self._add_remove_all_action(menu)
+        if self.move_targets is not None:
+            self._add_move_to_tab_menu(menu, selected_keys)
         menu.addSeparator()
         grp_act = QAction('Group selected…', menu)
         grp_act.triggered.connect(self.group_selected)
@@ -5254,6 +5328,30 @@ class PlotPanel(QWidget):
         action.triggered.connect(self.clearRequested.emit)
         menu.addAction(action)
         return action
+    def _add_move_to_tab_menu(self, menu: QMenu, selected_keys: list) -> QMenu:
+        """Add "Move to tab", with the other tabs and a new one, and return it
+        for UI tests."""
+        keys = [str(key) for key in selected_keys if str(key) in self._items]
+        tabs = self._make_menu(menu)
+        tabs.setTitle('Move to tab')
+        for index, name in self.move_targets():
+            # A "&" in a tab's name is not a shortcut.
+            action = QAction(name.replace('&', '&&'), tabs)
+            action.triggered.connect(
+                lambda _checked=False, k=list(keys), i=index:
+                self.moveToTabRequested.emit(k, i)
+            )
+            tabs.addAction(action)
+        if tabs.actions():
+            tabs.addSeparator()
+        new_tab = QAction('New tab', tabs)
+        new_tab.triggered.connect(
+            lambda _checked=False, k=list(keys): self.moveToTabRequested.emit(k, -1)
+        )
+        tabs.addAction(new_tab)
+        tabs.setEnabled(bool(keys))
+        menu.addMenu(tabs)
+        return tabs
 
     def _add_move_to_new_stack_action(
         self, menu: QMenu, selected_keys: list

@@ -43,7 +43,8 @@ REFRESH_INTERVAL_MS = 60_000
 OFFER_DELAY_MS = 500
 _SESSION_KEY = 'last_session'
 # Not something the user changed: each version writes its own number.
-_IGNORED_KEYS = frozenset({'version', _SESSION_KEY})
+# Looking at another tab changes nothing worth saving.
+_IGNORED_KEYS = frozenset({'version', _SESSION_KEY, 'current_tab'})
 
 
 class CloseAnswer(Enum):
@@ -72,8 +73,18 @@ def as_saved(config: dict) -> dict:
 def holds_something(config: dict) -> bool:
     """Whether *config* is worth keeping: a measurement, plotted signals or
     calculated signals."""
-    return bool(config.get('measurement_path') or config.get('signals')
+    return bool(config.get('measurement_path') or _plotted_signals(config)[0]
                 or config.get('generated_signals'))
+
+
+def _plotted_signals(config: dict) -> tuple[int, int]:
+    """How many signals *config* plots, and in how many tabs. Its top-level
+    signals are its first tab's; 'tabs', when there, describes every tab."""
+    tabs = [tab for tab in config.get('tabs') or [] if isinstance(tab, dict)]
+    if tabs:
+        return sum(len(tab.get('signals') or []) for tab in tabs), len(tabs)
+    signals = config.get('signals')
+    return (len(signals) if isinstance(signals, list) else 0), 1
 
 
 def differs(config: dict, snapshot: dict | None) -> bool:
@@ -126,12 +137,11 @@ def saved_to(data: dict) -> str | None:
 def summary(data: dict) -> str:
     """What the last session in *data* holds, in a few lines for the user."""
     measurement = data.get('measurement_path') or data.get('blf_path')
-    signals = data.get('signals')
-    count = len(signals) if isinstance(signals, list) else 0
+    count, tabs = _plotted_signals(data)
     where = saved_to(data)
     return '\n'.join((
         f'Measurement: {Path(measurement).name if measurement else "none"}',
-        f'Plotted signals: {count}',
+        f'Plotted signals: {count}' + (f', in {tabs} tabs' if tabs > 1 else ''),
         f'Saved as: {Path(where).name}' if where else 'Not saved',
     ))
 

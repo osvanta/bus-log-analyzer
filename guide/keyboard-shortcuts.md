@@ -38,6 +38,9 @@
 | ++c++ | Change the colour of the selected signal |
 | ++delete++ | Remove the selected signal from the plot |
 | ++ctrl+z++ | Undo the last plot action, up to three times |
+| ++ctrl+tab++ | Show the next plot tab |
+| ++ctrl+shift+tab++ | Show the previous plot tab |
+| Double-click on a tab | Rename the tab |
 
 ## Cursors
 

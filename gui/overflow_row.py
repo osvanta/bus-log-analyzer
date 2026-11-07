@@ -39,6 +39,7 @@ class OverflowButtonRow(QWidget):
         self._buttons: list[QAbstractButton] = []
         self._overflowed: set[QAbstractButton] = set()
         self._gaps = 0   # width of the space added by add_gap
+        self._end_buttons: list[QAbstractButton] = []
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(self.SPACING)
@@ -67,14 +68,24 @@ class OverflowButtonRow(QWidget):
         self._layout.insertSpacing(self._layout.count() - 2, width)
         self._gaps += width
 
+    def add_end_button(self, button: QAbstractButton) -> None:
+        """Put a button at the right end of the row, where it always stays:
+        it never moves into the menu, which opens left of it."""
+        self._layout.addWidget(button)
+        self._end_buttons.append(button)
+
     def overflowed_buttons(self) -> list[QAbstractButton]:
         """The buttons currently in the menu, in row order."""
         return [b for b in self._buttons if b in self._overflowed]
 
     def minimumSizeHint(self) -> QSize:
-        # Narrow enough for the overflow button alone, so the row never holds
-        # its parent wider than the space it is given.
-        return QSize(self._more_width(), super().minimumSizeHint().height())
+        # Narrow enough for the overflow button and the end buttons alone, so
+        # the row never holds its parent wider than the space it is given.
+        return QSize(self._more_width() + self._end_width(),
+                     super().minimumSizeHint().height())
+
+    def _end_width(self) -> int:
+        return sum(b.sizeHint().width() + self.SPACING for b in self._end_buttons)
 
     def event(self, event: QEvent) -> bool:
         handled = super().event(event)
@@ -86,8 +97,9 @@ class OverflowButtonRow(QWidget):
 
     def _fit(self) -> None:
         widths = [b.sizeHint().width() for b in self._buttons]
-        # A gap keeps its place on the row, whichever buttons are shown.
-        available = self.contentsRect().width() - self._gaps
+        # A gap keeps its place on the row, whichever buttons are shown, and
+        # the end buttons theirs.
+        available = self.contentsRect().width() - self._gaps - self._end_width()
         if sum(widths) + self.SPACING * (len(widths) - 1) > available:
             available -= self._more_width() + self.SPACING
         fits = 0
