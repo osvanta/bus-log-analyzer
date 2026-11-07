@@ -11,7 +11,7 @@ Only the latest release receives security fixes.
 
 ## Reporting a Vulnerability
 
-If you discover a security issue (e.g. a malicious BLF, ASC, MF4, MDF, CSV, DBC,
+If you discover a security issue (e.g. a malicious BLF, ASC, TRC, MF4, MDF, CSV, DBC,
 ARXML or LDF file causing arbitrary code execution, or the application leaving a
 copy of a measurement behind), please **do not open a public GitHub issue**.
 
@@ -29,8 +29,8 @@ You can expect an acknowledgement within 72 hours.
 
 ## Scope
 
-The tool reads measurement files (BLF, ASC, MF4, MDF, CSV) and databases (DBC,
-ARXML, LDF) from the local filesystem. It opens no network connection of its
+The tool reads measurement files (BLF, ASC, TRC, MF4, MDF, CSV) and databases
+(DBC, ARXML, LDF) from the local filesystem. It opens no network connection of its
 own: the links in the Help menu and About dialog open a page in the user's
 browser, and only when clicked. It sends no telemetry and checks for no updates.
 The primary attack surface is **malformed or malicious input files**, including

@@ -12,6 +12,8 @@ decode it with your DBC, ARXML or LDF databases, and plot the signals.
   measurement file to your first plot in five minutes.
 - **Looking for a key?** See the [keyboard shortcuts](keyboard-shortcuts.md).
 - **Stuck, or found a problem?** See [Help and troubleshooting](help.md).
+- **Prefer to watch?** The tutorial videos are on
+  [YouTube](https://www.youtube.com/@osvanta).
 
 ## Get the application
 
@@ -35,8 +37,9 @@ The application finds out for itself what an MDF or CSV file holds.
 ## What it does
 
 - Decodes large measurements fast, channel by channel, with a database for each channel.
-- Lists every channel, message and signal in a tree you can search, with `*` and `?` wildcards.
-- Plots signals in Stacked, Multi-Axis or MultiStack mode, with two cursors, statistics between them, named markers and Rectangle Zoom.
+- Lists every channel, message and signal in a tree you can search, with `*` and `?` wildcards, and shows each signal's definition from its database on request.
+- Plots signals in Stacked, Multi-Axis or MultiStack mode, with two cursors, statistics between them, named markers and Rectangle Zoom, or lists the plotted signals as a table.
 - Calculates new signals from others with a formula.
 - Shows the **Trace**: the raw CAN and LIN frames, in order, with the time since each ID's previous frame and its changed bytes highlighted.
-- Exports plotted signals to CSV or Excel, and saves the whole session as a configuration.
+- Exports plotted signals to CSV, Excel or MF4, and saves the whole session as a configuration.
+- Converts, joins and cuts measurement files, and says what a file holds before you decode it.

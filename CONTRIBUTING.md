@@ -54,7 +54,7 @@ New source files should carry the standard MPL header:
 
 ## Protected Areas
 
-The BLF, ASC, MF4, and MDF loading and decoding pipeline has been validated
+The BLF, ASC, TRC, MF4, and MDF loading and decoding pipeline has been validated
 against real measurement data and accepted by the project owner. Changes there
 risk silently corrupting decoded values in ways tests do not catch, so it is
 off-limits without prior agreement — **including** cleanups, refactors,
@@ -95,14 +95,9 @@ cd bus-log-analyzer
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -r requirements.txt -r requirements-dev.txt
-tools\install-hooks.bat          # Windows: blocks diagnostics commits + runs tests before every commit
+tools\install-hooks.bat          # Windows: checks protected paths + runs tests before every commit
 :: or on macOS/Linux/Git Bash:   tools/install-hooks.sh
 python app.py
-```
-
-Optional — for MF4/MDF support:
-```bash
-pip install asammdf>=7.0
 ```
 
 Run the tests any time with:
@@ -133,39 +128,38 @@ for how to lay out the folder.
 ```
 bus-log-analyzer/
 ├── app.py                    # Entry point, APP_NAME, APP_VERSION
-├── core/
+├── core/                     # No Qt here: everything runs and is tested without a GUI
 │   ├── readers/              # One reader class per format
 │   │   ├── __init__.py       # reader_factory() + format registry
 │   │   ├── base.py           # MeasurementReader protocol
 │   │   ├── blf_can_reader.py
 │   │   ├── asc_can_reader.py
+│   │   ├── trc_can_reader.py # PEAK trace files, versions 1.0 to 3.0
 │   │   ├── mdf_reader.py / mdf_can_reader.py
-│   │   ├── db_format.py
+│   │   ├── db_format.py      # DBC, ARXML and LDF databases
 │   │   └── csv_reader.py
 │   ├── blf_reader.py         # RawFrame dataclass + BLFReaderService
 │   ├── dbc_decoder.py        # DBCDecoder + DecodedSignalSample
 │   ├── vectorized_decoder.py # Bulk numpy decode path
-│   ├── raw_frame_store.py    # RawFrameStore (CAN Trace)
+│   ├── raw_frame_store.py    # RawFrameStore (the Trace)
 │   ├── signal_store.py       # SignalStore + SignalSeries
 │   ├── calculated_signals.py # User-defined derived signals
-│   ├── export.py             # CSV export
-│   └── diagnostics/          # AI diagnostics engine
-│       ├── config_loader.py  # YAML rule loading
-│       ├── engine.py         # Rule evaluation
-│       ├── rules/            # One module per rule type
-│       ├── agent/            # Agent loop, knowledge, prompts
-│       └── llm/              # GitHub Models client + token store
+│   ├── signal_statistics.py  # Min / max / mean / std dev / RMS between the cursors
+│   ├── converter.py          # Tools ▸ Convert files
+│   ├── mf4_writer.py         # MF4 export
+│   └── export.py             # CSV and Excel export
 ├── gui/
 │   ├── main_window.py        # MainWindow (QMainWindow)
 │   ├── load_worker.py        # LoadWorker: QThread worker that runs the readers
 │   ├── plot_widget.py        # PlotPanel (pyqtgraph)
 │   ├── signal_tree.py        # SignalTreeWidget
-│   ├── dbc_manager.py        # DBC/ARXML database management
-│   ├── raw_frame_dialog.py   # RawFrameDialog
-│   └── diagnostics/          # Diagnostics window, panels, worker
-├── config/diagnostics/       # YAML fault rules (no Python needed)
-├── tools/                    # Repo tooling (protected-path check)
+│   ├── dbc_manager.py        # Database Manager: DBC/ARXML/LDF per channel
+│   ├── raw_frame_dialog.py   # The Trace window
+│   ├── help_menu.py          # The Help menu and its links
+│   └── release_test/         # The hidden --release-test
 ├── guide/                    # User guide, published to GitHub Pages (mkdocs.yml)
+├── docs/                     # Project structure and the pull request policy
+├── tools/                    # Repo tooling (protected-path check, pre-commit hook)
 └── tests/                    # pytest suite + fixtures
 ```
 
@@ -174,8 +168,7 @@ pyqtgraph, directly or through another module, so its logic runs and is
 tested without a GUI. Anything that needs Qt, such as a `QObject` worker or a
 signal, belongs in `gui/`. `tests/test_core_imports_no_gui.py` enforces this.
 
-Deeper detail lives in [docs/Project_structure.md](docs/Project_structure.md)
-and [docs/AI_diagnostic.md](docs/AI_diagnostic.md).
+Deeper detail lives in [docs/Project_structure.md](docs/Project_structure.md).
 
 ---
 
@@ -192,7 +185,7 @@ and [docs/AI_diagnostic.md](docs/AI_diagnostic.md).
 
 ## Code Style
 
-- Python 3.11+, type-annotated throughout.
+- Python 3.12, type-annotated throughout.
 - `from __future__ import annotations` at the top of every module.
 - `dataclass(slots=True)` for data-holding classes.
 - No external formatters are enforced, but please follow the existing style.
@@ -263,9 +256,10 @@ a measurement you may publish. Never rename or move `index.md` or
 Open a GitHub issue and include:
 
 - OS and Python version
-- Measurement file format (BLF / ASC / MF4 / CSV)
+- Measurement file format (BLF / ASC / TRC / MF4 / MDF / CSV)
 - Steps to reproduce
-- Full error message or traceback
+- Full error message or traceback, and the two log files from **Help ▸ Open
+  the log folder** (check them first: they name the files you opened)
 - No proprietary measurement data required — a minimal description is enough
 
 ---
