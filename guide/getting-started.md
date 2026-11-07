@@ -123,10 +123,18 @@ Cursor 2. The line under the plot shows both times and the time between them,
 and the signal table shows each signal's value at each cursor.
 
 **Signal table columns.** Right-click the table header to show or hide a
-column: the cursor values, **Δ C2−C1** (Cursor 2's value minus Cursor 1's),
-the unit, and the statistics **Min**, **Max**, **Mean**, **Std dev**, **RMS**
-and **Samples**. The statistics are between the cursors when both are on, and
-over the visible range otherwise.
+column: the cursor values, **Hex** (Cursor 1's value as the raw value on the
+bus, in hexadecimal), **Δ C2−C1** (Cursor 2's value minus Cursor 1's), the
+unit, and the statistics **Min**, **Max**, **Mean**, **Std dev**, **RMS** and
+**Samples**. The statistics are between the cursors when both are on, and over
+the visible range otherwise.
+
+**Hex** turns the value back into what the bus carried: (value − offset) /
+factor from the database, padded to the signal's length, so an 11-bit signal
+reads `0x7FF` and an 8-bit signed −1 reads `0xFF`. A float signal shows its
+IEEE 754 bits. A signal no database defines (a calculated signal, or an MF4
+channel the file decoded itself) shows its value in hex when it is a whole
+number, and nothing otherwise.
 
 **Signal properties.** Right-click a signal in the tree or in the signal table
 and choose **Properties…** to see what its database says about it: start bit,

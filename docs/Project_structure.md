@@ -19,7 +19,7 @@ bus-log-analyzer/
 │   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line; TRC version, start, connections, events
 │   ├── signal_statistics.py      # Min / max / mean / std dev / RMS / samples of a signal over a time range
 │   ├── debug_inspector.py        # Read-only forensic probes of a measurement that failed to load; the readers stay untouched
-│   ├── signal_properties.py      # Right-click ▸ Properties: a signal's definition, looked up again in its channel's database; file-decoded and calculated signals; why none was found
+│   ├── signal_properties.py      # Right-click ▸ Properties: a signal's definition, looked up again in its channel's database; file-decoded and calculated signals; why none was found; the raw value on the bus for the signal table's Hex column
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
 │   ├── signal_selection.py       # Convert files' saved signal selections: match by name or pattern, read/write .txt lists
 │   ├── formula_catalog.py        # Insert Function's list: every formula function, operator and constant, by category, with argument help and examples
@@ -40,7 +40,7 @@ bus-log-analyzer/
 ├── gui/
 │   ├── main_window.py            # MainWindow, top row, config save/load, plot_finding()
 │   ├── load_worker.py            # LoadWorker (QThread): native MDF arrays + batched CAN-raw vectorized decode paths
-│   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Δ C2−C1, statistics), Table view, measurement events
+│   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Hex, Δ C2−C1, statistics), Table view, measurement events
 │   ├── plot_tag.py               # The user's tag under the signal table: their text, user name and date, kept beside the application
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
 │   ├── measurement_info.py       # File ▸ Measurement info dialog
