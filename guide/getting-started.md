@@ -123,6 +123,18 @@ Plot a signal from the tree in any of these ways:
 **Table**, the fourth button, lists the plotted signals as a table beside the
 plot, a row per sample time.
 
+**Tabs.** Each tab above the signal table and the plot has its own signals,
+signal table, plot mode and Table view. **+** adds a tab, a double-click on a
+tab renames it, and its small **x** or its right-click menu closes it;
+++ctrl+tab++ and ++ctrl+shift+tab++ move between tabs. Drag signals from the
+tree onto a tab to plot them there, or onto **+** to plot them in a new tab.
+Drag rows from the signal table onto another tab to move them, or right-click
+them and choose **Move to tab**. While **Synchronize Tabs**, the chain-link
+button, is on, as it is at first, every tab shows the same time range and
+cursors. Markers, measurement events, the signal table's columns and the line
+mode are the same in every tab. A configuration keeps every tab, and an older
+version of the application opens its first tab.
+
 **Cursors.** A click on the plot places Cursor 1, and ++shift+++click places
 Cursor 2. The line under the plot shows both times and the time between them,
 and the signal table shows each signal's value at each cursor.

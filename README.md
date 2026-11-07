@@ -71,6 +71,7 @@ MDF and CSV content is detected automatically. The Database Manager assigns a DB
 
 ### Plotting
 
+- **Tabs of plots**: each tab has its own signals, signal table and plot mode. **+** adds a tab, a double-click renames one, and `Ctrl+Tab` moves between them. Drag signals from the signal tree onto a tab, or onto **+** for a new one; drag rows from the signal table onto another tab, or right-click them ▸ **Move to tab**. With **Synchronize Tabs** on, the default, every tab shows the same time range and cursors. Markers, measurement events and the signal table's columns are the same in every tab, and configurations and the last session keep every tab.
 - **Stacked** is the default mode and gives each signal its own lane and Y scale.
 - **Multi-Axis** overlays the signals, with one axis per unit and an optional individual axis per signal.
 - **MultiStack** has lanes that each hold several signals; drag signals into a lane to overlay them there. The signal table splits into one part per lane, level with it, so each lane's signals, cursor values and units sit beside it; drag a signal between parts to move it to that lane.
@@ -135,6 +136,7 @@ The portable build and CI release build use Python 3.12.
 | `C` | Change the selected signal color |
 | `R` | Toggle both cursors |
 | `M` | Add a marker at Cursor 1 |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous plot tab |
 | `Delete` | Remove selected plotted signals |
 | `Ctrl+Z` | Undo the last plot action |
 | `Ctrl+Shift+-` / `Ctrl+Shift++` | Collapse / expand signal-tree messages |

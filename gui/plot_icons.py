@@ -76,6 +76,10 @@ DRAWINGS: dict[str, str] = {
     # For the top row's Decode: square bus pulses that become a smooth signal,
     # drawn heavier to stand beside its bold text.
     'decode': '<path stroke-width="2.3" d="M2 16h2.5V8H7.5v8H10c1.8 0 2.4-8 5-8s3.2 8 5 8h2"/>',
+    # A chain link: the tabs keep to one time.
+    'sync_tabs': ('<g transform="rotate(-45 12 12)">'
+                  '<path d="M10 7H7a5 5 0 0 0 0 10h3"/><path d="M14 7h3a5 5 0 0 1 0 10h-3"/>'
+                  '<path d="M8.5 12h7"/></g>'),
 }
 
 

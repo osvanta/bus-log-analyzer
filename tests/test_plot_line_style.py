@@ -296,8 +296,8 @@ def test_temporary_plot_config_carries_line_style(window, tmp_path):
 
     config = window._capture_temporary_plot_configuration()
 
-    assert config["version"] == 2
-    assert config["signals"][0]["line_style"] == "dashdot"
+    assert config["version"] == 3
+    assert config["tabs"][0]["signals"][0]["line_style"] == "dashdot"
 
 
 def test_temporary_handoff_requeues_line_style(window, tmp_path):
