@@ -181,7 +181,76 @@ def _writer(path: Path):
         return can.BLFWriter(str(path))
     if suffix == '.asc':
         return can.ASCWriter(str(path))
-    return can.MF4Writer(str(path))
+    return _batched_mf4_writer(path)
+
+
+#: Data frames held before they are added to the MF4 in one go.
+MF4_BATCH = 65_536
+
+
+def _batched_mf4_writer(path: Path):
+    """python-can's MF4 writer, its data frames added a batch at a time.
+
+    Its own writer extends the MF4 by one frame per call: 183 µs a frame, so
+    a 5 GB BLF took about five hours. The batches give the same rows in the
+    same group. Error and remote frames, rare, still go one at a time.
+    """
+    import numpy as np
+    from can.io import mf4
+    from can.util import channel2int, len2dlc
+
+    class BatchedMF4Writer(mf4.MF4Writer):
+        def __init__(self, file) -> None:
+            super().__init__(file)
+            self._times: list[float] = []
+            self._columns: tuple[list, ...] = tuple([] for _ in range(9))
+            self._data: list[bytes] = []
+
+        def on_message_received(self, msg) -> None:
+            if msg.is_remote_frame or msg.is_error_frame:
+                super().on_message_received(msg)
+                return
+            timestamp = msg.timestamp
+            if timestamp is None:
+                timestamp = self.last_timestamp
+            else:
+                self.last_timestamp = max(self.last_timestamp, timestamp)
+            channel = channel2int(msg.channel)
+            data = bytes(msg.data)
+            if msg.is_fd:
+                dlc = len2dlc(msg.dlc)
+                fd = (int(msg.error_state_indicator), int(msg.bitrate_switch), 1)
+            else:
+                dlc, fd = msg.dlc, (0, 0, 0)
+            self._times.append(timestamp - self._start_time)
+            for column, value in zip(self._columns, (
+                    0 if channel is None else channel, msg.arbitration_id,
+                    int(msg.is_extended_id), dlc, len(data), 0 if msg.is_rx else 1, *fd)):
+                column.append(value)
+            self._data.append(data.ljust(64, b'\0'))
+            if len(self._times) >= MF4_BATCH:
+                self._add_frames()
+
+        def _add_frames(self) -> None:
+            count = len(self._times)
+            if not count:
+                return
+            rows = np.zeros(count, dtype=mf4.STD_DTYPE)
+            for name, column in zip(('BusChannel', 'ID', 'IDE', 'DLC', 'DataLength', 'Dir',
+                                     'ESI', 'BRS', 'EDL'), self._columns):
+                rows[f'CAN_DataFrame.{name}'] = column
+                column.clear()
+            rows['CAN_DataFrame.DataBytes'] = np.frombuffer(
+                b''.join(self._data), dtype=np.uint8).reshape(count, 64)
+            self._mdf.extend(0, [(np.array(self._times, dtype='<f8'), None), (rows, None)])
+            self._times.clear()
+            self._data.clear()
+
+        def stop(self) -> None:
+            self._add_frames()
+            super().stop()
+
+    return BatchedMF4Writer(str(path))
 
 
 def _from_one(message):

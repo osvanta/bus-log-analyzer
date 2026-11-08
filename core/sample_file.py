@@ -14,6 +14,11 @@ page file: they do not count against the system's commit limit, and Windows
 writes them out and drops them when memory is short. A measurement larger
 than the memory therefore loads; free disk space is the limit instead.
 
+Space no array holds any more is used again: a series that grew into a new
+region leaves its old one, and the parts a decoder kept until it joined them
+leave theirs. Before, every copy stayed, and a 5 GB log's sample file held
+each sample twice (TODO issue 24).
+
 The file is opened delete-on-close, like the CAN Trace's, and has the same
 name pattern, so the start-up sweep in core.raw_frame_store also removes one
 left by a crash.
@@ -21,10 +26,14 @@ left by a crash.
 
 from __future__ import annotations
 
+import bisect
+import collections
 import mmap
 import os
 import shutil
 import tempfile
+import threading
+import weakref
 
 import numpy as np
 
@@ -41,7 +50,13 @@ class SampleFileFull(OSError):
 
 
 class SampleFile:
-    """Append-only float64 arrays in one temporary, memory-mapped file."""
+    """
+    Float64 arrays in one temporary, memory-mapped file.
+
+    Each array is a region of a segment. A region is free again once the
+    array returned for it is gone: a slice or other view of an array keeps
+    the array as its base, so the array goes only with the last of them.
+    """
 
     def __init__(self, segment_bytes: int = _SEGMENT_BYTES) -> None:
         self._file, self.path = _create_data_file()
@@ -51,11 +66,29 @@ class SampleFile:
         self._granularity = granularity
         self._segment_bytes = -(-segment_bytes // granularity) * granularity
         self._size = 0
-        self._segment: mmap.mmap | None = None
-        self._used = 0
-        self._capacity = 0
-        self.bytes_stored = 0
+        self._segments: list[mmap.mmap] = []
+        self._used = 0          # of the last segment
+        self._capacity = 0      # of the last segment
+        # Free regions as [segment, offset, bytes], in file order.
+        self._free: list[list[int]] = []
+        # Regions whose array is gone, added by a finalizer on whichever
+        # thread let it go and taken into _free under the lock.
+        self._released: collections.deque = collections.deque()
+        self._lock = threading.Lock()
+        self._live = 0
         self.closed = False
+
+    @property
+    def bytes_stored(self) -> int:
+        """Bytes of the arrays still held."""
+        with self._lock:
+            self._take_released()
+            return self._live
+
+    @property
+    def file_bytes(self) -> int:
+        """The file's size."""
+        return self._size
 
     def store(self, *parts) -> np.ndarray:
         """
@@ -73,22 +106,72 @@ class SampleFile:
         for array in arrays:
             view[start:start + len(array)] = array
             start += len(array)
-        self.bytes_stored += view.nbytes
         return view
 
     def _allocate(self, count: int) -> np.ndarray:
         nbytes = count * 8
-        if self._segment is None or self._used + nbytes > self._capacity:
-            self._new_segment(max(self._segment_bytes, nbytes))
-        view = np.frombuffer(
-            self._segment, dtype=np.float64, count=count, offset=self._used
-        )
-        self._used += -(-nbytes // 8) * 8
+        with self._lock:
+            if self.closed:
+                raise ValueError("the sample file is closed")
+            self._take_released()
+            place = self._take_free(nbytes)
+            if place is None:
+                if not self._segments or self._used + nbytes > self._capacity:
+                    self._new_segment(max(self._segment_bytes, nbytes))
+                place = (len(self._segments) - 1, self._used)
+                self._used += nbytes
+            segment, offset = place
+            view = np.frombuffer(
+                self._segments[segment], dtype=np.float64, count=count, offset=offset
+            )
+            self._live += nbytes
+        weakref.finalize(view, self._released.append, (segment, offset, nbytes)).atexit = False
         return view
 
+    def _take_free(self, nbytes: int) -> tuple[int, int] | None:
+        """The smallest free region that holds *nbytes*, or None."""
+        best = None
+        for i, (_, _, size) in enumerate(self._free):
+            if size >= nbytes and (best is None or size < self._free[best][2]):
+                best = i
+                if size == nbytes:
+                    break
+        if best is None:
+            return None
+        segment, offset, size = self._free[best]
+        if size == nbytes:
+            del self._free[best]
+        else:
+            self._free[best] = [segment, offset + nbytes, size - nbytes]
+        return segment, offset
+
+    def _take_released(self) -> None:
+        while self._released:
+            segment, offset, nbytes = self._released.popleft()
+            if self.closed:
+                continue
+            self._live -= nbytes
+            self._add_free(segment, offset, nbytes)
+
+    def _add_free(self, segment: int, offset: int, nbytes: int) -> None:
+        """Mark a region free, joined with free neighbours."""
+        free = self._free
+        i = bisect.bisect_left(free, [segment, offset, 0])
+        if i and free[i - 1][0] == segment and free[i - 1][1] + free[i - 1][2] == offset:
+            i -= 1
+            free[i][2] += nbytes
+        else:
+            free.insert(i, [segment, offset, nbytes])
+        if (i + 1 < len(free) and free[i + 1][0] == segment
+                and free[i][1] + free[i][2] == free[i + 1][1]):
+            free[i][2] += free[i + 1][2]
+            del free[i + 1]
+        if segment == len(self._segments) - 1 and free[i][1] + free[i][2] == self._used:
+            # The end of the last segment: back to where new regions start.
+            self._used = free[i][1]
+            del free[i]
+
     def _new_segment(self, nbytes: int) -> None:
-        if self.closed:
-            raise ValueError("the sample file is closed")
         capacity = -(-nbytes // self._granularity) * self._granularity
         free = shutil.disk_usage(os.path.dirname(self.path) or tempfile.gettempdir()).free
         if free < capacity + _DISK_RESERVE_BYTES:
@@ -96,21 +179,30 @@ class SampleFile:
                 f"{capacity / 1e9:.1f} GB more is needed in "
                 f"{os.path.dirname(self.path)}, which has {free / 1e9:.1f} GB free"
             )
+        tail = None
+        if self._segments and self._used < self._capacity:
+            tail = (len(self._segments) - 1, self._used, self._capacity - self._used)
         offset = self._size
         os.ftruncate(self._fd, offset + capacity)
-        self._segment = mmap.mmap(
+        self._segments.append(mmap.mmap(
             self._fd, capacity, offset=offset, access=mmap.ACCESS_WRITE
-        )
+        ))
         self._size = offset + capacity
         self._used = 0
         self._capacity = capacity
+        if tail is not None:
+            # What the previous segment had left takes later, smaller arrays.
+            self._add_free(*tail)
 
     def close(self) -> None:
         """Close the file. Mapped views stay valid; the file goes with the last."""
-        if self.closed:
-            return
-        self.closed = True
-        self._segment = None
+        with self._lock:
+            if self.closed:
+                return
+            self.closed = True
+            self._segments = []
+            self._free = []
+            self._released.clear()
         try:
             self._file.close()
         except OSError:

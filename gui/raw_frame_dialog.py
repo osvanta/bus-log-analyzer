@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.bus_types import channel_label
-from core.raw_frame_store import RawFrameStore
+from core.raw_frame_store import FrameSearch, RawFrameStore
 from core.trace_differences import previous_frames, window_differences
 from gui.user_settings import read_setting, write_setting
 
@@ -328,6 +328,12 @@ class RawFrameDialog(QDialog):
         self._search_timer.setInterval(_SEARCH_PAUSE_MS)
         self._search_timer.timeout.connect(self._on_filter_changed)
         self.search_edit.textChanged.connect(self._search_timer.start)
+        # A large measurement is searched a chunk of frames per step, the
+        # window answering between steps; the frames shown stay until done.
+        self._search: FrameSearch | None = None
+        self._search_step_timer = QTimer(self)
+        self._search_step_timer.setInterval(0)
+        self._search_step_timer.timeout.connect(self._search_step)
         self.search_edit.returnPressed.connect(self._on_filter_changed)
         self.channel_combo.currentIndexChanged.connect(self._on_filter_changed)
         self._nb_start.clicked_connect(self._go_start)
@@ -403,9 +409,44 @@ class RawFrameDialog(QDialog):
         needle         = self.search_edit.text().strip().lower()
         channel_filter = self.channel_combo.currentData()
 
-        # None when all frames match (zero extra RAM), else their indices.
-        self._matching = self._raw_store.matching_indices(needle, channel_filter)
+        if len(self._raw_store) <= _small_file():
+            self._end_search()
+            self._show_matching(self._raw_store.matching_indices(needle, channel_filter))
+            return
+        # Searching 64 M frames at once held the window for up to 8 s. A new
+        # search replaces one under way, and the Δt index waits for it: the
+        # user is waiting for the search.
+        self._search = self._raw_store.search(needle, channel_filter)
+        self._index_timer.stop()
+        self._search_step()
+        if self._search is not None:
+            self._search_step_timer.start()
 
+    def _search_step(self) -> None:
+        search = self._search
+        if search is None:
+            self._end_search()
+            return
+        try:
+            done = search.step()
+        except RuntimeError:            # the measurement was closed
+            self._end_search()
+            return
+        if done:
+            self._end_search()
+            self._show_matching(search.result)
+        else:
+            self._show_status(keep_times=True)
+
+    def _end_search(self) -> None:
+        self._search = None
+        self._search_step_timer.stop()
+        if not self._previous.ready and not self._index_timer.isActive():
+            self._index_timer.start()
+
+    def _show_matching(self, matching: np.ndarray | None) -> None:
+        # None when all frames match (zero extra RAM), else their indices.
+        self._matching = matching
         self._win_start = 0
         self._update_scrollbar()
         self._render_window()
@@ -484,8 +525,12 @@ class RawFrameDialog(QDialog):
     def _update_scrollbar(self) -> None:
         n       = self._total_matching()
         max_val = max(0, n - _WINDOW)
+        # The window is redrawn next: a scrollbar that moved would redraw it
+        # first, and on a 64 M frame log each redraw holds it for 0.5 s.
+        self._scrollbar.blockSignals(True)
         self._scrollbar.setMaximum(max_val)
         self._scrollbar.setValue(0)
+        self._scrollbar.blockSignals(False)
 
     # ── Render window ─────────────────────────────────────────────────────
 
@@ -544,6 +589,10 @@ class RawFrameDialog(QDialog):
         self.tree.setUpdatesEnabled(False)
         self._following = True          # clearing moves the current item
         try:
+            # With a current row, clear() took 10 s for the 5,000 rows
+            # instead of 0.02 s, and a search, a Follow Cursor 1 step and the
+            # finished Δt index all redraw with a row selected.
+            self.tree.selectionModel().clear()
             self.tree.clear()
             self.tree.insertTopLevelItems(0, top_items)
         finally:
@@ -579,6 +628,8 @@ class RawFrameDialog(QDialog):
         text = (f'Showing frames {self._win_start+1:,}–{w_end:,} of {n:,} matching  '
                 f'({_fmt_t(t_win_s)} → {_fmt_t(t_win_e)})  '
                 f'| Total in file: {len(self._raw_store):,}')
+        if self._search is not None:
+            text += f'  | Searching… {self._search.progress:.0%}'
         if not self._previous.ready:
             text += f'  | Δt: working out… {self._previous.progress:.0%}'
         self.status_label.setText(text)

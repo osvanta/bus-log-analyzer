@@ -415,3 +415,61 @@ def test_the_main_window_wires_the_trace_to_the_plot(qapp, trace_store, monkeypa
         window.store = None
         window.close()
         window.deleteLater()
+
+
+# ── Redrawing with a row picked ──────────────────────────────────────────
+
+
+def _big_dialog(qapp, tmp_path, count=20_000):
+    from gui.raw_frame_dialog import RawFrameDialog
+    store = _store(np.arange(count) * 0.001, [1] * count, [0x100 + n % 7 for n in range(count)])
+    d = RawFrameDialog(store, settings_path=tmp_path / 'settings.json')
+    d.show()
+    qapp.processEvents()
+    return d, store
+
+
+def test_the_window_is_emptied_with_no_row_picked(qapp, tmp_path):
+    # QTreeWidget.clear() with a current row took 10 s for 5,000 rows instead
+    # of 0.02 s: every search, Follow Cursor 1 step and finished Δt index
+    # redraws with a row picked.
+    d, store = _big_dialog(qapp, tmp_path)
+    try:
+        tree = d.tree
+        seen = []
+        clear = tree.clear
+        tree.clear = lambda: (seen.append((tree.currentItem(),
+                                           tree.selectionModel().hasSelection())), clear())
+        d.follow_time(12.0)
+        d._follow_now()
+        assert tree.currentItem() is not None
+        d._set_window(15_000)
+        assert seen and seen[-1] == (None, False)
+        # The window still shows the rows asked for.
+        assert tree.topLevelItemCount() == min(5_000, len(store) - d._win_start)
+    finally:
+        d.close()
+        d.deleteLater()
+        store.close()
+
+
+def test_following_cursor_1_to_another_window_takes_under_two_seconds(qapp, tmp_path):
+    import time
+    d, store = _big_dialog(qapp, tmp_path)
+    try:
+        d.follow_button.setChecked(True)
+        d.follow_time(2.0)
+        d._follow_now()
+        took = []
+        for t in (9.0, 16.0):           # each outside the window shown
+            started = time.perf_counter()
+            d.follow_time(t)
+            d._follow_now()
+            took.append(time.perf_counter() - started)
+            assert _time_of_current(d) == pytest.approx(t)
+        assert max(took) < 2.0, took
+    finally:
+        d.close()
+        d.deleteLater()
+        store.close()
+

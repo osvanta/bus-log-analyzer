@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 import array as _array
-from collections import defaultdict
+import weakref
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
@@ -327,13 +328,8 @@ _CACHE_BUDGET_MIN = 256 * 1024 * 1024
 _CACHE_BUDGET_MAX = 2 * 1024 * 1024 * 1024
 
 
-def default_cache_budget() -> int:
-    """An eighth of physical memory, between 256 MB and 2 GB.
-
-    Only a cost/speed trade: a group forgotten is read again when next used,
-    which for a typical group takes a fraction of a second.
-    """
-    total = 0
+def physical_memory() -> tuple[int, int]:
+    """The PC's physical memory and the part free for use now, in bytes; 0 where unknown."""
     try:
         import ctypes
 
@@ -349,16 +345,35 @@ def default_cache_budget() -> int:
         status = _MemoryStatus()
         status.dwLength = ctypes.sizeof(status)
         if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            total = int(status.ullTotalPhys)
+            return int(status.ullTotalPhys), int(status.ullAvailPhys)
     except (AttributeError, OSError):
         pass
+    try:
+        import os
+        page = os.sysconf("SC_PAGE_SIZE")
+        return page * os.sysconf("SC_PHYS_PAGES"), page * os.sysconf("SC_AVPHYS_PAGES")
+    except (AttributeError, ValueError, OSError):
+        return 0, 0
+
+
+def default_cache_budget() -> int:
+    """An eighth of physical memory and at most an eighth of what is free,
+    between 256 MB and 2 GB.
+
+    Only a cost/speed trade: a group forgotten is read again when next used,
+    which for a typical group takes a fraction of a second, and samples past
+    a store's budget go to its sample file, which costs no commit. An eighth
+    of 16 GB, whatever was free, took a PC with 4 GB free to 95 % commit while
+    a 5 GB log decoded (TODO issue 25); the decode's own work takes as much
+    again.
+    """
+    total, available = physical_memory()
     if not total:
-        try:
-            import os
-            total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-        except (AttributeError, ValueError, OSError):
-            return _CACHE_BUDGET_MIN
-    return max(_CACHE_BUDGET_MIN, min(_CACHE_BUDGET_MAX, total // 8))
+        return _CACHE_BUDGET_MIN
+    budget = total // 8
+    if available:
+        budget = min(budget, available // 8)
+    return max(_CACHE_BUDGET_MIN, min(_CACHE_BUDGET_MAX, budget))
 
 
 class SampleCache:
@@ -659,6 +674,8 @@ class SignalStore:
         # the heap; see _extend() and core.sample_file.
         self.memory_budget = default_cache_budget()
         self._heap_sample_bytes = 0
+        # Bytes of kept parts let go of since, counted off by _spilling().
+        self._heap_parts_freed: deque[int] = deque()
         self._sample_file = None
         self._sample_file_refused = False
 
@@ -1088,7 +1105,14 @@ class SignalStore:
         with lists): the parts it keeps meanwhile cost no more memory than the
         finished series would.
         """
-        return self._extend(_array.array("d"), array)
+        kept = self._extend(_array.array("d"), array)
+        if isinstance(kept, _array.array) and len(kept):
+            # Joined into its series and dropped, a part stops counting: else
+            # every sample would count twice against the budget.
+            weakref.finalize(
+                kept, self._heap_parts_freed.append, len(kept) * 8
+            ).atexit = False
+        return kept
 
     def _extend(self, stored, *new_parts):
         """
@@ -1096,7 +1120,8 @@ class SignalStore:
 
         Up to ``memory_budget`` bytes of samples stay in the heap as
         ``array.array``. Beyond it, arrays go to the sample file; a series
-        that grows there is copied whole to a new region.
+        that grows there is copied whole to a new region, and the old one
+        takes a later array.
         """
         if self._spilling():
             from core.sample_file import SampleFileFull
@@ -1118,6 +1143,8 @@ class SignalStore:
     def _spilling(self) -> bool:
         if self._sample_file is not None:
             return not self._sample_file.closed
+        while self._heap_parts_freed:
+            self._heap_sample_bytes -= self._heap_parts_freed.popleft()
         if self._sample_file_refused or self._heap_sample_bytes < self.memory_budget:
             return False
         from core.sample_file import SampleFile

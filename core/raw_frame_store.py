@@ -85,7 +85,7 @@ _SHORT_BYTES       = 8           # bytes kept per frame; see _Payload
 _WORDS             = _DATA_BYTES // 8
 _DIR_RX,_DIR_TX,_DIR_UNK = 0, 1, 2
 _LARGE_STORE_LIMIT = 500_000     # frames; disable data-hex search above this
-_SEARCH_CHUNK      = 1 << 22     # frames a search looks at per step
+_SEARCH_CHUNK      = 1 << 20     # frames a search looks at per step
 
 _DIR_STRINGS = ['Rx', 'Tx', 'Unknown']
 
@@ -324,6 +324,121 @@ class RawFrameRecord(NamedTuple):
     def channel_key(self) -> BusChannel | None:
         """The frame's bus-tagged channel identity, or None if unknown."""
         return None if self.channel is None else (self.bus, self.channel)
+
+
+class FrameSearch:
+    """
+    A search of the CAN Trace, worked out a chunk of frames per :meth:`step`.
+
+    A window calls step() from its event loop until it returns True, so a
+    search of tens of millions of frames never holds the window for more
+    than one chunk; :attr:`result` is then what
+    :meth:`RawFrameStore.matching_indices` returns.
+    """
+
+    def __init__(self, steps) -> None:
+        self._steps = steps
+        self.progress = 0.0
+        self.done = False
+        self.result: np.ndarray | None = None
+
+    def step(self) -> bool:
+        """Look at the next chunk; True once the search is done."""
+        if self.done:
+            return True
+        try:
+            self.progress = next(self._steps)
+        except StopIteration as finished:
+            self.result = finished.value
+            self.progress = 1.0
+            self.done = True
+        return self.done
+
+    def run(self) -> np.ndarray | None:
+        """Every remaining step at once; the result."""
+        while not self.step():
+            pass
+        return self.result
+
+
+class _CombinationIndex:
+    """
+    Each frame's (ID, name, channel, direction, length), numbered.
+
+    A text search with a space tests the text of each distinct combination
+    once instead of each frame's. The frames are numbered in order, a chunk
+    at a time, by the searches that need it; once all are, the numbers are a
+    file-backed column and every later search only looks them up. A search
+    left half way leaves the chunks it numbered, and the next continues.
+    """
+
+    def __init__(self, count: int, distinct_ids: np.ndarray) -> None:
+        self.count = count
+        self.distinct_ids = distinct_ids
+        # A key packs the frame's ID (or its rank among the distinct IDs, when
+        # an ID needs more than 30 bits) and direction in its upper half and
+        # name id, channel and length in its lower half.
+        self.ranked = bool(len(distinct_ids)) and int(distinct_ids[-1]) >= 1 << 30
+        self.keys: list[int] = []                         # each number's key
+        self._known = np.empty(0, dtype=np.uint64)        # keys, sorted
+        self._known_numbers = np.empty(0, dtype=np.uint32)
+        self._column = None                               # numbers so far
+        self._numbered = 0
+        self._numbers: np.ndarray | None = None           # all, once done
+
+    def numbers(self, store: 'RawFrameStore', start: int, end: int) -> np.ndarray:
+        """The number of each frame in ``[start, end)``."""
+        if self._numbers is not None:
+            return self._numbers[start:end]
+        keys = store._combination_keys(start, end, self.distinct_ids, self.ranked)
+        pos = np.searchsorted(self._known, keys)
+        if len(self._known):
+            np.minimum(pos, len(self._known) - 1, out=pos)
+            new = keys[self._known[pos] != keys]
+        else:
+            new = keys
+        if len(new):
+            new = np.unique(new)
+            self._known_numbers = np.concatenate([
+                self._known_numbers,
+                np.arange(len(self.keys), len(self.keys) + len(new), dtype=np.uint32),
+            ])
+            self.keys.extend(new.tolist())
+            self._known = np.concatenate([self._known, new])
+            order = np.argsort(self._known, kind='stable')
+            self._known = self._known[order]
+            self._known_numbers = self._known_numbers[order]
+            pos = np.searchsorted(self._known, keys)
+        numbers = self._known_numbers[pos]
+        if start == self._numbered:
+            from core.sample_file import AppendColumn
+
+            if self._column is None:
+                self._column = AppendColumn(np.uint32)
+            self._column.extend(numbers)
+            self._numbered = end
+            if end == self.count:
+                self._numbers = self._column.mapped()
+                self._column.close()
+                self._column = None
+        return numbers
+
+    def text(self, number: int, name_table) -> str:
+        """The frame text a number stands for, lower case."""
+        key = self.keys[number]
+        upper, lower = key >> 32, key & 0xFFFFFFFF
+        aid = int(self.distinct_ids[upper >> 2]) if self.ranked else upper >> 2
+        nid, ch, dlc = lower >> 16, (lower >> 8) & 0xFF, lower & 0xFF
+        ch_str = f'can {ch}' if ch != 255 else 'can ?'
+        name_str = (name_table[nid] if nid < len(name_table) else '').lower()
+        dir_str = _DIR_STRINGS[upper & 0x3].lower()
+        return f'{ch_str} {aid:x} {name_str} {dir_str} {dlc}'
+
+    def close(self) -> None:
+        if self._column is not None:
+            self._column.close()
+            self._column = None
+        self._numbers = None
 
 
 class RawFrameStore:
@@ -790,6 +905,12 @@ class RawFrameStore:
         if self._payload is not None:
             self._payload.close()
             self._payload = None
+        # The search's frame numbers are a temporary file as well.
+        index = getattr(self, '_combination_index', None)
+        if index is not None:
+            index.close()
+            self._combination_index = None
+        self._distinct_id_cache = None
         # The mapped columns hold their files open; empty ones let them go.
         for name, typecode in _COLUMN_TYPECODES:
             if not isinstance(getattr(self, name, None), _array.array):
@@ -942,8 +1063,26 @@ class RawFrameStore:
         distinct (ID, name, channel, direction, length) where it is about
         text: a log has a few hundred of those and millions of frames, so
         no Python runs per frame and no array holds one entry per frame
-        besides the matches.
+        besides the matches. A window searches a large store through
+        :meth:`search` instead, a chunk per step.
         """
+        return self.search(needle, channel_filter).run()
+
+    def search(
+        self,
+        needle: str,
+        channel_filter: BusChannel | int | None,
+    ) -> FrameSearch:
+        """:meth:`matching_indices`, worked out a chunk of frames per step."""
+        return FrameSearch(self._search_steps(needle, channel_filter))
+
+    def _check_unchanged(self, count: int) -> None:
+        # A store closed while a window searches it in steps has no frames.
+        if len(self.timestamps) != count:
+            raise RuntimeError('the measurement was closed')
+
+    def _search_steps(self, needle: str, channel_filter: BusChannel | int | None):
+        """Yield the share done after each chunk; return the indices."""
         n = len(self.timestamps)
         if n == 0:
             return np.zeros(0, dtype=np.int64)
@@ -965,41 +1104,69 @@ class RawFrameStore:
             on_channel = None
 
         if not needle:
-            return np.concatenate([
-                np.flatnonzero(on_channel(start, end)) + start for start, end in chunks
-            ]).astype(np.int64)
-
-        fields = self._field_test(needle.lower(), n)
-        found, any_field = [], False
-        for start, end in chunks:
-            matched = fields(start, end)
-            any_field = any_field or bool(matched.any())
-            if on_channel is not None:
-                matched &= on_channel(start, end)
-            found.append(np.flatnonzero(matched) + start)
-        if not any_field:
-            # No field matched anywhere: look in each frame's text instead.
-            text = self._text_test(needle.lower())
             found = []
-            for start, end in chunks:
-                matched = text(start, end)
-                if on_channel is not None:
-                    matched &= on_channel(start, end)
-                found.append(np.flatnonzero(matched) + start)
-        return np.concatenate(found).astype(np.int64)
+            for done, (start, end) in enumerate(chunks, 1):
+                self._check_unchanged(n)
+                found.append(np.flatnonzero(on_channel(start, end)) + start)
+                yield done / len(chunks)
+            return np.concatenate(found).astype(np.int64)
+
+        steps = len(chunks) * (1 if self._distinct_ids_known() else 2)
+        done = 0
+        for _ in self._distinct_id_steps():
+            done += 1
+            yield done / steps
+        needle = needle.lower()
+        fields = self._field_test(needle, n)
+        text = None
+        found, text_found, any_field = [], [], False
+        for start, end in chunks:
+            self._check_unchanged(n)
+            matched = fields(start, end)
+            if not any_field and matched.any():
+                any_field, text_found = True, []
+            chosen = on_channel(start, end) if on_channel is not None else None
+            if chosen is not None:
+                matched &= chosen
+            found.append(np.flatnonzero(matched) + start)
+            if not any_field:
+                # With no field matched anywhere, the needle is looked for in
+                # each frame's text instead; worked out alongside, so the
+                # search passes over the frames once.
+                if text is None:
+                    text = self._text_test(needle)
+                in_text = text(start, end)
+                if chosen is not None:
+                    in_text = in_text & chosen
+                text_found.append(np.flatnonzero(in_text) + start)
+            done += 1
+            yield done / steps
+        return np.concatenate(found if any_field else text_found).astype(np.int64)
+
+    def _distinct_ids_known(self) -> bool:
+        cached = getattr(self, '_distinct_id_cache', None)
+        return cached is not None and cached[0] == len(self.timestamps)
+
+    def _distinct_id_steps(self):
+        """Work out the sorted distinct arbitration IDs, a chunk per step."""
+        if self._distinct_ids_known():
+            return
+        n = len(self.timestamps)
+        parts = []
+        for start in range(0, n, _SEARCH_CHUNK):
+            self._check_unchanged(n)
+            aids = np.frombuffer(self.arb_ids, dtype=np.uint32)[start:start + _SEARCH_CHUNK]
+            parts.append(np.unique(aids))
+            del aids
+            yield
+        distinct = np.unique(np.concatenate(parts or [np.empty(0, dtype=np.uint32)]))
+        self._distinct_id_cache = (n, distinct)
 
     def _distinct_ids(self) -> np.ndarray:
         """The sorted distinct arbitration IDs, worked out once per store."""
-        cached = getattr(self, '_distinct_id_cache', None)
-        if cached is not None and cached[0] == len(self.timestamps):
-            return cached[1]
-        aids = np.frombuffer(self.arb_ids, dtype=np.uint32)
-        distinct = np.unique(np.concatenate([
-            np.unique(aids[start:start + _SEARCH_CHUNK])
-            for start in range(0, len(aids), _SEARCH_CHUNK)
-        ] or [np.empty(0, dtype=np.uint32)]))
-        self._distinct_id_cache = (len(self.timestamps), distinct)
-        return distinct
+        for _ in self._distinct_id_steps():
+            pass
+        return self._distinct_id_cache[1]
 
     def _field_test(self, needle_lower: str, n: int):
         """Return ``test(start, end) -> mask`` of the needle against each field."""
@@ -1098,49 +1265,38 @@ class RawFrameStore:
 
         return test
 
-    def _combinations(self) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Number each frame's (ID, name, channel, direction, length).
-
-        Returns ``(numbers, keys)``: a number per frame (a file-backed column)
-        and each number's packed key — ``id rank << 34 | name id << 18 |
-        channel << 10 | direction << 8 | length``. A log has a few thousand
-        combinations; worked out once per store, they turn every later text
-        search into a table lookup.
-        """
-        from core.sample_file import AppendColumn
-
+    def _numbering(self) -> _CombinationIndex:
+        """The frames' combination numbers, as far as searches have needed them."""
         n = len(self.timestamps)
-        cached = getattr(self, '_combination_cache', None)
-        if cached is not None and cached[0] == n:
-            return cached[1], cached[2]
-        distinct = self._distinct_ids()
-        numbers: dict[int, int] = {}
-        column = AppendColumn(np.uint32)
-        for start in range(0, n, _SEARCH_CHUNK):
-            end = min(n, start + _SEARCH_CHUNK)
-            aids = np.frombuffer(self.arb_ids, dtype=np.uint32)[start:end]
-            keys = (
-                (np.searchsorted(distinct, aids).astype(np.uint64) << np.uint64(34))
-                | (np.frombuffer(self.name_ids, dtype=np.uint16)[start:end].astype(np.uint64)
-                   << np.uint64(18))
-                | (np.frombuffer(self.channels, dtype=np.uint8)[start:end].astype(np.uint64)
-                   << np.uint64(10))
-                | (np.minimum(np.frombuffer(self.directions, dtype=np.uint8)[start:end], 2)
-                   .astype(np.uint64) << np.uint64(8))
-                | np.frombuffer(self.dlcs, dtype=np.uint8)[start:end].astype(np.uint64)
-            )
-            unique, inverse = np.unique(keys, return_inverse=True)
-            chunk_numbers = np.array(
-                [numbers.setdefault(key, len(numbers)) for key in unique.tolist()],
-                dtype=np.uint32,
-            )
-            column.extend(chunk_numbers[inverse.reshape(-1)])
-        frame_numbers = column.mapped()
-        column.close()
-        keys = np.fromiter(numbers, dtype=np.uint64, count=len(numbers))
-        self._combination_cache = (n, frame_numbers, keys)
-        return frame_numbers, keys
+        index = getattr(self, '_combination_index', None)
+        if index is None or index.count != n:
+            if index is not None:
+                index.close()
+            index = _CombinationIndex(n, self._distinct_ids())
+            self._combination_index = index
+        return index
+
+    def _combination_keys(self, start: int, end: int, distinct: np.ndarray,
+                          ranked: bool) -> np.ndarray:
+        """
+        Each frame's packed (ID, name, channel, direction, length):
+        ``(id << 2 | direction) << 32 | name id << 16 | channel << 8 |
+        length``, with the ID's rank among *distinct* for *ranked*. Packed in
+        32-bit halves, as four times cheaper than packing 64-bit fields.
+        """
+        aids = np.frombuffer(self.arb_ids, dtype=np.uint32)[start:end]
+        upper = (np.searchsorted(distinct, aids) if ranked else aids).astype(np.uint32)
+        upper <<= np.uint32(2)
+        upper |= np.minimum(np.frombuffer(self.directions, dtype=np.uint8)[start:end], 2)
+        lower = np.frombuffer(self.name_ids, dtype=np.uint16)[start:end].astype(np.uint32)
+        lower <<= np.uint32(16)
+        lower |= (np.frombuffer(self.channels, dtype=np.uint8)[start:end]
+                  .astype(np.uint32) << np.uint32(8))
+        lower |= np.frombuffer(self.dlcs, dtype=np.uint8)[start:end]
+        keys = upper.astype(np.uint64)
+        keys <<= np.uint64(32)
+        keys |= lower
+        return keys
 
     def _text_test(self, needle_lower: str):
         """
@@ -1150,26 +1306,23 @@ class RawFrameStore:
         A needle without a space cannot reach across the spaces between those
         fields, so it matches where it is in one of them: each field is tested
         over its few distinct values. A needle with a space is tested on the
-        text of each distinct combination of the five (_combinations), built
-        once per store, never per frame.
+        text of each distinct combination of the five (_CombinationIndex),
+        each combination once, never per frame.
         """
         distinct = self._distinct_ids()
         if ' ' not in needle_lower:
             return self._field_text_test(needle_lower, distinct)
-        frame_numbers, keys = self._combinations()
-        verdicts = np.zeros(len(keys), dtype=bool)
-        for number, key in enumerate(keys.tolist()):
-            rank, nid, ch, direction, dlc = (
-                key >> 34, (key >> 18) & 0xFFFF, (key >> 10) & 0xFF,
-                (key >> 8) & 0x3, key & 0xFF,
-            )
-            ch_str = f'can {ch}' if ch != 255 else 'can ?'
-            aid_str = f'{int(distinct[rank]):x}'
-            name_str = (self.name_table[nid] if nid < len(self.name_table) else '').lower()
-            dir_str = _DIR_STRINGS[direction].lower()
-            verdicts[number] = needle_lower in f'{ch_str} {aid_str} {name_str} {dir_str} {dlc}'
+        index = self._numbering()
+        verdicts = np.zeros(0, dtype=bool)
 
         def test(start, end):
-            return verdicts[frame_numbers[start:end]]
+            nonlocal verdicts
+            numbers = index.numbers(self, start, end)
+            if len(verdicts) < len(index.keys):
+                verdicts = np.concatenate([verdicts, np.array([
+                    needle_lower in index.text(number, self.name_table)
+                    for number in range(len(verdicts), len(index.keys))
+                ], dtype=bool)])
+            return verdicts[numbers]
 
         return test
