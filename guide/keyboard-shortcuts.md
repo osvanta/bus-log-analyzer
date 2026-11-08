@@ -1,12 +1,14 @@
 # Keyboard shortcuts
 
-**Help ▸ Keyboard shortcuts** shows the same list inside the application.
+**Help ▸ Keyboard shortcuts** (++ctrl+"/"++) shows the same list inside the
+application.
 
 ## The work, step by step
 
 | Key | Action |
 |---|---|
 | ++f1++ | Open this guide's Getting started page |
+| ++ctrl+"/"++ | Show the keyboard shortcuts |
 | ++ctrl+o++ | Open Measurement |
 | ++f9++ | Decode: read the measurement and decode it into signals |
 | ++ctrl+s++ | Save configuration |

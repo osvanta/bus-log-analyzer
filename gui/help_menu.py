@@ -5,24 +5,29 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-The top row's Help menu: the user guide, the keyboard shortcuts, the ways to
-reach the project, and About.
+The top row's Help menu: the user guide, the tutorial videos, the keyboard
+shortcuts, the ways to reach the project, and About.
 
 The user guide is a website built from guide/ in the repository and
 published on GitHub Pages. Its Getting started page opens from the menu and
-with F1.
+with F1. The tutorial videos are on the project's YouTube channel.
 
 The project is reached on GitHub: questions and ideas in its Discussions,
 problems and feature requests in its issues. A copy of the application keeps
 its links for as long as it is used, so they lead to pages that last: the
 guide's Getting started page, which mkdocs.yml says never to move, the
-Discussions front page rather than any one discussion, and the issue list.
+channel rather than any one video, the Discussions front page rather than any
+one discussion, and the issue list.
 
-The About dialog has the Discussions and issue links. The pages open in the
-web browser, and only when the user picks one.
+The About dialog has the video, Discussions and issue links. The pages open
+in the web browser, and only when the user picks one.
 
 The logs a problem report needs are in the user's own folder, which Explorer
 hides (gui/app_data.py), so the menu opens it.
+
+An entry that opens a web page ends in an arrow, so it is plain which entries
+leave the application: where browsing is blocked, those are the ones that do
+nothing. The keyboard shortcuts open with Ctrl+/, as the guide does with F1.
 """
 from __future__ import annotations
 
@@ -34,11 +39,19 @@ from gui import app_data, app_log
 
 GUIDE_URL = 'https://osvanta.github.io/bus-log-analyzer/'
 GETTING_STARTED_URL = GUIDE_URL + 'getting-started/'
+VIDEOS_URL = 'https://www.youtube.com/@osvanta'
 DISCUSSIONS_URL = 'https://github.com/osvanta/bus-log-analyzer/discussions'
 ISSUES_URL = 'https://github.com/osvanta/bus-log-analyzer/issues'
 
+# After the name of each entry that opens a page in the web browser.
+WEB_MARK = '↗'
+GUIDE_KEY = 'F1'
+SHORTCUTS_KEY = 'Ctrl+/'
+
 GUIDE_TEXT = 'Getting started'
 GUIDE_TIP = 'The user guide, in your web browser (F1)'
+VIDEOS_TEXT = 'Tutorial videos'
+VIDEOS_TIP = 'The tutorial videos on YouTube, in your web browser'
 ASK_TEXT = 'Ask a question or share an idea'
 ASK_TIP = 'How-to questions, ideas and anything else about the tool, on GitHub Discussions'
 REPORT_TEXT = 'Report a problem or request a feature'
@@ -74,20 +87,28 @@ class HelpMenu(QMenu):
         super().__init__('Help', parent)
         self.setToolTipsVisible(True)
         self.guide_action = self._add(GUIDE_TEXT, lambda: open_page(GETTING_STARTED_URL),
-                                      GUIDE_TIP)
-        # The window holds it too, so that F1 works while the menu is closed.
-        self.guide_action.setShortcut(QKeySequence('F1'))
+                                      GUIDE_TIP, web=True)
+        # The window holds the two keys too, so that they work while the menu
+        # is closed.
+        self.guide_action.setShortcut(QKeySequence(GUIDE_KEY))
+        self.videos_action = self._add(VIDEOS_TEXT, lambda: open_page(VIDEOS_URL), VIDEOS_TIP,
+                                       web=True)
         self.shortcuts_action = self._add('Keyboard shortcuts', self.shortcutsRequested.emit)
+        self.shortcuts_action.setShortcut(QKeySequence(SHORTCUTS_KEY))
         self.addSeparator()
-        self.ask_action = self._add(ASK_TEXT, lambda: open_page(DISCUSSIONS_URL), ASK_TIP)
-        self.report_action = self._add(REPORT_TEXT, lambda: open_page(ISSUES_URL), REPORT_TIP)
+        self.ask_action = self._add(ASK_TEXT, lambda: open_page(DISCUSSIONS_URL), ASK_TIP,
+                                    web=True)
+        self.report_action = self._add(REPORT_TEXT, lambda: open_page(ISSUES_URL), REPORT_TIP,
+                                       web=True)
         self.logs_action = self._add(LOGS_TEXT, open_log_folder, LOGS_TIP)
-        self.survey_action = self._add(SURVEY_TEXT, self.surveyRequested.emit, SURVEY_TIP)
+        # The window opens the survey in the web browser.
+        self.survey_action = self._add(SURVEY_TEXT, self.surveyRequested.emit, SURVEY_TIP,
+                                       web=True)
         self.addSeparator()
         self.about_action = self._add(f'About {app_name}', self.aboutRequested.emit)
 
-    def _add(self, text: str, slot, tip: str = '') -> QAction:
-        action = self.addAction(text)
+    def _add(self, text: str, slot, tip: str = '', web: bool = False) -> QAction:
+        action = self.addAction(f'{text}  {WEB_MARK}' if web else text)
         if tip:
             action.setToolTip(tip)
         action.triggered.connect(slot)

@@ -13,7 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 from gui.help_menu import (
-    DISCUSSIONS_URL, GETTING_STARTED_URL, GUIDE_URL, ISSUES_URL, HelpMenu,
+    DISCUSSIONS_URL, GETTING_STARTED_URL, GUIDE_URL, ISSUES_URL, VIDEOS_URL, WEB_MARK, HelpMenu,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -53,13 +53,14 @@ def _items(menu):
 
 def test_the_menu_holds_the_guide_the_ways_to_reach_us_and_about(menu):
     assert _items(menu) == [
-        'Getting started',
+        'Getting started  ↗',
+        'Tutorial videos  ↗',
         'Keyboard shortcuts',
         '---',
-        'Ask a question or share an idea',
-        'Report a problem or request a feature',
+        'Ask a question or share an idea  ↗',
+        'Report a problem or request a feature  ↗',
         'Open the log folder',
-        'Take the user survey',
+        'Take the user survey  ↗',
         '---',
         'About Osvanta Bus Log Analyzer',
     ]
@@ -67,6 +68,7 @@ def test_the_menu_holds_the_guide_the_ways_to_reach_us_and_about(menu):
 
 @pytest.mark.parametrize('action, url', [
     ('guide_action', GETTING_STARTED_URL),
+    ('videos_action', VIDEOS_URL),
     ('ask_action', DISCUSSIONS_URL),
     ('report_action', ISSUES_URL),
 ])
@@ -93,8 +95,10 @@ def test_the_log_folder_opens_where_the_running_log_is(menu, opened, monkeypatch
 
 def test_the_links_lead_to_pages_that_last():
     # A copy of the application keeps its links for as long as it is used:
-    # the Discussions front page rather than one discussion, and the issue list.
+    # the channel rather than one video, the Discussions front page rather
+    # than one discussion, and the issue list.
     assert GETTING_STARTED_URL == 'https://osvanta.github.io/bus-log-analyzer/getting-started/'
+    assert VIDEOS_URL == 'https://www.youtube.com/@osvanta'
     assert DISCUSSIONS_URL == 'https://github.com/osvanta/bus-log-analyzer/discussions'
     assert ISSUES_URL == 'https://github.com/osvanta/bus-log-analyzer/issues'
 
@@ -128,6 +132,8 @@ def test_the_window_shows_the_rest(menu, opened, action, signal):
 def test_the_links_say_where_they_lead(menu):
     assert menu.toolTipsVisible()
     assert 'web browser' in menu.guide_action.toolTip()
+    assert 'YouTube' in menu.videos_action.toolTip()
+    assert 'web browser' in menu.videos_action.toolTip()
     assert 'GitHub Discussions' in menu.ask_action.toolTip()
     assert 'GitHub' in menu.report_action.toolTip()
     assert 'minutes' in menu.survey_action.toolTip()
@@ -193,4 +199,60 @@ def test_f1_opens_getting_started(window, opened):
     QTest.keyClick(window, Qt.Key.Key_F1)
 
     opened.assert_called_once_with(QUrl(GETTING_STARTED_URL))
+    window.close()
+
+
+def test_the_entries_that_open_a_web_page_and_only_those_end_in_an_arrow(
+        window, opened, monkeypatch):
+    # Where browsing is blocked, the arrow tells the user which entries do
+    # nothing. Each entry is judged by what it does when picked.
+    from PySide6.QtWidgets import QDialog
+
+    monkeypatch.setattr(QDialog, 'exec', lambda dialog: 0)
+    marked = {}
+    for action in window.help_menu.actions():
+        if action.isSeparator():
+            continue
+        opened.reset_mock()
+        action.trigger()
+        web = any(call.args[0].scheme() == 'https' for call in opened.call_args_list)
+        marked[action.text()] = (action.text().endswith(f'  {WEB_MARK}'), web)
+
+    assert all(has_mark == web for has_mark, web in marked.values()), marked
+    assert sum(web for _, web in marked.values()) == 5
+
+
+def test_ctrl_slash_belongs_to_the_shortcuts_and_works_with_the_menu_closed(window):
+    from PySide6.QtGui import QAction, QKeySequence, QShortcut
+
+    key = QKeySequence('Ctrl+/')
+    action = window.help_menu.shortcuts_action
+    assert action.shortcut() == key
+    assert action in window.actions()
+    # A second shortcut on the same key would make Qt fire neither.
+    others = [a for a in window.findChildren(QAction) if a is not action and a.shortcut() == key]
+    assert others == []
+    assert all(s.key() != key for s in window.findChildren(QShortcut))
+    assert 'Ctrl + /' in dict(window._SHORTCUTS)
+
+
+def test_ctrl_slash_shows_the_shortcuts(window, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    shown = []
+    monkeypatch.setattr(QDialog, 'exec', lambda dialog: shown.append(dialog.windowTitle()) or 0)
+    window.show()
+    window.activateWindow()
+    QTest.qWaitForWindowActive(window, 2000)
+
+    QTest.keyClick(window, Qt.Key.Key_Slash, Qt.KeyboardModifier.ControlModifier)
+    # The click's own release leaves Ctrl down as far as the application
+    # knows, and later tests read it: a click in a MultiStack section then
+    # adds to the selection instead of replacing it.
+    QTest.keyRelease(window, Qt.Key.Key_Control)
+
+    assert shown == ['Keyboard Shortcuts']
+    assert QApplication.keyboardModifiers() == Qt.KeyboardModifier.NoModifier
     window.close()

@@ -12,7 +12,8 @@ The application's **Help** menu has both links, and **Help ▸ Take the user
 survey** asks what you use the tool for, in three or four minutes.
 
 - **Prefer to watch?** The tutorial videos are on
-  [YouTube](https://www.youtube.com/@osvanta).
+  [YouTube](https://www.youtube.com/@osvanta). **Help ▸ Tutorial videos** opens
+  them too.
 
 !!! warning "GitHub is public"
     Do not attach measurements, databases or screenshots you are not allowed to

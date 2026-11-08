@@ -24,9 +24,12 @@ describes.
 ## Network
 
 The application makes no network connection by itself. A few links open a web
-page in your default browser, and only when you click them:
+page in your default browser, and only when you click them. In the **Help** menu
+each of them ends in ↗:
 
 - **Help ▸ Getting started** (F1): this guide, on `osvanta.github.io`;
+- **Help ▸ Tutorial videos**, and the same link in **About**: the tutorial
+  videos, on YouTube;
 - **Help ▸ Ask a question or share an idea** and **Help ▸ Report a problem or
   request a feature**: GitHub;
 - **Help ▸ Take the user survey**, the survey link in **About**, and the survey

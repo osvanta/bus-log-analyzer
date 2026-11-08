@@ -95,12 +95,15 @@ def test_the_survey_link_asks_for_the_survey(dialog):
     assert requested == [True]
 
 
-@pytest.mark.parametrize("link, text, url", [
-    ("ask_link", "Ask a question", "https://github.com/osvanta/bus-log-analyzer/discussions"),
-    ("report_link", "Report a problem", "https://github.com/osvanta/bus-log-analyzer/issues"),
+@pytest.mark.parametrize("link, text, site, url", [
+    ("videos_link", "Tutorial videos", "YouTube", "https://www.youtube.com/@osvanta"),
+    ("ask_link", "Ask a question", "GitHub",
+     "https://github.com/osvanta/bus-log-analyzer/discussions"),
+    ("report_link", "Report a problem", "GitHub",
+     "https://github.com/osvanta/bus-log-analyzer/issues"),
 ])
-def test_the_project_links_open_their_pages(dialog, monkeypatch, link, text, url):
-    """The same ways to reach the project as the Help menu."""
+def test_the_project_links_open_their_pages(dialog, monkeypatch, link, text, site, url):
+    """The tutorial videos and the ways to reach the project, as in the Help menu."""
     from unittest.mock import Mock
 
     from PySide6.QtCore import QUrl
@@ -113,7 +116,7 @@ def test_the_project_links_open_their_pages(dialog, monkeypatch, link, text, url
 
     label = getattr(dialog, link)
     assert text in label.text()
-    assert "GitHub" in label.toolTip()
+    assert site in label.toolTip()
     label.linkActivated.emit("#")
 
     opened.assert_called_once_with(QUrl(url))
@@ -125,8 +128,14 @@ def test_the_links_sit_left_of_close_in_the_help_menus_order(dialog):
 
     dialog.show()
     close = next(b for b in dialog.findChildren(QPushButton) if b.text() == "Close")
-    links = [dialog.ask_link, dialog.report_link, dialog.survey_link]
+    links = [dialog.videos_link, dialog.ask_link, dialog.report_link, dialog.survey_link]
+    layout = dialog.layout()
+    row = next(layout.itemAt(i).layout() for i in range(layout.count())
+               if layout.itemAt(i).layout() is not None)
 
+    # In the row with Close, not merely in the dialog.
+    assert [row.indexOf(link) for link in links] == sorted(row.indexOf(link) for link in links)
+    assert row.indexOf(links[0]) >= 0
     assert [link.x() for link in links] == sorted(link.x() for link in links)
     assert dialog.survey_link.geometry().right() < close.x()
 
