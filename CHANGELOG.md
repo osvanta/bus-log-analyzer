@@ -4,6 +4,24 @@
 > repository moved to `github.com/osvanta/bus-log-analyzer`. Releases up to and
 > including v00.00.60 were published as **CAN Scope / CANScope**; the entries below
 > use the names in force at the time of each release.
+## [v00.02.03] — 2026-11-08: tabs of plots, data tools, PEAK trace files and steadier large measurements
+
+- **Added:** tabs of plots. Each tab keeps its own signals and plot mode; signals can be dropped on a tab or moved to it, and configurations keep every tab.
+- **Added:** data tools: Min, Max, Mean, RMS, Std dev and Δ columns in the signal table, a Table view beside the plot, Measurement info, export to MF4 and Tools ▸ Convert files.
+- **Added:** plot markers (M): named, dragged, jumped to, deleted one by one or all at once, and kept in configurations.
+- **Added:** in the Trace, Δt since the previous frame with the same ID, changed bytes in bold, and Follow Cursor 1.
+- **Added:** an Insert function window for calculated signals (Shift+F3), and a clearer calculated signal dialog.
+- **Added:** PEAK trace files (.trc), versions 1.0 to 3.0.
+- **Added:** right-click a signal ▸ Properties; a Hex column with the value at Cursor 1; in MultiStack, each stack has its own part of the signal table.
+- **Added:** closing asks to save the configuration, and the last session is offered at the next start.
+- **Added:** Help ▸ Tutorial videos, Help ▸ Open the log folder, and Ctrl+/ for the keyboard shortcuts.
+- **Changed:** Step Mode is the default; the signal and log panels are shown and hidden from the handle on their edge; logs and settings are kept per user.
+- **Fixed:** the same frames decode alike in MF4, BLF, ASC, TRC and CSV: value tables give physical values and the right labels, a short frame gives only the signals that fit, and error and remote frames are no longer decoded as messages.
+- **Fixed:** signal groups turn their arrow, drag whole and take a colour; Refresh Match follows the database assignment.
+- **Faster:** large measurements: a CSV loads in bounded memory, a large MF4 group is read once, the Trace searches without freezing the window, and converting to MF4 is about 30 times faster.
+- **Fixed:** large measurements need less memory and temporary disk space, and a formula too large for the free memory is refused instead of exhausting the PC.
+- **Changed:** each release comes with a software bill of materials and SHA-256 checksums, and is built from hash-locked dependencies.
+
 ## [v00.02.02] — 2026-10-22: measurements of many gigabytes load without running out of memory
 
 - **Fixed:** a very large measurement no longer runs out of memory. Pre-decoded MF4/MDF, BLF, ASC and bus-logging MF4 files of many gigabytes load in memory that does not grow with the file.
