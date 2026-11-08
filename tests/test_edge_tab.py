@@ -11,7 +11,8 @@ Each is a small flat handle in the window's own colours, lying in the gap
 between its panel and the plot area, so it follows the light or dark theme
 and covers neither the plot area's cursor line and table nor the panel. Its
 chevron points the way the panel moves on a click. They were fixed navy
-buttons laid over the window, on top of the cursor line.
+buttons laid over the window, on top of the cursor line. They are the only
+way to hide and show the panels: the panels' title rows have no button.
 """
 from __future__ import annotations
 
@@ -52,6 +53,57 @@ def test_handle_is_drawn_in_the_window_colours(qapp, window, text):
     image = tab.grab().toImage()
     body = image.pixelColor(image.width() // 5, image.height() // 2)
     assert abs(body.lightness() - fill.lightness()) <= 2
+
+
+def _chevron_stroke_width(tab) -> float:
+    """The chevron's ink inside the outline, divided by its length: about
+    the width of its stroke, in pixels. Its round caps and soft edges add a
+    little: a 1.5 px pen reads 1.7, a 2.2 px pen 2.5."""
+    import math
+
+    image = tab.grab().toImage()
+    fill, _border, chevron = tab.colors()
+    low, high = fill.lightnessF(), chevron.lightnessF()
+    w, h = image.width(), image.height()
+    end = min(w, h) // 2 + 1      # past the rounded ends, where the outline curves
+    xs = range(end, w - end) if w > h else range(2, w - 2)
+    ys = range(2, h - 2) if w > h else range(end, h - end)
+    ink = sum(max(0.0, min(1.0, (image.pixelColor(x, y).lightnessF() - low) / (high - low)))
+              for y in ys for x in xs)
+    return ink / (2 * math.hypot(4, 4))   # two strokes, each four across and four along
+
+
+@pytest.mark.parametrize('window, text', [('#f3f3f3', '#000000'), ('#202020', '#ffffff')],
+                         ids=['light', 'dark'])
+@pytest.mark.parametrize('orientation, arrows', [
+    ('Horizontal', ('DownArrow', 'UpArrow')),
+    ('Vertical', ('LeftArrow', 'RightArrow')),
+], ids=['under-the-plot', 'beside-the-panel'])
+def test_chevron_is_bold_in_a_clear_outline(qapp, window, text, orientation, arrows):
+    """The owner found the handle under the plot too faint: its chevron was
+    a 1.5 px line at 70 % of the text colour, in an outline at 28 %."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+    from gui.edge_tab import EdgeTab
+
+    tab = EdgeTab(getattr(Qt.Orientation, orientation))
+    tab.setPalette(_palette(window, text))
+    _fill, border, chevron = tab.colors()
+
+    def share_of_text(color):
+        return (abs(color.lightness() - QColor(window).lightness())
+                / abs(QColor(text).lightness() - QColor(window).lightness()))
+
+    assert share_of_text(chevron) >= 0.8
+    assert share_of_text(border) >= 0.35
+    # The outline is drawn in that colour.
+    image = tab.grab().toImage()
+    along = (image.width() // 2, 0) if orientation == 'Horizontal' else (0, image.height() // 2)
+    assert abs(image.pixelColor(*along).lightness() - border.lightness()) <= 3
+
+    for arrow in arrows:
+        tab.set_arrow(getattr(Qt.ArrowType, arrow))
+        assert _chevron_stroke_width(tab) >= 2.0, arrow
 
 
 def test_handle_lies_along_its_edge_and_points_where_it_is_told(qapp):
@@ -171,3 +223,15 @@ def test_handles_bring_their_panels_back(qapp, window):
     _click(qapp, window.bottom_edge_btn)
     _click(qapp, window.left_edge_btn)
     assert window.bottom_dock.isVisible() and window.left_dock.isVisible()
+
+
+def test_panel_title_rows_carry_only_the_panel_name(window):
+    """The handles are the one way to hide and show a panel: the "◀" and "▼"
+    buttons at the right end of the title rows did the same and were removed."""
+    from PySide6.QtWidgets import QAbstractButton, QLabel
+
+    for dock, name in ((window.left_dock, 'Decoded Signals'),
+                       (window.bottom_dock, 'Log / Diagnostics / Measurement')):
+        title = dock.titleBarWidget()
+        assert [label.text() for label in title.findChildren(QLabel)] == [name]
+        assert title.findChildren(QAbstractButton) == []

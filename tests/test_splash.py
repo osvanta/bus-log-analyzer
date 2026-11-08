@@ -82,6 +82,33 @@ def test_render_does_not_mutate_the_cached_artwork(splash):
     assert splash._base_pixmap.toImage() == before
 
 
+def test_version_is_big_and_heavy_enough_to_read(splash, monkeypatch):
+    """The owner found the version number hard to read: it was 13 pt light,
+    cut to whole points after scaling, so 6 pt on a laptop screen.
+
+    The fonts are read as the render sets them, since the test platform has
+    no Segoe UI to measure drawn glyphs with.
+    """
+    import gui.splash as splash_module
+    from PySide6.QtGui import QFont, QPainter
+
+    fonts: list[QFont] = []
+
+    class RecordingPainter(QPainter):
+        def setFont(self, font):
+            fonts.append(QFont(font))
+            super().setFont(font)
+
+    monkeypatch.setattr(splash_module, 'QPainter', RecordingPainter)
+    splash.set_status('Loading UI components...')
+
+    version_fonts = [font for font in fonts if font.family() == 'Segoe UI']
+    assert len(version_fonts) == 1
+    font = version_fonts[0]
+    assert font.pointSizeF() >= 16 * splash._scale
+    assert font.weight().value >= QFont.Weight.DemiBold.value
+
+
 def test_the_splash_shows_without_waiting(qapp):
     """Regression: the splash was a QSplashScreen, whose show() waited about
     a second for its window to be reported exposed. Start-up waited with it,

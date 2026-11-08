@@ -59,7 +59,13 @@ _VER_MARGIN = 18       # pixels from right / bottom edges
 # Status text appearance
 _STATUS_FONT_SIZE = 22  # pt
 _STATUS_COLOR     = QColor('#a0c8ff')  # light blue — matches splash palette
-_VERSION_COLOR    = QColor('#6090b0')  # muted blue-grey
+
+# Version text appearance: a heavier weight and a size near the artwork's own
+# web address line, so it reads at a glance. It was 13 pt light, which came
+# out at 6 pt on a laptop screen.
+_VERSION_FONT_SIZE = 17  # pt, at the image's full size
+_VERSION_WEIGHT    = QFont.Weight.DemiBold
+_VERSION_COLOR     = QColor('#6090b0')  # muted blue-grey
 
 
 class SplashScreen(QLabel):
@@ -182,8 +188,9 @@ class SplashScreen(QLabel):
 
         # ── Version overlay — bottom-right corner ─────────────────────────
         if self._version:
-            ver_font = QFont('Segoe UI', int(13 * s))
-            ver_font.setWeight(QFont.Weight.Light)
+            ver_font = QFont('Segoe UI')
+            ver_font.setPointSizeF(_VERSION_FONT_SIZE * s)
+            ver_font.setWeight(_VERSION_WEIGHT)
             painter.setFont(ver_font)
             painter.setPen(_VERSION_COLOR)
             margin = int(_VER_MARGIN * s)

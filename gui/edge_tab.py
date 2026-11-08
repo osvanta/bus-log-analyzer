@@ -39,8 +39,12 @@ class EdgeTab(QAbstractButton):
     _FILL = 0.06
     _FILL_HOVER = 0.14
     _FILL_DOWN = 0.22
-    _BORDER = 0.28
-    _CHEVRON = 0.7
+    _BORDER = 0.4
+    _CHEVRON = 0.85
+
+    # Line widths, in logical pixels: a bold chevron in a clear outline.
+    _BORDER_WIDTH = 1.0
+    _CHEVRON_WIDTH = 2.2
 
     def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -92,11 +96,11 @@ class EdgeTab(QAbstractButton):
 
         body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         radius = min(body.width(), body.height()) / 2
-        painter.setPen(QPen(border, 1))
+        painter.setPen(QPen(border, self._BORDER_WIDTH))
         painter.setBrush(fill)
         painter.drawRoundedRect(body, radius, radius)
 
-        pen = QPen(chevron, 1.5)
+        pen = QPen(chevron, self._CHEVRON_WIDTH)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)

@@ -655,15 +655,13 @@ class MainWindow(QMainWindow):
 
         self.resizeDocks([self.bottom_dock], [180], Qt.Orientation.Vertical)
 
+        # Each panel's title row carries its name only: the handle on the
+        # panel's edge (below) shows and hides it.
         left_title = QWidget()
         left_title_layout = QHBoxLayout(left_title)
         left_title_layout.setContentsMargins(4, 2, 4, 2)
         left_title_layout.addWidget(QLabel('Decoded Signals'))
         left_title_layout.addStretch(1)
-        self.left_toggle_btn = QToolButton()
-        self.left_toggle_btn.setText('◀')
-        self.left_toggle_btn.clicked.connect(self._toggle_left_panel)
-        left_title_layout.addWidget(self.left_toggle_btn)
         self.left_dock.setTitleBarWidget(left_title)
 
         bottom_title = QWidget()
@@ -671,10 +669,6 @@ class MainWindow(QMainWindow):
         bottom_title_layout.setContentsMargins(4, 2, 4, 2)
         bottom_title_layout.addWidget(QLabel('Log / Diagnostics / Measurement'))
         bottom_title_layout.addStretch(1)
-        self.bottom_toggle_btn = QToolButton()
-        self.bottom_toggle_btn.setText('▼')
-        self.bottom_toggle_btn.clicked.connect(self._toggle_bottom_panel)
-        bottom_title_layout.addWidget(self.bottom_toggle_btn)
         self.bottom_dock.setTitleBarWidget(bottom_title)
 
         self.left_dock.visibilityChanged.connect(self._sync_panel_toggle_buttons)
@@ -3580,8 +3574,6 @@ class MainWindow(QMainWindow):
     def _sync_panel_toggle_buttons(self) -> None:
         left_visible = self.left_dock.isVisible()
         bottom_visible = self.bottom_dock.isVisible()
-        self.left_toggle_btn.setText('◀' if left_visible else '▶')
-        self.bottom_toggle_btn.setText('▼' if bottom_visible else '▲')
         self.left_edge_btn.setToolTip(
             'Hide the signal panel' if left_visible else 'Show the signal panel')
         self.bottom_edge_btn.setToolTip(
