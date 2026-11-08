@@ -544,6 +544,10 @@ class RawFrameDialog(QDialog):
         self.tree.setUpdatesEnabled(False)
         self._following = True          # clearing moves the current item
         try:
+            # With a current row, clear() took 10 s for the 5,000 rows
+            # instead of 0.02 s, and a search, a Follow Cursor 1 step and the
+            # finished Δt index all redraw with a row selected.
+            self.tree.selectionModel().clear()
             self.tree.clear()
             self.tree.insertTopLevelItems(0, top_items)
         finally:

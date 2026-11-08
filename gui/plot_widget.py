@@ -1161,6 +1161,9 @@ class PlotPanel(QWidget):
         # loaded before the measurement finishes decoding, so the style has to
         # survive until add_series() sees the key. Entries are consumed on use.
         self._pending_line_styles: dict[str, str] = {}
+        # Colours waiting the same way, for the signals of a saved tab: given
+        # as each is added, the table is not refreshed once per signal.
+        self._pending_colors: dict[str, str] = {}
         self._cursor1_enabled: bool = True   # MainWindow syncs it to its Cursor 1 button
         # Signal name display flags (default: signal name only)
         self._name_show_channel: bool = False
@@ -2073,7 +2076,10 @@ class PlotPanel(QWidget):
             return
         if not self._batch_mode:
             self._push_undo()
-        color = color or next(self._color_cycle)
+        # A queued colour takes the place of the next one, which is still used
+        # up, so the signals added after it get the colours they always got.
+        default = next(self._color_cycle) if color is None else None
+        color = color or self._pending_colors.pop(key, None) or default
         was_empty = not self._items
         multistack_id = self._next_multistack_id() if self._multistack_mode else -1
         self._items[key] = PlottedSignal(
@@ -4027,6 +4033,12 @@ class PlotPanel(QWidget):
             str(key): normalise_line_style(style)
             for key, style in (styles or {}).items()
         }
+
+    def set_pending_colors(self, colors: dict[str, str]) -> None:
+        """Queue colours for series that are not plotted yet, as
+        set_pending_line_styles does line styles. Replaces any previous queue;
+        each entry is consumed once."""
+        self._pending_colors = {str(key): str(color) for key, color in (colors or {}).items()}
 
     def set_background_color(self, color: str) -> None:
         self._background_color = color

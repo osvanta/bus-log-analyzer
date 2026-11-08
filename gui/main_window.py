@@ -57,7 +57,9 @@ from core.calculated_signals import (
     CalculatedSignalError,
     CalculatedSignalManager,
     ImportReport,
+    available_memory,
     build_time_signal,
+    estimate_peak_bytes,
     formula_references,
     parse_formula,
 )
@@ -259,6 +261,9 @@ class MainWindow(QMainWindow):
             tuple[CalculatedSignalDefinition, str, bool, dict | None]
         ] = []
         self._calc_source_store: SignalStore | None = None
+        # Calculated signals that could not be recalculated by themselves (for
+        # a tab or a configuration), as (name, reason), told in one message.
+        self._skipped_calculations: list[tuple[str, str]] = []
         # Generated signals calculated since the queue was last empty, to plot
         # or redraw together once it empties. A plot rebuild recreates every
         # row, so one per finished signal made restoring them after Load +
@@ -1499,6 +1504,13 @@ class MainWindow(QMainWindow):
             key = str(entry['key'])
             if self.calculated_signals.contains_key(key) and key not in panel._items:
                 self._keep_generated_look(key, entry)
+        # Coloured as they are added: one colour at a time afterwards
+        # refreshed the table, the Table view and the markers once per signal,
+        # 4 of the 8 s that ten saved tabs took to load.
+        panel.set_pending_colors({
+            str(entry['key']): str(entry['color'])
+            for entry in entries if entry.get('color') and str(entry['key']) not in panel._items
+        })
         self.add_signals_to_plot([str(entry['key']) for entry in entries])
         needs_rebuild = False
         for entry in entries:
@@ -1507,26 +1519,23 @@ class MainWindow(QMainWindow):
             if plotted is None:
                 continue
             self._drop_generated_look(key)
-            if entry.get('color'):
+            if entry.get('color') and plotted.color != str(entry['color']):
                 panel.set_series_color(key, str(entry['color']))
             # Already plotted, so the panel's queue never saw it.
             if entry.get('line_style'):
                 panel.set_series_line_style(key, str(entry['line_style']))
-            if 'visible' in entry:
-                plotted.visible = bool(entry['visible'])
-                needs_rebuild = True
-            if entry.get('group'):
-                plotted.group = str(entry['group'])
-                needs_rebuild = True
-            if 'axis_visible' in entry:
-                plotted.axis_visible = bool(entry['axis_visible'])
-                needs_rebuild = True
-            if 'own_axis' in entry:
-                plotted.own_axis = bool(entry['own_axis'])
-                needs_rebuild = True
-            if 'multistack_id' in entry:
-                plotted.multistack_id = int(entry['multistack_id'])
-                needs_rebuild = True
+            # Only a change needs the tab rebuilt a second time.
+            for name, value in (
+                    ('visible', bool(entry['visible']) if 'visible' in entry else None),
+                    ('group', str(entry['group']) if entry.get('group') else None),
+                    ('axis_visible',
+                     bool(entry['axis_visible']) if 'axis_visible' in entry else None),
+                    ('own_axis', bool(entry['own_axis']) if 'own_axis' in entry else None),
+                    ('multistack_id',
+                     int(entry['multistack_id']) if 'multistack_id' in entry else None)):
+                if value is not None and getattr(plotted, name) != value:
+                    setattr(plotted, name, value)
+                    needs_rebuild = True
         if needs_rebuild:
             panel._rebuild_curves(preserve_selection=False)
 
@@ -1591,11 +1600,32 @@ class MainWindow(QMainWindow):
         self.plot_tabs.forget_shared_time()
 
     def _release_store(self) -> None:
-        """Drop the decoded measurement and close the file its signals read."""
+        """Drop the decoded measurement and close its files: the measurement
+        its signals read, and the temporary ones of its samples and of the
+        CAN Trace."""
+        self._close_trace_window()
         store, self.store = self.store, None
         close = getattr(store, 'close', None)
         if close is not None:
             close()
+        frames = getattr(store, 'raw_frame_store', None)
+        if frames is not None:
+            frames.close()
+
+    def _close_trace_window(self) -> None:
+        """Close the Trace window and let it go. Closed, it is still this
+        window's child, and the frames it shows kept the measurement's
+        temporary files on disk until the application ended: 6 GB for a
+        3 GB BLF."""
+        dialog, self._raw_frame_dialog = self._raw_frame_dialog, None
+        if dialog is None:
+            return
+        try:
+            self.plotCursor1Moved.disconnect(dialog.follow_time)
+        except (RuntimeError, TypeError):
+            pass
+        dialog.close()
+        dialog.deleteLater()
 
     def _reset_for_new_measurement(self) -> None:
         """Remove decoded and plotted state belonging to the previous file."""
@@ -1875,6 +1905,7 @@ class MainWindow(QMainWindow):
             ) if self.store else 'Load a measurement file first.'
             QMessageBox.information(self, 'Trace unavailable', reason)
             return
+        self._close_trace_window()
         self._raw_frame_dialog = RawFrameDialog(rfs, self, settings_path=self._user_settings_path)
         # Picking a frame places a cursor there; Cursor 1 brings its frame into view.
         self._raw_frame_dialog.timeClicked.connect(self._place_cursor1)
@@ -2236,7 +2267,32 @@ class MainWindow(QMainWindow):
                     if (series := self.store.get_series(key)) is not None
                 )
         except CalculatedSignalError as exc:
-            QMessageBox.warning(self, "Invalid calculated signal", str(exc))
+            if operation == "lazy":
+                # Asked for by a tab or a configuration, not by the user just
+                # now: a measurement without the inputs of ten formulas gave
+                # ten boxes to click.
+                self._note_skipped_calculation(definition.name, str(exc))
+            else:
+                QMessageBox.warning(self, "Invalid calculated signal", str(exc))
+            return
+
+        # A formula on `Time` alone over a 5 GB log needed more memory than
+        # the PC had free, and one Yes took it to its limit: refused instead.
+        needed = estimate_peak_bytes(estimated_points,
+                                     time_only=parsed.references == (TIME_SIGNAL_KEY,))
+        free = available_memory()
+        if free is not None and needed > free:
+            reason = (f"it would need about {needed / 1e9:.1f} GB of memory and "
+                      f"{free / 1e9:.1f} GB is free")
+            if operation == "lazy":
+                self._note_skipped_calculation(definition.name, reason)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Calculated signal too large",
+                    f"{definition.name} cannot be calculated: {reason}.\n\n"
+                    "Use fewer or shorter signals, or close other programs and try again.",
+                )
             return
 
         if estimated_points > LARGE_OUTPUT_WARNING_POINTS:
@@ -2244,7 +2300,9 @@ class MainWindow(QMainWindow):
                 self,
                 "Large calculated signal",
                 f"This calculation may produce up to {estimated_points:,} samples and "
-                "may require substantial RAM.\n\nContinue?",
+                f"needs about {needed / 1e9:.1f} GB of memory"
+                + (f" ({free / 1e9:.1f} GB is free)" if free is not None else "")
+                + ".\n\nContinue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -2256,6 +2314,29 @@ class MainWindow(QMainWindow):
         self._calc_queue.append((definition, operation, plot_after, None))
         if self._calc_thread is None:
             self._dispatch_next_calculation()
+
+    def _note_skipped_calculation(self, name: str, reason: str) -> None:
+        """Log a calculated signal that could not be recalculated, and tell
+        the user once, about all of them, when the event loop next runs."""
+        self._log(f'Calculated signal not calculated: {name}: {reason}')
+        if not self._skipped_calculations:
+            QTimer.singleShot(0, self._report_skipped_calculations)
+        self._skipped_calculations.append((name, reason))
+
+    def _report_skipped_calculations(self) -> None:
+        skipped, self._skipped_calculations = self._skipped_calculations, []
+        if not skipped or self._closing:
+            return
+        shown = 12
+        lines = '\n'.join(f'• {name}: {reason}' for name, reason in skipped[:shown])
+        if len(skipped) > shown:
+            lines += f'\n… and {len(skipped) - shown} more (see the Log)'
+        QMessageBox.warning(
+            self,
+            'Calculated signals not calculated',
+            f'{len(skipped)} calculated signal(s) could not be calculated for this '
+            f'measurement:\n\n{lines}',
+        )
 
     def _dispatch_next_calculation(self) -> None:
         if self._closing:

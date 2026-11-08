@@ -21,7 +21,45 @@ from core.signal_store import SignalSeries
 GENERATED_GROUP = "Generate Signals"
 TIME_SIGNAL_KEY = "Time"
 LARGE_OUTPUT_WARNING_POINTS = 5_000_000
+# Peak memory of a calculation per estimated sample, measured with tracemalloc
+# on a CAN log: about 60 B for a formula on signals, whose grid is the union of
+# their samples, and 19 B for one on `Time` alone, whose grid of every decoded
+# time base repeats most of its stamps. A little above both, to be safe.
+BYTES_PER_POINT = 64
+TIME_ONLY_BYTES_PER_POINT = 24
 _REFERENCE_RE = re.compile(r"`([^`]+)`")
+
+
+def estimate_peak_bytes(points: int, time_only: bool = False) -> int:
+    """Memory a calculation over *points* estimated samples needs at its peak."""
+    return points * (TIME_ONLY_BYTES_PER_POINT if time_only else BYTES_PER_POINT)
+
+
+def available_memory() -> int | None:
+    """Physical memory free for use now, in bytes; None where it is unknown."""
+    try:
+        import ctypes
+
+        class _MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatus()
+        status.dwLength = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullAvailPhys)
+    except (AttributeError, OSError):
+        pass
+    try:
+        import os
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
+    except (AttributeError, ValueError, OSError):
+        return None
 
 
 class CalculatedSignalError(ValueError):
