@@ -15,7 +15,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from core.signal_store import SignalSeries
+from core.signal_store import SignalSeries, physical_memory
 
 
 GENERATED_GROUP = "Generate Signals"
@@ -37,29 +37,7 @@ def estimate_peak_bytes(points: int, time_only: bool = False) -> int:
 
 def available_memory() -> int | None:
     """Physical memory free for use now, in bytes; None where it is unknown."""
-    try:
-        import ctypes
-
-        class _MemoryStatus(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-
-        status = _MemoryStatus()
-        status.dwLength = ctypes.sizeof(status)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return int(status.ullAvailPhys)
-    except (AttributeError, OSError):
-        pass
-    try:
-        import os
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
-    except (AttributeError, ValueError, OSError):
-        return None
+    return physical_memory()[1] or None
 
 
 class CalculatedSignalError(ValueError):
