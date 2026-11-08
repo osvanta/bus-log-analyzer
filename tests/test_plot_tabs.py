@@ -433,3 +433,41 @@ def test_a_name_a_fraction_of_a_pixel_wide_still_fits(qapp, window, monkeypatch)
     name = bar.style().subElementRect(QStyle.SubElement.SE_TabBarTabText, option, bar)
 
     assert name.width() >= QFontMetricsF(bar.font()).horizontalAdvance('Drive')
+
+
+def _gap_to_add_button(window) -> int:
+    """Pixels between the last tab's end and the "+" button."""
+    tabs = window.plot_tabs
+    last = tabs.bar.tabRect(tabs.bar.count() - 1)
+    return tabs.add_button.x() - (tabs.bar.x() + last.right() + 1)
+
+
+def test_the_new_tab_button_sits_beside_a_single_tab(qapp, window):
+    """Qt kept the bar 127 px wide for its scroll arrows, so "+" stood 75 px
+    from a lone tab; with two or more tabs it stood right beside them."""
+    spacing = window.plot_tabs.strip.layout().spacing()
+    assert _gap_to_add_button(window) == spacing
+    window.plot_tabs.bar.setTabText(0, 'A')       # a shorter tab still
+    qapp.processEvents()
+    assert _gap_to_add_button(window) == spacing
+    _new_tab(qapp, window)
+    assert _gap_to_add_button(window) == spacing
+
+
+def test_more_tabs_than_fit_still_scroll(qapp, window):
+    from PySide6.QtWidgets import QTabBar, QToolButton
+
+    window.resize(900, 700)
+    for _ in range(29):
+        window.plot_tabs.add_tab()
+    qapp.processEvents()
+    bar = window.plot_tabs.bar
+    # Never more room than Qt itself asks: the window stays as narrow as it was.
+    assert bar.minimumSizeHint().width() <= QTabBar.minimumSizeHint(bar).width()
+    assert window.width() == 900
+    assert bar.width() < bar.sizeHint().width()
+    arrows = [b for b in bar.findChildren(QToolButton) if b.isVisible()]
+    assert len(arrows) == 2
+    add = window.plot_tabs.add_button
+    assert add.isVisible()
+    assert add.geometry().right() <= window.plot_tabs.strip.width()

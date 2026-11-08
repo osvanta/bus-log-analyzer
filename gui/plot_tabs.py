@@ -511,6 +511,15 @@ class _TabBar(QTabBar):
             width += TAB_PADDING
         return QSize(width, TAB_HEIGHT)
 
+    def minimumSizeHint(self) -> QSize:
+        # Qt keeps room for its scroll arrows, 127 px, even beside one short
+        # tab, which left "+" 75 px away from it. No wider than its tabs, the
+        # bar keeps "+" beside the last tab; once the tabs are wider than
+        # Qt's minimum, they scroll as before.
+        size = super().minimumSizeHint()
+        size.setWidth(min(size.width(), self.sizeHint().width()))
+        return size
+
     def setTabsClosable(self, closable: bool) -> None:
         """Give every tab its small "x", or take them away. QTabBar's own
         close buttons are left out: they are as large as the name."""
