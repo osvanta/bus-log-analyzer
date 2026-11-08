@@ -114,13 +114,14 @@ The portable build and CI release build use Python 3.12.
 6. In the **File** menu, select **Save configuration** to preserve the session, or **Export plotted signals** to write them to CSV, Excel or MF4.
 7. Open the **Trace** when the source contains raw CAN or LIN frames.
 8. The **Tools** menu converts, joins and cuts measurement files, open or not.
-9. The **Help** menu has Getting started (`F1`), the keyboard shortcuts, GitHub Discussions for questions and ideas, GitHub issues for problems and feature requests, the log folder, the user survey, and About.
+9. The **Help** menu has Getting started (`F1`), the tutorial videos, the keyboard shortcuts (`Ctrl+/`), GitHub Discussions for questions and ideas, GitHub issues for problems and feature requests, the log folder, the user survey, and About.
 
 ## Keyboard shortcuts
 
 | Key | Action |
 |---|---|
 | `F1` | Getting started, in the user guide |
+| `Ctrl+/` | Keyboard shortcuts |
 | `Ctrl+O` | Open Measurement |
 | `F9` | Decode |
 | `Ctrl+S` | Save configuration |

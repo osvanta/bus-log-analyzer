@@ -127,8 +127,12 @@ class AboutDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         close_btn.setDefault(True)
 
-        # The ways to reach the project, as in the Help menu. The survey link
-        # stays however its request was answered: see gui.survey_prompt.
+        # The tutorial videos and the ways to reach the project, as in the Help
+        # menu. The survey link stays however its request was answered: see
+        # gui.survey_prompt.
+        self.videos_link = self._link(help_menu.VIDEOS_TEXT, help_menu.VIDEOS_TIP)
+        self.videos_link.linkActivated.connect(
+            lambda _link: help_menu.open_page(help_menu.VIDEOS_URL))
         self.ask_link = self._link(help_menu.ASK_TEXT, help_menu.ASK_TIP)
         self.ask_link.linkActivated.connect(
             lambda _link: help_menu.open_page(help_menu.DISCUSSIONS_URL))
@@ -139,8 +143,8 @@ class AboutDialog(QDialog):
         self.survey_link.linkActivated.connect(lambda _link: self.surveyRequested.emit())
 
         button_row = QHBoxLayout()
-        for link in (self.ask_link, self.report_link, self.survey_link):
-            if link is not self.ask_link:
+        for link in (self.videos_link, self.ask_link, self.report_link, self.survey_link):
+            if link is not self.videos_link:
                 button_row.addWidget(QLabel('·', self))
             button_row.addWidget(link)
         button_row.addStretch(1)
