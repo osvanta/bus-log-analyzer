@@ -3534,12 +3534,14 @@ class PlotPanel(QWidget):
             self._stats_timer.start(_STATS_DEBOUNCE_MS)
 
     def _update_statistics(self) -> None:
-        """Fill the statistics columns for every shown signal. Signals with
-        text labels and hidden signals stay blank."""
+        """Fill the statistics columns for every shown signal. A sample shown
+        as text (a value table's "SNA", an enum state) is left out, so a
+        signal shown all as text, like a hidden signal, stays blank."""
         if not self.statistics_columns_visible():
             return
         span = self.statistics_range()
-        tip = ('Sample-based, ' + span[2] if span else 'Sample-based') + '.'
+        tip = (('Sample-based, ' + span[2] if span else 'Sample-based')
+               + '. Values shown as text, such as SNA, are left out.')
         for col in range(_STAT_FIRST, _STAT_FIRST + len(STAT_COLUMNS)):
             header = self.table.horizontalHeaderItem(col)
             if header is not None:
@@ -3550,11 +3552,14 @@ class PlotPanel(QWidget):
             for key, row in self._row_lookup.items():
                 plotted = self._items.get(key)
                 stats = None
-                if span and plotted is not None and plotted.visible \
-                        and not plotted.series.has_labels:
-                    stats = range_statistics(plotted.series.timestamps,
-                                             plotted.series.values, span[0], span[1],
-                                             hold=True)
+                if span and plotted is not None and plotted.visible:
+                    # A signal with a value table that names only special
+                    # values (Tesla's "SNA") is a number everywhere else;
+                    # skipping such signals whole left them blank.
+                    series = plotted.series
+                    stats = range_statistics(
+                        series.timestamps, series.values, span[0], span[1], hold=True,
+                        labels=series.raw_values if series.has_labels else None)
                 texts = ([''] * len(STAT_COLUMNS) if stats is None else
                          [f'{stats.minimum:.3f}', f'{stats.maximum:.3f}',
                           f'{stats.mean:.3f}', f'{stats.std:.3f}', f'{stats.rms:.3f}',
@@ -3608,8 +3613,9 @@ class PlotPanel(QWidget):
 
     def _update_delta(self) -> None:
         """Fill the Δ column: each signal's Cursor 2 value minus its Cursor 1
-        value, at the same samples the cursor columns show. Signals with
-        text labels stay blank."""
+        value, at the same samples the cursor columns show. Blank where
+        either value is shown as text (a value table's "SNA", an enum
+        state)."""
         if self.table.isColumnHidden(_DELTA_COL):
             return
         x1, x2 = self.v_line.value(), self.v_line2.value()
@@ -3621,15 +3627,18 @@ class PlotPanel(QWidget):
             if cell is None:
                 continue
             text = ''
-            if not plotted.series.has_labels:
-                i1 = self._nearest_index(plotted.series.timestamps, x1)
-                i2 = self._nearest_index(plotted.series.timestamps, x2)
-                if i1 is not None and i2 is not None:
-                    values = plotted.series.values
-                    try:
-                        text = f'{float(values[i2]) - float(values[i1]):.3f}'
-                    except (TypeError, ValueError, IndexError):
-                        text = ''
+            series = plotted.series
+            i1 = self._nearest_index(series.timestamps, x1)
+            i2 = self._nearest_index(series.timestamps, x2)
+            # A signal with a value table is a number wherever its value has
+            # no label; only a value shown as text has no difference.
+            if i1 is not None and i2 is not None and not (
+                    series.has_labels and any(
+                        isinstance(series.display_value_at(i), str) for i in (i1, i2))):
+                try:
+                    text = f'{float(series.values[i2]) - float(series.values[i1]):.3f}'
+                except (TypeError, ValueError, IndexError):
+                    text = ''
             cell.setText(text)
 
     # ── Hex column ────────────────────────────────────────────────────────

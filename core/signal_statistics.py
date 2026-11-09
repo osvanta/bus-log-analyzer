@@ -37,13 +37,19 @@ class RangeStatistics:
 
 
 def range_statistics(timestamps, values, start: float, end: float, *,
-                     hold: bool = False) -> RangeStatistics | None:
+                     hold: bool = False, labels=None) -> RangeStatistics | None:
     """Statistics of the samples with ``start <= t <= end``; None when there
     are none (or all are NaN).
 
     With *hold*, a range with no sample of its own takes the value held from
     the last sample before it, as a step plot shows it: minimum, maximum, mean
     and RMS are that value, the standard deviation 0, and ``samples`` 0.
+
+    *labels* are the signal's display labels when it has a value table
+    (``SignalSeries.raw_values``). A sample shown as text there, a value
+    table's "SNA" or an enum state, is left out as NaN is: a numeric signal
+    whose table names only special values keeps its statistics, and one
+    shown all as text has none.
     """
     ts = np.asarray(timestamps, dtype=np.float64)
     vs = np.asarray(values, dtype=np.float64)
@@ -58,6 +64,8 @@ def range_statistics(timestamps, values, start: float, end: float, *,
     for lo in range(0, min(len(ts), len(vs)), CHUNK):
         t = ts[lo:lo + CHUNK]
         v = vs[lo:lo + CHUNK]
+        if labels is not None:
+            v = _numbers_only(labels, lo, t, v, end)
         if hold:
             before = np.flatnonzero((t < start) & ~np.isnan(v))
             if before.size:
@@ -86,3 +94,37 @@ def range_statistics(timestamps, values, start: float, end: float, *,
         return None
     return RangeStatistics(low, high, mean, float(np.sqrt(spread / count)),
                            float(np.sqrt(squares / count)), count)
+
+
+def _numbers_only(labels, lo: int, t: np.ndarray, v: np.ndarray, end: float) -> np.ndarray:
+    """*v*, samples ``lo`` on, with those *labels* shows as text made NaN.
+    Only samples up to *end* are looked up: no later one is used."""
+    upto = np.flatnonzero(t <= end)
+    if not upto.size:
+        return v
+    text = shown_as_text(labels, v[upto], lo + upto)
+    if not text.any():
+        return v
+    v = v.copy()
+    v[upto[text]] = np.nan
+    return v
+
+
+def shown_as_text(labels, values: np.ndarray, indices: np.ndarray) -> np.ndarray:
+    """Whether each sample is shown as text rather than as its number.
+
+    *labels* are a signal's display labels; *values* and *indices* the
+    samples' values and positions. Labels read from the values (a DBC value
+    table) are looked up once per distinct value; labels kept per sample (an
+    MDF text channel) are read by position.
+    """
+    rebase = getattr(labels, 'rebase', None)
+    if rebase is not None:
+        distinct, inverse = np.unique(values, return_inverse=True)
+        shown = np.asarray(rebase(distinct), dtype=object)
+        text = np.fromiter((isinstance(x, str) and x != '' for x in shown),
+                           dtype=bool, count=len(shown))
+        return text[inverse.reshape(-1)]
+    return np.fromiter((isinstance(x, str) and x != ''
+                        for x in (labels[i] for i in indices.tolist())),
+                       dtype=bool, count=len(indices))
