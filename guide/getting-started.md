@@ -144,7 +144,9 @@ column: the cursor values, **Hex** (Cursor 1's value as the raw value on the
 bus, in hexadecimal), **Δ C2−C1** (Cursor 2's value minus Cursor 1's), the
 unit, and the statistics **Min**, **Max**, **Mean**, **Std dev**, **RMS** and
 **Samples**. The statistics are between the cursors when both are on, and over
-the visible range otherwise.
+the visible range otherwise. A value shown as text, such as a database's "SNA"
+or a state name, is left out of the statistics and has no Δ; the signal's
+numbers still count.
 
 **Hex** turns the value back into what the bus carried: (value − offset) /
 factor from the database, padded to the signal's length, so an 11-bit signal
