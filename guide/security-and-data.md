@@ -28,6 +28,7 @@ page in your default browser, and only when you click them. In the **Help** menu
 each of them ends in ↗:
 
 - **Help ▸ Getting started** (F1): this guide, on `osvanta.com`;
+- the **osvanta.com** link in **About**: the Osvanta website;
 - **Help ▸ Tutorial videos**, and the same link in **About**: the tutorial
   videos, on YouTube;
 - **Help ▸ Ask a question or share an idea** and **Help ▸ Report a problem or
