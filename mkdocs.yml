@@ -11,7 +11,7 @@ site_name: Osvanta Bus Log Analyzer
 site_description: >-
   User guide for Osvanta Bus Log Analyzer, a portable Windows tool that loads
   automotive measurements, decodes CAN and LIN signals and plots them.
-site_url: https://osvanta.github.io/bus-log-analyzer/
+site_url: https://osvanta.com/bus-log-analyzer/
 repo_url: https://github.com/osvanta/bus-log-analyzer
 repo_name: osvanta/bus-log-analyzer
 edit_uri: edit/main/guide/

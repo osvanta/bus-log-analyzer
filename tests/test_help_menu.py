@@ -97,7 +97,7 @@ def test_the_links_lead_to_pages_that_last():
     # A copy of the application keeps its links for as long as it is used:
     # the channel rather than one video, the Discussions front page rather
     # than one discussion, and the issue list.
-    assert GETTING_STARTED_URL == 'https://osvanta.github.io/bus-log-analyzer/getting-started/'
+    assert GETTING_STARTED_URL == 'https://osvanta.com/bus-log-analyzer/getting-started/'
     assert VIDEOS_URL == 'https://www.youtube.com/@osvanta'
     assert DISCUSSIONS_URL == 'https://github.com/osvanta/bus-log-analyzer/discussions'
     assert ISSUES_URL == 'https://github.com/osvanta/bus-log-analyzer/issues'
