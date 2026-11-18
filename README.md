@@ -2,7 +2,7 @@
 
 > A portable Windows application for loading automotive measurements, decoding CAN and LIN signals, inspecting raw frames, and plotting signal data interactively.
 
-> **User guide:** [osvanta.github.io/bus-log-analyzer](https://osvanta.github.io/bus-log-analyzer/),
+> **User guide:** [osvanta.com/bus-log-analyzer](https://osvanta.com/bus-log-analyzer/),
 > or **Help ▸ Getting started** (`F1`) in the application.
 > **Tutorial videos:** [youtube.com/@osvanta](https://www.youtube.com/@osvanta).
 
@@ -178,7 +178,7 @@ Runtime dependencies are maintained in [requirements.txt](requirements.txt).
 
 ## Security and license
 
-Release binaries are currently unsigned, so Windows SmartScreen may show a warning on first launch. What the application writes to disk, and that it opens no network connection of its own, is described in [Security and data handling](https://osvanta.github.io/bus-log-analyzer/security-and-data/) in the user guide; [SECURITY.md](SECURITY.md) says how to report a vulnerability.
+Release binaries are currently unsigned, so Windows SmartScreen may show a warning on first launch. What the application writes to disk, and that it opens no network connection of its own, is described in [Security and data handling](https://osvanta.com/bus-log-analyzer/security-and-data/) in the user guide; [SECURITY.md](SECURITY.md) says how to report a vulnerability.
 
 Osvanta Bus Log Analyzer is licensed under the [Mozilla Public License 2.0](LICENSE).
 

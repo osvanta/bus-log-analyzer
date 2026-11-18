@@ -232,7 +232,7 @@ Example: `fix: hide C1/C2 stacked labels when cursor is disabled`
 
 ## The User Guide
 
-The guide at [osvanta.github.io/bus-log-analyzer](https://osvanta.github.io/bus-log-analyzer/)
+The guide at [osvanta.com/bus-log-analyzer](https://osvanta.com/bus-log-analyzer/)
 is built from the Markdown in `guide/` by MkDocs, as `mkdocs.yml` sets out. A
 pull request that changes it builds it with `--strict`, so a broken link or a
 missing image fails the check; a merge into `main` publishes it.

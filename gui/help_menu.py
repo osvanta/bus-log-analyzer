@@ -37,7 +37,7 @@ from PySide6.QtWidgets import QMenu, QWidget
 
 from gui import app_data, app_log
 
-GUIDE_URL = 'https://osvanta.github.io/bus-log-analyzer/'
+GUIDE_URL = 'https://osvanta.com/bus-log-analyzer/'
 GETTING_STARTED_URL = GUIDE_URL + 'getting-started/'
 VIDEOS_URL = 'https://www.youtube.com/@osvanta'
 DISCUSSIONS_URL = 'https://github.com/osvanta/bus-log-analyzer/discussions'
