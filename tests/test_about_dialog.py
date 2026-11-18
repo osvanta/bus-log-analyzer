@@ -46,7 +46,8 @@ def test_about_text_carries_the_lgpl_notice_and_pointer(dialog):
     """LGPL-3.0 4(c) — name the LGPL components and point at the licence copies."""
     from gui.about_dialog import _ABOUT_HTML
 
-    text = _ABOUT_HTML.format(name="Osvanta Bus Log Analyzer", version="v00.01.00")
+    text = _ABOUT_HTML.format(name="Osvanta Bus Log Analyzer", version="v00.01.00",
+                              website="https://osvanta.com/")
     assert "Lesser General Public License" in text
     assert "GNU GPL" in text
     for component in ("Qt", "PySide6", "python-can", "asammdf"):
@@ -121,6 +122,24 @@ def test_the_project_links_open_their_pages(dialog, monkeypatch, link, text, sit
 
     opened.assert_called_once_with(QUrl(url))
     assert requested == []
+
+
+def test_the_about_text_links_to_the_osvanta_website(dialog, monkeypatch):
+    from unittest.mock import Mock
+
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+
+    opened = Mock(return_value=True)
+    monkeypatch.setattr(QDesktopServices, "openUrl", opened)
+
+    text = dialog.about_label.text()
+    assert '<a href="https://osvanta.com/">osvanta.com</a>' in text
+    # The website is the only link in the text, so every activation is it.
+    assert text.count("<a ") == 1
+    dialog.about_label.linkActivated.emit("https://osvanta.com/")
+
+    opened.assert_called_once_with(QUrl("https://osvanta.com/"))
 
 
 def test_the_links_sit_left_of_close_in_the_help_menus_order(dialog):

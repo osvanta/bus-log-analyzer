@@ -53,6 +53,7 @@ _ABOUT_HTML = """
 <h2>{name}</h2>
 <p><b>Version {version}</b></p>
 <p>Copyright &copy; 2025-2026 Dinakaran Ganesan</p>
+<p><a href="{website}">osvanta.com</a></p>
 <p>{name} is free and open source software, licensed under the
 <b>Mozilla Public License, Version 2.0</b>. You may use it freely, including
 inside commercial and proprietary work. If you distribute a modified version of
@@ -164,11 +165,14 @@ class AboutDialog(QDialog):
         return label
 
     def _build_about_tab(self, app_name: str, version: str) -> QWidget:
-        label = QLabel(_ABOUT_HTML.format(name=app_name, version=version))
+        label = QLabel(_ABOUT_HTML.format(
+            name=app_name, version=version, website=help_menu.WEBSITE_URL))
         label.setWordWrap(True)
         label.setTextFormat(Qt.TextFormat.RichText)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        label.setOpenExternalLinks(True)
+        # The one link in the text is the Osvanta website.
+        label.linkActivated.connect(help_menu.open_page)
+        self.about_label = label
         label.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         page = QWidget(self)
