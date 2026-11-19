@@ -483,6 +483,7 @@ class MainWindow(QMainWindow):
             self.btn_points: panel._show_points,
             self.btn_hide_line: panel._hide_lines,
             self.btn_table: panel._table_view_on,
+            self.btn_xy: panel._xy_view_on,
         }
         for button, state in checked.items():
             button.blockSignals(True)
@@ -534,6 +535,12 @@ class MainWindow(QMainWindow):
         self.btn_table.setCheckable(True)
         self.btn_table.setToolTip('Table: the plotted signals as a table, a row per sample time.\n'
                                   'Click a row to put Cursor 1 there. Click again for the plot.')
+        # Nor is this: one plotted signal against another, beside the plot.
+        self.btn_xy = QPushButton('XY')
+        self.btn_xy.setCheckable(True)
+        self.btn_xy.setToolTip('XY: one plotted signal against another, beside the plot,\n'
+                               'coloured by a third if you choose one.\n'
+                               'Click a point to put Cursor 1 at its time.')
         self.btn_cursor1 = icon_button('cursor1', 'Cursor 1',
                                        'Cursor 1, or click the plot to place it')
         self.btn_cursor1.setCheckable(True)
@@ -560,7 +567,8 @@ class MainWindow(QMainWindow):
         self.btn_clear_plot.setEnabled(False)  # enabled after decode
         # The plot modes, which keep their text, then the icon buttons, and
         # Clear Plot apart from them.
-        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack, self.btn_table):
+        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack, self.btn_table,
+                    self.btn_xy):
             self.plot_button_row.add_button(btn)
         self.plot_button_row.add_gap(18)
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
@@ -591,6 +599,7 @@ class MainWindow(QMainWindow):
         self.btn_stacked.toggled.connect(self._toggle_stacked)
         self.btn_multistack.toggled.connect(self._toggle_multistack)
         self.btn_table.toggled.connect(lambda on: self.plot_panel.set_table_view(on))
+        self.btn_xy.toggled.connect(lambda on: self.plot_panel.set_xy_view(on))
         self.btn_cursor1.toggled.connect(self._toggle_cursor1)
         self.btn_cursor2.toggled.connect(self._toggle_cursor2)
         self.btn_line_mode.clicked.connect(self._toggle_line_mode)
@@ -1486,6 +1495,9 @@ class MainWindow(QMainWindow):
             self.btn_cursor1.setChecked(bool(tab['cursor1']))
         if 'cursor2' in tab:
             self.btn_cursor2.setChecked(bool(tab['cursor2']))
+        if isinstance(tab.get('xy'), dict):
+            self.plot_panel.set_xy_state(tab['xy'])
+            self.btn_xy.setChecked(self.plot_panel.xy_view_active())
 
     def _plot_saved_signals(self, tab: dict) -> None:
         """Plot a saved tab's signals in the tab on screen, with their look.

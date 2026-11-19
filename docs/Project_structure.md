@@ -18,6 +18,7 @@ bus-log-analyzer/
 │   ├── asammdf_guard.py          # Stops asammdf writing past the end of a channel's sample buffer (upstream overrun)
 │   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line; TRC version, start, connections, events
 │   ├── signal_statistics.py      # Min / max / mean / std dev / RMS / samples of a signal over a time range
+│   ├── xy_data.py                # The points of an XY plot: Y and a colour signal held onto the X signal's sample times, cut to a time range, thinned evenly
 │   ├── debug_inspector.py        # Read-only forensic probes of a measurement that failed to load; the readers stay untouched
 │   ├── signal_properties.py      # Right-click ▸ Properties: a signal's definition, looked up again in its channel's database; file-decoded and calculated signals; why none was found; the raw value on the bus for the signal table's Hex column
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
@@ -45,6 +46,7 @@ bus-log-analyzer/
 │   ├── stack_sections.py         # MultiStack: the signal table split into one section per stack, level with it (filtered views of the table's model), a line between stacks
 │   ├── plot_tag.py               # The user's tag under the signal table: their text, user name and date, kept beside the application
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
+│   ├── xy_view.py                # XY view: one plotted signal against another beside the plot, coloured by a third; follows the time shown, marks the cursors, a click places Cursor 1
 │   ├── measurement_info.py       # File ▸ Measurement info dialog
 │   ├── load_debug_window.py      # Session-only plain-text window for measurement load forensics (Debug mode)
 │   ├── signal_properties_dialog.py # Right-click a signal ▸ Properties window: Signal and Value table tabs, Copy

@@ -104,6 +104,7 @@ def describe_tab(panel: PlotPanel, name: str) -> dict:
         'hide_plot_lines': panel._hide_lines,
         'cursor1': panel._cursor1_enabled,
         'cursor2': panel._cursor2_enabled,
+        'xy': panel.xy_state(),
         'signals': [_signal_entry(key, panel._items[key]) for key in panel.plotted_keys()],
     }
 
@@ -181,6 +182,11 @@ class SavedTabs:
             for entry in tab.get('signals') or []:
                 if isinstance(entry, dict) and entry.get('key') == old_key:
                     entry['key'] = new_key
+            xy = tab.get('xy')
+            if isinstance(xy, dict):
+                for role in ('x', 'y', 'color'):
+                    if xy.get(role) == old_key:
+                        xy[role] = new_key
 
 
 def signal_entries(tab: dict) -> list[dict]:

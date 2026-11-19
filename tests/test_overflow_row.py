@@ -242,10 +242,11 @@ def test_plot_buttons_sit_above_the_plot_not_the_table(window):
 def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(window, qapp):
     # Wide enough for the whole row in the offscreen platform's fallback
     # font, which makes the text buttons wider than Segoe UI does.
-    window.resize(1600, 800)
+    window.resize(1700, 800)
     qapp.processEvents()
     row = window.plot_button_row
-    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack, window.btn_table]
+    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack, window.btn_table,
+             window.btn_xy]
     icons = [window.btn_fit, window.btn_fit_v, window.btn_zoom_rect, window.btn_cursor1,
              window.btn_cursor2, window.btn_line_mode, window.btn_points, window.btn_hide_line,
              window.btn_delete_markers]
@@ -253,7 +254,7 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
     clear = window.btn_clear_plot
 
     assert row._buttons == modes + icons + [clear]
-    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack', 'Table']
+    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack', 'Table', 'XY']
     assert [b.accessibleName() for b in icons + [clear]] == [
         'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
         'Step Mode', 'Show Data Points', 'Hide Line', 'Delete Markers', 'Clear Plot']

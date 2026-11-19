@@ -53,7 +53,9 @@ from PySide6.QtWidgets import (
 from core.signal_properties import hex_text
 from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
+from core.export import _column_headers
 from gui.tabular_view import TabularView
+from gui.xy_view import XYView
 from gui.edge_tab import _mix
 from gui.plot_icons import drawing_pixmap
 from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
@@ -1426,7 +1428,21 @@ class PlotPanel(QWidget):
         self.tabular.hide()
         self._table_view_on = False
         self._table_view_width = 0                   # the user's last width for it
-        _root.addWidget(self.area_stack, stretch=1)
+        # Right of both, one plotted signal against another (set_xy_view).
+        self.xy_view = XYView()
+        self.xy_view.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        self.xy_view.timeClicked.connect(self.plotAreaClicked.emit)
+        self.xy_view.set_colors(self._background_color,
+                                _cursor_color_on(self._background_color))
+        self.side_stack = QSplitter(Qt.Orientation.Horizontal)
+        self.side_stack.setChildrenCollapsible(False)
+        self.side_stack.addWidget(self.area_stack)   # the plots, and the table
+        self.side_stack.addWidget(self.xy_view)      # the XY plot, while XY is on
+        self.side_stack.setStretchFactor(0, 1)
+        self.xy_view.hide()
+        self._xy_view_on = False
+        self._xy_view_width = 0                      # the user's last width for it
+        _root.addWidget(self.side_stack, stretch=1)
         # The cursor line keeps a line's height under the empty plot, but no
         # width. Plotting the first signals then resizes neither the plot nor
         # the table beside it, which would draw every stacked row once more.
@@ -2167,6 +2183,7 @@ class PlotPanel(QWidget):
         ]
         plotted = self._items[old_key]
         plotted.key = new_key
+        self.xy_view.rename_signal(old_key, new_key)
         self._items = {
             (new_key if key == old_key else key): item
             for key, item in self._items.items()
@@ -2983,6 +3000,8 @@ class PlotPanel(QWidget):
         if self._show_points:
             self._points_timer.start(self._POINTS_DEBOUNCE_MS)
         self._schedule_statistics()
+        if self.xy_view_active():
+            self.xy_view.set_time_range(self.time_range())
 
     def _connect_xrange_signals(self) -> None:
         """Listen to the current driving ViewBox's sigXRangeChanged.
@@ -3188,6 +3207,8 @@ class PlotPanel(QWidget):
         self._schedule_statistics()   # between the cursors, they may have moved
         if self.table_view_active() and self._cursor1_enabled:
             self.tabular.select_time(self.v_line.value())
+        if self.xy_view_active():
+            self._show_xy_cursors()
         if self._cursor1_enabled:
             self.cursor1Moved.emit(float(self.v_line.value()))
         x1 = self.v_line.value()
@@ -3433,6 +3454,57 @@ class PlotPanel(QWidget):
     def _fill_tabular(self) -> None:
         self.tabular.set_series(
             [p.series for p in self._items.values() if p.visible])
+
+    # ── XY view ───────────────────────────────────────────────────────────
+
+    def xy_view_active(self) -> bool:
+        return getattr(self, '_xy_view_on', False)   # False while being built
+
+    #: The XY plot's share of the width the first time it is shown.
+    _XY_VIEW_SHARE = 0.4
+
+    def set_xy_view(self, on: bool) -> None:
+        """Show the XY plot right of the plots, or hide it. It keeps the
+        width the user last dragged it to, and its signal choices."""
+        on = bool(on)
+        if on == self._xy_view_on:
+            return
+        self._xy_view_on = on
+        if on:
+            self._fill_xy()
+            self.xy_view.show()
+            total = sum(self.side_stack.sizes()) or self.side_stack.width()
+            width = self._xy_view_width or int(total * self._XY_VIEW_SHARE)
+            width = min(width, int(total * 0.8))
+            self.side_stack.setSizes([max(1, total - width), width])
+        else:
+            self._xy_view_width = self.side_stack.sizes()[1]
+            self.xy_view.hide()
+
+    def _fill_xy(self) -> None:
+        plotted = list(self._items.items())
+        names = _column_headers([p.series for _key, p in plotted])
+        self.xy_view.set_signals([(key, name, p.series, p.color)
+                                  for (key, p), name in zip(plotted, names)])
+        self.xy_view.set_time_range(self.time_range())
+        self._show_xy_cursors()
+
+    def _show_xy_cursors(self) -> None:
+        self.xy_view.set_cursors(
+            float(self.v_line.value()) if self._cursor1_enabled else None,
+            float(self.v_line2.value()) if self._cursor2_enabled else None)
+
+    def xy_state(self) -> dict:
+        """The XY view as a configuration keeps it: shown or not, and its
+        signal choices."""
+        return {'shown': self._xy_view_on, **self.xy_view.state()}
+
+    def set_xy_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        self.xy_view.restore(state)
+        if 'shown' in state:
+            self.set_xy_view(bool(state['shown']))
 
     # ── Column choice (table header menu) ─────────────────────────────────
 
@@ -4058,6 +4130,7 @@ class PlotPanel(QWidget):
         for line in (self.v_line, self.v_line2,
                      *self._stacked_c1_lines, *self._stacked_c2_lines):
             line.set_color(cursor_color)
+        self.xy_view.set_colors(color, cursor_color)
         self.table.viewport().update()
         self.backgroundColorChanged.emit(color)
 
@@ -4269,6 +4342,8 @@ class PlotPanel(QWidget):
         self._schedule_statistics()
         if self.table_view_active():
             self._fill_tabular()
+        if self.xy_view_active():
+            self._fill_xy()
         self._draw_events()   # on whichever plots the rebuild made
         self._draw_markers()
         # Rebuild the key→row index used by _update_table_values on every cursor drag.
@@ -5663,7 +5738,7 @@ class PlotPanel(QWidget):
         # The table and this panel both reach the bottom of the main
         # window's splitter, so the space under the plot here is the space
         # to leave under the table.
-        plot = self.area_stack.geometry()   # the plots, and the table beside them
+        plot = self.side_stack.geometry()   # the plots, and the table and XY plot beside them
         self._table_bottom_gap.setFixedHeight(max(0, self.height() - plot.y() - plot.height()))
         # The tag lies as far under the table as the cursor line under the
         # plot, and as tall, so the two read as one line.
