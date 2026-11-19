@@ -7,7 +7,6 @@
 """Tests for gui/help_menu.py: the top row's Help menu."""
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -15,8 +14,6 @@ import pytest
 from gui.help_menu import (
     DISCUSSIONS_URL, GETTING_STARTED_URL, GUIDE_URL, ISSUES_URL, VIDEOS_URL, WEB_MARK, HelpMenu,
 )
-
-REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture()
@@ -103,14 +100,10 @@ def test_the_links_lead_to_pages_that_last():
     assert ISSUES_URL == 'https://github.com/osvanta/bus-log-analyzer/issues'
 
 
-def test_the_guide_publishes_the_page_the_menu_opens():
-    # mkdocs.yml builds guide/ into the site at GUIDE_URL; a page named
-    # getting-started.md is published at GUIDE_URL + 'getting-started/'.
-    config = (REPO / 'mkdocs.yml').read_text(encoding='utf-8')
-    assert f'site_url: {GUIDE_URL}' in config
-    assert 'docs_dir: guide' in config
-    assert 'getting-started.md' in config
-    assert (REPO / 'guide' / 'getting-started.md').is_file()
+def test_the_menu_opens_the_addresses_the_website_keeps():
+    # The help is part of the website, which keeps these two addresses for
+    # the copies of the application already installed.
+    assert GUIDE_URL == 'https://osvanta.com/bus-log-analyzer/'
     assert GETTING_STARTED_URL == GUIDE_URL + 'getting-started/'
 
 

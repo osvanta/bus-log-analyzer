@@ -80,12 +80,6 @@ bus-log-analyzer/
 │   ├── app_icon.png              # 1024 × 1024 app icon source
 │   ├── app_icon.ico              # Multi-resolution ICO (256/128/64/48/32/16 px)
 │   └── release_readme.txt        # README.txt beside the built executables
-├── guide/                        # User guide (Markdown), published to GitHub Pages
-│   ├── index.md                  # Front page; the Help menu links to it and to getting-started/:
-│   ├── getting-started.md        #   never rename or move these two pages
-│   ├── images/                   # Screenshots, light and dark, from a demo measurement
-│   └── requirements.txt          # The guide's build tools, apart from the application's
-├── mkdocs.yml                    # The guide's site: theme, navigation, address
 ├── requirements.txt              # What the application needs; LGPL libraries pinned
 ├── requirements-dev.txt          # What the tests and the lint need on top of the application
 ├── requirements-release.in       # requirements.txt + PyInstaller: the input of the release lock
@@ -94,7 +88,7 @@ bus-log-analyzer/
 │                                 #   builds BusLogAnalyzer.exe and appdebugger.exe (-X dev)
 ├── .github/workflows/build.yml  # On a v*.*.* tag: test, build, SBOM and SHA-256 sums; a separate job publishes
 ├── .github/workflows/pr.yml     # On a PR: protected paths, dependency audit, lint, tests, portable build
-├── .github/workflows/guide.yml  # Builds the guide on a PR; publishes it to GitHub Pages from main
+├── .github/workflows/guide.yml  # Retired and disabled: it built the former user guide, now part of the website
 └── .github/dependabot.yml       # Monthly updates of the commit-pinned GitHub Actions
 
 

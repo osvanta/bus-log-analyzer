@@ -38,5 +38,5 @@ configuration files that carry calculated-signal formulas.
 
 What the application writes to disk, and where, is described in
 [Security and data handling](https://osvanta.com/bus-log-analyzer/security-and-data/)
-in the user guide. A difference between that page and what the application
+in the help on osvanta.com. A difference between that page and what the application
 actually does is in scope for this policy.

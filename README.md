@@ -2,7 +2,7 @@
 
 > A portable Windows application for loading automotive measurements, decoding CAN and LIN signals, inspecting raw frames, and plotting signal data interactively.
 
-> **User guide:** [osvanta.com/bus-log-analyzer](https://osvanta.com/bus-log-analyzer/),
+> **Help:** [osvanta.com/bus-log-analyzer](https://osvanta.com/bus-log-analyzer/),
 > or **Help ▸ Getting started** (`F1`) in the application.
 > **Tutorial videos:** [youtube.com/@osvanta](https://www.youtube.com/@osvanta).
 
@@ -22,22 +22,22 @@ The pictures follow your GitHub theme. They show a made-up demo vehicle; nothing
 **Stacked** plot, the default: every signal in its own lane, with both cursors on.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="guide/images/plot-dark.webp">
-  <img alt="Four signals of a demo drive in Stacked mode, with both cursors" src="guide/images/plot-light.webp" width="1800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/plot-dark.webp">
+  <img alt="Four signals of a demo drive in Stacked mode, with both cursors" src="docs/images/plot-light.webp" width="1800">
 </picture>
 
 **Multi-Axis** plot: the same signals over each other, one axis per unit.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="guide/images/readme-multi-axis-dark.webp">
-  <img alt="The same four signals in Multi-Axis mode, one axis per unit" src="guide/images/readme-multi-axis-light.webp" width="1800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme-multi-axis-dark.webp">
+  <img alt="The same four signals in Multi-Axis mode, one axis per unit" src="docs/images/readme-multi-axis-light.webp" width="1800">
 </picture>
 
 **Trace**: the raw CAN and LIN frames, with the time since each ID's previous frame and its changed bytes highlighted.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="guide/images/readme-trace-dark.webp">
-  <img alt="The Trace window listing CAN 1 and LIN 1 frames with Δt and changed bytes" src="guide/images/readme-trace-light.webp" width="1800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme-trace-dark.webp">
+  <img alt="The Trace window listing CAN 1 and LIN 1 frames with Δt and changed bytes" src="docs/images/readme-trace-light.webp" width="1800">
 </picture>
 
 ## Supported formats
@@ -120,7 +120,7 @@ The portable build and CI release build use Python 3.12.
 
 | Key | Action |
 |---|---|
-| `F1` | Getting started, in the user guide |
+| `F1` | Getting started, in the help on osvanta.com |
 | `Ctrl+/` | Keyboard shortcuts |
 | `Ctrl+O` | Open Measurement |
 | `F9` | Decode |
@@ -167,8 +167,7 @@ core/readers/          BLF, ASC, TRC, MDF/MF4, and CSV readers
 core/                  Decode, signal storage, statistics, export, conversion, and calculated-signal logic
 gui/                   Main window, plots, Database Manager, Trace, dialogs, and the release test
 resources/             Application icon and splash assets
-guide/, mkdocs.yml     User guide, published to GitHub Pages
-docs/                  Project structure and pull request policy
+docs/                  Project structure, pull request policy, and this page's pictures
 licenses/              Licence texts of the bundled third-party components
 tools/                 Protected-path check and the pre-commit hook
 tests/                 Pytest regression suite
