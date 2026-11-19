@@ -31,8 +31,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-# The user guide's local build (mkdocs build)
-/site/
 .eggs/
 pip-wheel-metadata/
 *.whl

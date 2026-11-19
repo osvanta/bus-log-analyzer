@@ -8,14 +8,14 @@
 The top row's Help menu: the user guide, the tutorial videos, the keyboard
 shortcuts, the ways to reach the project, and About.
 
-The user guide is a website built from guide/ in the repository and
-published on GitHub Pages. Its Getting started page opens from the menu and
-with F1. The tutorial videos are on the project's YouTube channel.
+The user guide is the help on the Osvanta website. Its Getting started page
+opens from the menu and with F1. The tutorial videos are on the project's
+YouTube channel.
 
 The project is reached on GitHub: questions and ideas in its Discussions,
 problems and feature requests in its issues. A copy of the application keeps
 its links for as long as it is used, so they lead to pages that last: the
-guide's Getting started page, which mkdocs.yml says never to move, the
+guide's Getting started page, at an address the website keeps for it, the
 channel rather than any one video, the Discussions front page rather than any
 one discussion, and the issue list.
 
