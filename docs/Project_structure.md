@@ -46,6 +46,7 @@ bus-log-analyzer/
 │   ├── stack_sections.py         # MultiStack: the signal table split into one section per stack, level with it (filtered views of the table's model), a line between stacks
 │   ├── plot_tag.py               # The user's tag under the signal table: their text, user name and date, kept beside the application
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
+│   ├── plot_toolbar.py           # Plot toolbar parts: a button that opens a menu, the plot layouts by name, the rail of pane buttons (Table, XY) at the plot's right edge
 │   ├── xy_view.py                # XY view: one plotted signal against another beside the plot, coloured by a third; follows the time shown, marks the cursors, a click places Cursor 1
 │   ├── measurement_info.py       # File ▸ Measurement info dialog
 │   ├── load_debug_window.py      # Session-only plain-text window for measurement load forensics (Debug mode)

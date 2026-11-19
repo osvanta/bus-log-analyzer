@@ -235,40 +235,35 @@ def test_plot_buttons_sit_above_the_plot_not_the_table(window):
     assert plots.parentWidget() is plot_side
     assert window.plot_panel.parentWidget() is plots
     assert window.plot_button_row.geometry().bottom() < plots.geometry().top()
-    for button in (window.btn_fit, window.btn_stacked, window.btn_points):
+    for button in (window.btn_fit, window.btn_layout, window.btn_display):
         assert button.parentWidget() is window.plot_button_row
 
 
-def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(window, qapp):
+def test_the_layout_picker_comes_first_then_a_gap_then_the_icon_buttons(window, qapp):
     # Wide enough for the whole row in the offscreen platform's fallback
     # font, which makes the text buttons wider than Segoe UI does.
     window.resize(1700, 800)
     qapp.processEvents()
     row = window.plot_button_row
-    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack, window.btn_table,
-             window.btn_xy]
     icons = [window.btn_fit, window.btn_fit_v, window.btn_zoom_rect, window.btn_cursor1,
-             window.btn_cursor2, window.btn_line_mode, window.btn_points, window.btn_hide_line,
-             window.btn_delete_markers]
+             window.btn_cursor2, window.btn_markers]
 
-    clear = window.btn_clear_plot
-
-    assert row._buttons == modes + icons + [clear]
-    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack', 'Table', 'XY']
-    assert [b.accessibleName() for b in icons + [clear]] == [
-        'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
-        'Step Mode', 'Show Data Points', 'Hide Line', 'Delete Markers', 'Clear Plot']
-    for button in icons + [clear]:
+    assert row._buttons == [window.btn_layout] + icons + [window.btn_display]
+    assert [b.accessibleName() for b in icons] == [
+        'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2', 'Markers']
+    for button in icons:
         assert button.text() == ''
         assert not button.icon().isNull()
         assert button.toolTip().startswith(button.accessibleName())
-        assert button.height() == window.btn_stacked.height()
-    multistack, fit = window.btn_multistack, window.btn_fit
-    assert fit.x() - (multistack.x() + multistack.width()) > 2 * row.SPACING
-    # Clear Plot, which empties the plot, stands apart from the view buttons.
-    last_icon = icons[-1]
+        assert button.height() == window.btn_layout.height()
     assert not row.overflowed_buttons()
-    assert clear.x() - (last_icon.x() + last_icon.width()) > 2 * row.SPACING
+    # A gap between the groups: layout, view, measuring, display.
+    for left, right in ((window.btn_layout, window.btn_fit),
+                        (window.btn_zoom_rect, window.btn_cursor1),
+                        (window.btn_markers, window.btn_display)):
+        assert right.x() - (left.x() + left.width()) > 2 * row.SPACING
+    # Within a group, only the usual spacing.
+    assert window.btn_fit_v.x() - (window.btn_fit.x() + window.btn_fit.width()) == row.SPACING
 
 
 def test_plot_buttons_are_level_with_the_table_header(window):
@@ -393,10 +388,11 @@ def test_narrow_plot_moves_buttons_into_the_menu_not_the_table_aside(qapp, windo
     splitter = window.center_splitter
     total = sum(splitter.sizes())
 
-    splitter.setSizes([total - 300, 300])
+    # 400, not less: the pane rail beside the plot keeps its own width.
+    splitter.setSizes([total - 400, 400])
     qapp.processEvents()
 
     # The table gets the space it was given; the buttons give way instead.
-    assert splitter.sizes()[1] <= 300
+    assert splitter.sizes()[1] <= 400
     assert window.plot_button_row.overflowed_buttons()
     assert window.plot_button_row.more_button.isVisible()

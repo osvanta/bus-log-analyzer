@@ -81,6 +81,7 @@ from gui.user_settings import read_setting, write_setting
 from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button, plot_icon
+from gui.plot_toolbar import LAYOUT_NAMES, LAYOUTS, MENU_MARK, MenuButton, PaneRail
 from gui.plot_tabs import (
     MAX_NAME_LENGTH,
     PLOT_TYPES,
@@ -490,6 +491,7 @@ class MainWindow(QMainWindow):
             button.setChecked(state)
             button.blockSignals(False)
         self.btn_hide_line.setEnabled(panel._show_points)
+        self._show_layout_name()
 
     def _splash_status(self, message: str) -> None:
         """Forward a status message to the splash screen if still visible."""
@@ -565,31 +567,57 @@ class MainWindow(QMainWindow):
                                           'Clear Plot: remove every signal from the plot.\n'
                                           'Undo (Ctrl+Z) brings them back.')
         self.btn_clear_plot.setEnabled(False)  # enabled after decode
-        # The plot modes, which keep their text, then the icon buttons, and
-        # Clear Plot apart from them.
-        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack, self.btn_table,
-                    self.btn_xy):
-            self.plot_button_row.add_button(btn)
-        self.plot_button_row.add_gap(18)
-        for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
-                    self.btn_cursor2, self.btn_line_mode, self.btn_points,
-                    self.btn_hide_line, self.btn_delete_markers, None,
-                    self.btn_clear_plot):
+        # One kind of control in one place (see gui.plot_toolbar): the layout
+        # in one picker, then the view, then measuring, then the display
+        # choices in one menu. What is not used every minute is in a menu.
+        self.btn_layout = MenuButton(self._fill_layout_menu)
+        self.btn_layout.setToolTip('Plot layout: one plot, one plot with an axis per signal,\n'
+                                   'a row per signal, or rows you group')
+        self.btn_markers = MenuButton(self._fill_markers_menu)
+        self.btn_markers.setIcon(plot_icon('markers'))
+        self.btn_markers.setIconSize(self.btn_fit.iconSize())
+        self.btn_markers.setAccessibleName('Markers')
+        self.btn_markers.setToolTip('Markers: add one at Cursor 1 (M), or delete markers')
+        self.btn_display = MenuButton(self._fill_display_menu)
+        self.btn_display.setText('Display' + MENU_MARK)
+        self.btn_display.setToolTip('Display: step or straight lines, data points, hide the lines')
+        self.btn_more = MenuButton(self._fill_more_menu)
+        self.btn_more.setText('⋯')
+        self.btn_more.setAccessibleName('More')
+        self.btn_more.setToolTip('More: Clear Plot')
+        height = self.btn_stacked.sizeHint().height()
+        for btn in (self.btn_layout, None,
+                    self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, None,
+                    self.btn_cursor1, self.btn_cursor2, self.btn_markers, None,
+                    self.btn_display):
             if btn is None:
                 self.plot_button_row.add_gap(18)
                 continue
             # As tall as the text buttons; the icon alone would make it taller.
-            btn.setFixedHeight(self.btn_stacked.sizeHint().height())
+            btn.setFixedHeight(height)
             self.plot_button_row.add_button(btn)
+        # These still hold each tab's state and do the work, driven by the
+        # menus above and by the keyboard; they are not on the row.
+        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack,
+                    self.btn_line_mode, self.btn_points, self.btn_hide_line,
+                    self.btn_delete_markers, self.btn_clear_plot):
+            btn.setParent(self)
+            btn.hide()
+        # The panes that open beside the plot, on a rail at its right edge.
+        self.pane_rail = PaneRail()
+        for btn in (self.btn_table, self.btn_xy):
+            self.pane_rail.add_button(btn)
         # Apart from the plot's own buttons, at the right end of the row.
         self.btn_sync_tabs = icon_button(
             'sync_tabs', 'Synchronize Tabs',
             'Synchronize tabs: every tab shows the same time range and cursors')
         self.btn_sync_tabs.setCheckable(True)
         self.btn_sync_tabs.setChecked(self.plot_tabs.synchronized)
-        self.btn_sync_tabs.setFixedHeight(self.btn_stacked.sizeHint().height())
+        self.btn_sync_tabs.setFixedHeight(height)
         self.btn_sync_tabs.toggled.connect(self.plot_tabs.set_synchronized)
         self.plot_button_row.add_end_button(self.btn_sync_tabs)
+        self.btn_more.setFixedWidth(self.btn_sync_tabs.sizeHint().width())
+        self.plot_button_row.add_end_button(self.btn_more)
 
         # Each acts on the tab on screen when clicked.
         self.btn_fit.clicked.connect(lambda: self.plot_panel.fit_to_window())
@@ -611,6 +639,7 @@ class MainWindow(QMainWindow):
         # The buttons were set before their toggled signals were connected.
         self.plot_panel.set_cursor1_enabled(self.btn_cursor1.isChecked())
         self._set_step_lines(True, announce=False)   # steps by default
+        self._show_layout_name()
         # From here on, the buttons show each tab as it comes into view.
         self.plot_tabs.currentPanelChanged.connect(self._show_plot_tab)
         self.plot_tabs.signalsDropped.connect(self._add_signals_to_tab)
@@ -624,7 +653,12 @@ class MainWindow(QMainWindow):
         plot_column_layout.setContentsMargins(0, 0, 0, 0)
         plot_column_layout.setSpacing(0)
         plot_column_layout.addWidget(self.plot_button_row)
-        plot_column_layout.addWidget(self.plot_tabs.plots, stretch=1)
+        plots_and_rail = QHBoxLayout()
+        plots_and_rail.setContentsMargins(0, 0, 0, 0)
+        plots_and_rail.setSpacing(0)
+        plots_and_rail.addWidget(self.plot_tabs.plots, stretch=1)
+        plots_and_rail.addWidget(self.pane_rail)
+        plot_column_layout.addLayout(plots_and_rail, stretch=1)
         self._level_plot_buttons_with_table_header()
 
         center_panel = QWidget()
@@ -1828,6 +1862,7 @@ class MainWindow(QMainWindow):
             self.btn_stacked.setChecked(False)   # mutually exclusive
             self.btn_multistack.setChecked(False)
         self.plot_panel.set_multi_axis(checked)
+        self._show_layout_name()
         self._update_status('Plot mode updated', 'Continue plotting or fit the view')
 
     def _toggle_stacked(self, checked: bool) -> None:
@@ -1835,6 +1870,7 @@ class MainWindow(QMainWindow):
             self.btn_multi_axis.setChecked(False)  # mutually exclusive
             self.btn_multistack.setChecked(False)
         self.plot_panel.set_stacked(checked)
+        self._show_layout_name()
         self._update_status('Plot mode updated', 'Continue plotting or fit the view')
 
     def _toggle_multistack(self, checked: bool) -> None:
@@ -1842,7 +1878,63 @@ class MainWindow(QMainWindow):
             self.btn_multi_axis.setChecked(False)
             self.btn_stacked.setChecked(False)
         self.plot_panel.set_multistack(checked)
+        self._show_layout_name()
         self._update_status('Plot mode updated', 'Drag signals into a stack to overlay them')
+
+    # ── The plot toolbar's menus ──────────────────────────────────────────
+
+    def _show_layout_name(self) -> None:
+        """The layout picker names the layout of the tab on screen."""
+        self.btn_layout.setText(LAYOUT_NAMES[plot_type(self.plot_panel)] + MENU_MARK)
+
+    def _fill_layout_menu(self, menu: QMenu) -> None:
+        current = plot_type(self.plot_panel)
+        for mode, name, tip in LAYOUTS:
+            action = menu.addAction(name, lambda *_, mode=mode: self._set_plot_type(mode))
+            action.setCheckable(True)
+            action.setChecked(mode == current)
+            action.setToolTip(tip)
+
+    def _fill_markers_menu(self, menu: QMenu) -> None:
+        # The key is named, not bound: M is the window's own shortcut.
+        add = menu.addAction('Add marker at Cursor 1\tM', self._shortcut_add_marker)
+        add.setEnabled(self.btn_cursor1.isChecked())
+        add.setToolTip('' if add.isEnabled() else 'Switch Cursor 1 on first')
+        menu.addSeparator()
+        if not self.plot_panel.markers():
+            menu.addAction('Delete markers').setEnabled(False)
+            return
+        # Delete all, then each marker to delete it alone.
+        delete = self.plot_panel.delete_markers_menu()
+        delete.setParent(menu)
+        delete.hide()
+        for action in delete.actions():
+            menu.addAction(action)
+
+    def _fill_display_menu(self, menu: QMenu) -> None:
+        step = self.plot_panel.step_lines()
+        for text, is_step, tip in (
+                ('Step lines', True, 'Each value held until the next sample (S)'),
+                ('Straight lines', False, 'Straight lines between the samples (S)')):
+            action = menu.addAction(text, lambda *_, is_step=is_step:
+                                    self._set_step_lines(is_step))
+            action.setCheckable(True)
+            action.setChecked(step == is_step)
+            action.setToolTip(tip)
+        menu.addSeparator()
+        points = menu.addAction('Show data points', lambda *_: self.btn_points.toggle())
+        points.setCheckable(True)
+        points.setChecked(self.btn_points.isChecked())
+        hide = menu.addAction('Hide lines', lambda *_: self.btn_hide_line.toggle())
+        hide.setCheckable(True)
+        hide.setChecked(self.btn_hide_line.isChecked())
+        hide.setEnabled(self.btn_hide_line.isEnabled())
+        hide.setToolTip('The data points only, once they are shown')
+
+    def _fill_more_menu(self, menu: QMenu) -> None:
+        clear = menu.addAction(plot_icon('clear_plot'), 'Clear Plot', self.clear_plot)
+        clear.setEnabled(self.btn_clear_plot.isEnabled())
+        clear.setToolTip('Remove every signal from the plot. Undo (Ctrl+Z) brings them back.')
 
     def _toggle_rect_zoom(self, checked: bool) -> None:
         for panel in self.plot_tabs.panels():     # it stays on from tab to tab

@@ -544,20 +544,38 @@ def test_delete_markers_opens_its_menu_and_deletes_them_all(window, monkeypatch)
 def test_delete_markers_works_from_the_overflow_menu(window, qapp, monkeypatch):
     # Squeezed out of the row, the button is reached through "»", whose
     # entry clicks it; the menu then opens at the pointer.
+    from PySide6.QtGui import QCursor
     panel = window.plot_panel
-    monkeypatch.setattr(panel, '_make_menu', lambda parent=None: _RecordingMenu())
-    _RecordingMenu.shown = []
+    button = window.btn_markers
+    fill_menu = button.menu
+    shown = []
+
+    class _Shown:
+        # The Markers menu as it would open, recorded where a real one
+        # would wait for a click.
+        def __init__(self):
+            self.menu = fill_menu()
+
+        def exec(self, at):
+            shown.append((self.menu, at))
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(button, 'menu', _Shown)
     panel.add_marker(2.0)
     window.show()
     window.resize(300, 600)
     qapp.processEvents()
     row = window.plot_button_row
-    assert window.btn_delete_markers in row.overflowed_buttons()
+    assert button in row.overflowed_buttons()
     row._fill_menu()
-    entry = next(a for a in row.more_menu.actions() if a.text() == 'Delete Markers')
+    entry = next(a for a in row.more_menu.actions() if a.text() == 'Markers')
     assert entry.isEnabled()
     entry.trigger()
-    _RecordingMenu.shown[0].actions()[0].trigger()
+    menu, at = shown[0]
+    assert at == QCursor.pos()
+    next(a for a in menu.actions() if a.text() == 'Delete all markers (1)').trigger()
     assert panel.markers() == []
 
 

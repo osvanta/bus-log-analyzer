@@ -87,7 +87,9 @@ def window(qapp, monkeypatch, tmp_path):
     w = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
     w._temporary_plot_config_path = tmp_path / 'osvanta_temp_plot_config.json'
     w._log = Mock()
-    w.resize(1400, 800)
+    # Wide enough for the readout and a file name beside the pane rail, in
+    # the offscreen platform's wide fallback font.
+    w.resize(1500, 800)
     w.show()
     qapp.processEvents()
     yield w
