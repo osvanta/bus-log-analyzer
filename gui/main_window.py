@@ -82,7 +82,7 @@ from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button, plot_icon
 from gui.plot_toolbar import (
-    LAYOUT_NAMES, LAYOUTS, MENU_MARK, SHOW_RAIL_MARK, MenuButton, PaneRail,
+    LAYOUT_NAMES, LAYOUTS, MENU_MARK, MenuButton, PaneRail,
 )
 from gui.plot_tabs import (
     MAX_NAME_LENGTH,
@@ -605,14 +605,14 @@ class MainWindow(QMainWindow):
                     self.btn_delete_markers, self.btn_clear_plot):
             btn.setParent(self)
             btn.hide()
-        # The views that open beside the plot, on a rail at its right edge:
-        # the Trace window first, then the two panes.
+        # The views that open beside the plot, in a glass list that the
+        # pointer brings out of its right edge: the Trace window first, then
+        # the two panes.
         self.btn_trace = QPushButton('Trace')
         self.btn_trace.setEnabled(False)  # enabled after decode
         self.pane_rail = PaneRail()
         for btn in (self.btn_trace, self.btn_table, self.btn_xy):
             self.pane_rail.add_button(btn)
-        self.pane_rail.hideRequested.connect(lambda: self._show_pane_rail(False))
         # Apart from the plot's own buttons, at the right end of the row.
         self.btn_sync_tabs = icon_button(
             'sync_tabs', 'Synchronize Tabs',
@@ -624,15 +624,6 @@ class MainWindow(QMainWindow):
         self.plot_button_row.add_end_button(self.btn_sync_tabs)
         self.btn_more.setFixedWidth(self.btn_sync_tabs.sizeHint().width())
         self.plot_button_row.add_end_button(self.btn_more)
-        # Last on the row, and only while the rail is hidden: it brings it back.
-        self.btn_show_rail = QPushButton(SHOW_RAIL_MARK)
-        self.btn_show_rail.setAccessibleName('Show side buttons')
-        self.btn_show_rail.setToolTip('Show the Trace, Table and XY buttons beside the plot')
-        self.btn_show_rail.setFixedSize(self.btn_sync_tabs.sizeHint().width(), height)
-        self.btn_show_rail.clicked.connect(lambda: self._show_pane_rail(True))
-        self.plot_button_row.add_end_button(self.btn_show_rail)
-        self._show_pane_rail(
-            bool(read_setting(self._user_settings_path, 'pane_rail_shown', True)), save=False)
 
         # Each acts on the tab on screen when clicked.
         self.btn_fit.clicked.connect(lambda: self.plot_panel.fit_to_window())
@@ -668,12 +659,10 @@ class MainWindow(QMainWindow):
         plot_column_layout.setContentsMargins(0, 0, 0, 0)
         plot_column_layout.setSpacing(0)
         plot_column_layout.addWidget(self.plot_button_row)
-        plots_and_rail = QHBoxLayout()
-        plots_and_rail.setContentsMargins(0, 0, 0, 0)
-        plots_and_rail.setSpacing(0)
-        plots_and_rail.addWidget(self.plot_tabs.plots, stretch=1)
-        plots_and_rail.addWidget(self.pane_rail)
-        plot_column_layout.addLayout(plots_and_rail, stretch=1)
+        plot_column_layout.addWidget(self.plot_tabs.plots, stretch=1)
+        # Not in the layout: the rail floats over the plots' right edge.
+        self.pane_rail.setParent(plot_column)
+        self.pane_rail.attach(self.plot_tabs.plots)
         self._level_plot_buttons_with_table_header()
 
         center_panel = QWidget()
@@ -1900,19 +1889,7 @@ class MainWindow(QMainWindow):
         self._show_layout_name()
         self._update_status('Plot mode updated', 'Drag signals into a stack to overlay them')
 
-    # ── The plot toolbar's rail and menus ─────────────────────────────────
-
-    def _show_pane_rail(self, shown: bool, save: bool = True) -> None:
-        """Show the rail beside the plot, or hide it and offer « on the plot
-        buttons' row to bring it back. Kept for the next start."""
-        self.pane_rail.setVisible(shown)
-        self.btn_show_rail.setVisible(not shown)
-        if not save:
-            return
-        try:
-            write_setting(self._user_settings_path, 'pane_rail_shown', bool(shown))
-        except OSError as exc:
-            self._log(f'Settings save warning: {exc}')
+    # ── The plot toolbar's menus ──────────────────────────────────────────
 
     def _show_layout_name(self) -> None:
         """The layout picker names the layout of the tab on screen."""

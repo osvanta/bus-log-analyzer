@@ -388,11 +388,10 @@ def test_narrow_plot_moves_buttons_into_the_menu_not_the_table_aside(qapp, windo
     splitter = window.center_splitter
     total = sum(splitter.sizes())
 
-    # 400, not less: the pane rail beside the plot keeps its own width.
-    splitter.setSizes([total - 400, 400])
+    splitter.setSizes([total - 300, 300])
     qapp.processEvents()
 
     # The table gets the space it was given; the buttons give way instead.
-    assert splitter.sizes()[1] <= 400
+    assert splitter.sizes()[1] <= 300
     assert window.plot_button_row.overflowed_buttons()
     assert window.plot_button_row.more_button.isVisible()
