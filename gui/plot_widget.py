@@ -150,6 +150,65 @@ class PlotMarker:
     name: str
 
 
+#: The shading of the times a histogram bar covers.
+_SPAN_COLOR = '#36aaf9'
+_SPAN_ALPHA = 70
+
+
+class _TimeSpans(pg.GraphicsObject):
+    """Stretches of time shaded the plot's full height: the times a clicked
+    histogram bar covers. Stretches nearer than a pixel are drawn as one, and
+    each is at least a pixel wide, so thousands of them stay quick and none
+    vanishes when zoomed out."""
+
+    def __init__(self, spans: list[tuple[float, float]], color: QColor) -> None:
+        super().__init__()
+        pairs = np.asarray(spans, dtype=np.float64).reshape(-1, 2)
+        self._starts, self._ends = pairs[:, 0].copy(), pairs[:, 1].copy()
+        self._brush = QBrush(color)
+        self.setZValue(-20)    # under the curves
+
+    def spans(self) -> list[tuple[float, float]]:
+        return list(zip(self._starts.tolist(), self._ends.tolist()))
+
+    def _view(self):
+        view_box = self.getViewBox()
+        if view_box is None:
+            return None
+        return view_box, view_box.viewRange()
+
+    def viewRangeChanged(self) -> None:
+        self.prepareGeometryChange()
+        self.update()
+
+    def boundingRect(self) -> QRectF:
+        view = self._view()
+        if view is None or not self._starts.size:
+            return QRectF()
+        _box, ((x0, x1), (y0, y1)) = view
+        return QRectF(x0, y0, x1 - x0, y1 - y0)
+
+    def paint(self, painter, *_args) -> None:
+        view = self._view()
+        if view is None or not self._starts.size:
+            return
+        view_box, ((x0, x1), (y0, y1)) = view
+        pixel = max(float(view_box.viewPixelSize()[0]), 1e-12)
+        first = int(np.searchsorted(self._ends, x0, side='left'))
+        last = int(np.searchsorted(self._starts, x1, side='right'))
+        if last <= first:
+            return
+        starts, ends = self._starts[first:last], self._ends[first:last]
+        # Join stretches less than a pixel apart.
+        breaks = np.flatnonzero(starts[1:] - ends[:-1] >= pixel)
+        group_starts = starts[np.concatenate(([0], breaks + 1))]
+        group_ends = ends[np.concatenate((breaks, [ends.size - 1]))]
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._brush)
+        for start, end in zip(group_starts.tolist(), group_ends.tolist()):
+            painter.drawRect(QRectF(start, y0, max(end - start, pixel), y1 - y0))
+
+
 class _MarkerLine(pg.InfiniteLine):
     """One marker's line on one plot. Dragged, it moves the marker (and its
     lines on the other rows); double-clicked, it asks for a new name;
@@ -1206,6 +1265,9 @@ class PlotPanel(QWidget):
         # Markers the user set, by time, and the lines drawn for them.
         self._markers: list[PlotMarker] = []
         self._marker_lines: list[tuple[object, _MarkerLine]] = []
+        # The times a clicked histogram bar covers, shaded on the plots.
+        self._time_spans: list[tuple[float, float]] = []
+        self._span_items: list[tuple[object, _TimeSpans]] = []
         self._install_plot_background_menu()
         self._install_plot_click_deselect()
 
@@ -1432,6 +1494,7 @@ class PlotPanel(QWidget):
         self.xy_view = XYView()
         self.xy_view.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         self.xy_view.timeClicked.connect(self.plotAreaClicked.emit)
+        self.xy_view.spansChosen.connect(self.set_time_spans)
         self.xy_view.set_colors(self._background_color,
                                 _cursor_color_on(self._background_color))
         self.side_stack = QSplitter(Qt.Orientation.Horizontal)
@@ -3411,6 +3474,32 @@ class PlotPanel(QWidget):
                 plot_item.addItem(line, ignoreBounds=True)
                 self._marker_lines.append((plot_item, line))
 
+    def set_time_spans(self, spans: list[tuple[float, float]]) -> None:
+        """Shade these stretches of time on the plots; empty clears them."""
+        self._time_spans = [(float(start), float(end)) for start, end in spans]
+        self._draw_time_spans()
+
+    def time_spans(self) -> list[tuple[float, float]]:
+        return list(self._time_spans)
+
+    def _draw_time_spans(self) -> None:
+        for plot_item, item in self._span_items:
+            try:
+                plot_item.removeItem(item)
+            except Exception:
+                pass   # its plot was rebuilt away
+        self._span_items = []
+        if not self._time_spans:
+            return
+        targets = (self._stacked_plots if self._stacked_mode and self._stacked_plots
+                   else [self.plot.plotItem])
+        color = QColor(_SPAN_COLOR)
+        color.setAlpha(_SPAN_ALPHA)
+        for plot_item in targets:
+            item = _TimeSpans(self._time_spans, color)
+            plot_item.addItem(item, ignoreBounds=True)
+            self._span_items.append((plot_item, item))
+
     def _on_marker_dragged(self, line: _MarkerLine) -> None:
         for other in line.siblings:
             if other is not line:
@@ -3480,6 +3569,7 @@ class PlotPanel(QWidget):
         else:
             self._xy_view_width = self.side_stack.sizes()[1]
             self.xy_view.hide()
+            self.xy_view.pick_bar(None)    # its shading goes with it
 
     def _fill_xy(self) -> None:
         plotted = list(self._items.items())
@@ -4346,6 +4436,7 @@ class PlotPanel(QWidget):
             self._fill_xy()
         self._draw_events()   # on whichever plots the rebuild made
         self._draw_markers()
+        self._draw_time_spans()
         # Rebuild the key→row index used by _update_table_values on every cursor drag.
         self._row_lookup = {}
         for row in range(self.table.rowCount()):

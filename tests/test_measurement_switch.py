@@ -130,7 +130,9 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
                 "cursor1": False,
                 "cursor2": False,
                 "xy": {"shown": False, "x": None, "y": None, "color": None,
-                       "whole_measurement": False, "equal_scale": False},
+                       "whole_measurement": False, "equal_scale": False,
+                       "view": "scatter", "bins": "", "show": "percent", "gap": "",
+                       "y_bins": "", "log_color": False},
                 "signals": [
                     {
                         "key": old_series.key,

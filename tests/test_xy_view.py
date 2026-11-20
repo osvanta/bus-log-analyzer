@@ -156,7 +156,9 @@ def test_the_choices_are_kept_and_taken_back(view):
     view.equal_box.setChecked(True)
     state = view.state()
     assert state == {'x': 'T', 'y': 'C', 'color': 'S',
-                     'whole_measurement': True, 'equal_scale': True}
+                     'whole_measurement': True, 'equal_scale': True,
+                     'view': 'scatter', 'bins': '', 'show': 'percent', 'gap': '',
+                     'y_bins': '', 'log_color': False}
 
     from gui.xy_view import XYView
     other = XYView()
@@ -338,7 +340,9 @@ def test_a_tab_is_described_with_its_xy_plot_and_set_up_from_it(window):
     panel.xy_view.choose('color', 'Speed')
     saved = describe_tab(panel, 'Plot 1')
     assert saved['xy'] == {'shown': True, 'x': 'Torque', 'y': 'Temp', 'color': 'Speed',
-                           'whole_measurement': False, 'equal_scale': False}
+                           'whole_measurement': False, 'equal_scale': False,
+                           'view': 'scatter', 'bins': '', 'show': 'percent', 'gap': '',
+                           'y_bins': '', 'log_color': False}
 
     window.plot_tabs.add_tab()
     other = window.plot_panel

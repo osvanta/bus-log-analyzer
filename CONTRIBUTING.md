@@ -146,6 +146,8 @@ bus-log-analyzer/
 │   ├── calculated_signals.py # User-defined derived signals
 │   ├── signal_statistics.py  # Min / max / mean / std dev / RMS between the cursors
 │   ├── xy_data.py            # The points of an XY plot of two signals
+│   ├── histogram.py          # How long a signal spent at each value
+│   ├── residency.py          # How long two signals spent together in each grid cell
 │   ├── converter.py          # Tools ▸ Convert files
 │   ├── mf4_writer.py         # MF4 export
 │   └── export.py             # CSV and Excel export
