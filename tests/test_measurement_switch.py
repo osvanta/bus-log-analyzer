@@ -143,6 +143,7 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
                         "own_axis": False,
                         "multistack_id": -1,
                         "line_style": "solid",
+                        "show_as": "",
                     }
                 ],
             }

@@ -21,6 +21,7 @@ bus-log-analyzer/
 │   ├── xy_data.py                # The points of an XY plot: Y and a colour signal held onto the X signal's sample times, cut to a time range, thinned evenly
 │   ├── histogram.py              # How long a signal spent at each value: time-weighted bars, gap limit, automatic/width/typed bins, the stretches a bar covers
 │   ├── residency.py              # How long two signals spent together in each grid cell (load collective): time cut at both signals' samples, gap limits, a third signal's mean per cell, cell stretches, table text
+│   ├── state_lane.py             # State lanes: which signals become one (a value table and up to 16 values, or a 0/1 bit), their stretches, colour per value (fault words red), what to draw at a zoom (narrow neighbours as one busy block)
 │   ├── debug_inspector.py        # Read-only forensic probes of a measurement that failed to load; the readers stay untouched
 │   ├── signal_properties.py      # Right-click ▸ Properties: a signal's definition, looked up again in its channel's database; file-decoded and calculated signals; why none was found; the raw value on the bus for the signal table's Hex column
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
@@ -46,6 +47,7 @@ bus-log-analyzer/
 │   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Hex, Δ C2−C1, statistics), Table view, measurement events
 │   ├── plot_tabs.py              # PlotTabs: tabs of plots, each with its own PlotPanel; drop and move signals between tabs, synchronized time and cursors, tabs in configurations
 │   ├── stack_sections.py         # MultiStack: the signal table split into one section per stack, level with it (filtered views of the table's model), a line between stacks
+│   ├── state_lane.py             # Drawing a state lane: labelled coloured stretches, hatched busy blocks, a click on a stretch; the name axis of a lane row
 │   ├── plot_tag.py               # The user's tag under the signal table: their text, user name and date, kept beside the application
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
 │   ├── xy_view.py                # XY view: one plotted signal against another beside the plot, coloured by a third; follows the time shown, marks the cursors, a click places Cursor 1; its Histogram view shows one signal's time at each value, its Residency view two signals' time per grid cell; a clicked bar or cell is shaded on the plot

@@ -119,6 +119,7 @@ def _signal_entry(key: str, plotted) -> dict:
         'own_axis': plotted.own_axis,
         'multistack_id': plotted.multistack_id,
         'line_style': plotted.line_style,
+        'show_as': plotted.show_as,
     }
 
 

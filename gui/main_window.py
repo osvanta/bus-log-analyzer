@@ -1539,7 +1539,9 @@ class MainWindow(QMainWindow):
                      bool(entry['axis_visible']) if 'axis_visible' in entry else None),
                     ('own_axis', bool(entry['own_axis']) if 'own_axis' in entry else None),
                     ('multistack_id',
-                     int(entry['multistack_id']) if 'multistack_id' in entry else None)):
+                     int(entry['multistack_id']) if 'multistack_id' in entry else None),
+                    ('show_as', str(entry['show_as'])
+                     if entry.get('show_as') in ('lane', 'line') else None)):
                 if value is not None and getattr(plotted, name) != value:
                     setattr(plotted, name, value)
                     needs_rebuild = True
@@ -2527,6 +2529,7 @@ class MainWindow(QMainWindow):
                     'own_axis':     first._items[k].own_axis,
                     'multistack_id': first._items[k].multistack_id,
                     'line_style':   first._items[k].line_style,
+                    'show_as':      first._items[k].show_as,
                 }
                 for k in first.plotted_keys()
             ],
