@@ -10,14 +10,14 @@ name, and the rail of pane buttons at the plot's right edge.
 
 The toolbar keeps one kind of control in one place: the layout in one
 picker, the view and measuring buttons a click away, the display choices
-that are set once in one menu, and the panes that open beside the plot
-(Table, XY) on the rail.
+that are set once in one menu, and the views that open beside the plot
+(Trace, Table, XY) on the rail, which the user can hide.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QAbstractButton, QMenu, QPushButton, QVBoxLayout, QWidget
 
@@ -59,9 +59,17 @@ class MenuButton(QPushButton):
         menu.deleteLater()
 
 
+#: On the button that hides the rail, and on the one that brings it back.
+HIDE_RAIL_MARK = '»'
+SHOW_RAIL_MARK = '«'
+
+
 class PaneRail(QWidget):
-    """The buttons of the panes that open beside the plot, one under another
-    at the plot's right edge."""
+    """The buttons of the views that open beside the plot, one under another
+    at the plot's right edge, under a button that hides the rail
+    (*hideRequested*; the owner hides it and offers a way back)."""
+
+    hideRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -69,6 +77,13 @@ class PaneRail(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(6, 4, 0, 0)
         self._layout.setSpacing(6)
+        self.hide_button = QPushButton(HIDE_RAIL_MARK)
+        self.hide_button.setFlat(True)
+        self.hide_button.setAccessibleName('Hide side buttons')
+        self.hide_button.setToolTip('Hide these buttons. « at the end of the plot buttons '
+                                    'brings them back.')
+        self.hide_button.clicked.connect(self.hideRequested.emit)
+        self._layout.addWidget(self.hide_button)
         self._layout.addStretch(1)
         self._buttons: list[QAbstractButton] = []
 
@@ -78,7 +93,7 @@ class PaneRail(QWidget):
         # All as wide as the widest text and little more, so they read as one
         # narrow strip: the style's own button width would take the plot's room.
         width = max(b.fontMetrics().horizontalAdvance(b.text()) for b in self._buttons) + 22
-        for each in self._buttons:
+        for each in (*self._buttons, self.hide_button):
             each.setFixedWidth(width)
 
     def buttons(self) -> list[QAbstractButton]:

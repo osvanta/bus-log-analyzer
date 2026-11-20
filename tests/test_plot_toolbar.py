@@ -65,9 +65,10 @@ def test_the_row_is_layout_then_view_then_measuring_then_display(window):
         window.btn_cursor1, window.btn_cursor2, window.btn_markers,
         window.btn_display,
     ]
-    assert row._end_buttons == [window.btn_sync_tabs, window.btn_more]
+    assert row._end_buttons == [window.btn_sync_tabs, window.btn_more, window.btn_show_rail]
     assert not row.overflowed_buttons()
-    assert all(button.isVisible() for button in row._buttons + row._end_buttons)
+    # All but the one that brings a hidden rail back.
+    assert all(button.isVisible() for button in row._buttons + row._end_buttons[:2])
 
 
 def test_what_the_menus_stand_for_is_not_on_the_row(window):
@@ -80,6 +81,7 @@ def test_what_the_menus_stand_for_is_not_on_the_row(window):
 
 def test_every_button_is_one_height(window):
     row = window.plot_button_row
+    window.pane_rail.hide_button.click()             # so that « is laid out too
     assert len({button.height() for button in row._buttons + row._end_buttons}) == 1
 
 
@@ -194,11 +196,13 @@ def test_more_clears_the_plot_when_there_is_one_to_clear(window):
 # ── The pane rail ────────────────────────────────────────────────────────
 
 
-def test_table_and_xy_are_on_a_rail_right_of_the_plot(window, qapp):
+def test_trace_table_and_xy_are_on_a_rail_right_of_the_plot(window, qapp):
     from PySide6.QtCore import QPoint
     rail = window.pane_rail
-    assert rail.buttons() == [window.btn_table, window.btn_xy]
-    assert window.btn_table.isVisible() and window.btn_xy.isVisible()
+    assert rail.buttons() == [window.btn_trace, window.btn_table, window.btn_xy]
+    assert [button.text() for button in rail.buttons()] == ['Trace', 'Table', 'XY']
+    assert all(button.isVisible() for button in rail.buttons())
+    assert window.btn_trace.y() < window.btn_table.y()
     assert window.btn_table not in window.plot_button_row._buttons
     assert window.btn_xy not in window.plot_button_row._buttons
     plots = window.plot_tabs.plots
@@ -260,3 +264,93 @@ def test_a_click_opens_the_menu_under_the_button(qapp, monkeypatch):
     assert _Menu.opened_at == [button.mapToGlobal(QPoint(0, 30))]
     assert _Menu.deleted == 1          # not kept once closed
     button.close()
+
+
+# ── Hiding the rail ──────────────────────────────────────────────────────
+
+
+def test_the_rail_is_shown_at_first_under_its_hide_button(window):
+    rail = window.pane_rail
+    assert rail.isVisible() and rail.hide_button.isVisible()
+    assert rail.hide_button.text() == '»'
+    assert rail.hide_button.y() < window.btn_trace.y()
+    assert not window.btn_show_rail.isVisible()
+
+
+def test_hiding_the_rail_gives_the_plot_its_room_and_offers_it_back(window, qapp):
+    from PySide6.QtCore import QPoint
+    rail, plots, row = window.pane_rail, window.plot_tabs.plots, window.plot_button_row
+    width = plots.width()
+    rail.hide_button.click()
+    qapp.processEvents()
+    assert not rail.isVisible()
+    assert plots.width() > width
+    show = window.btn_show_rail
+    assert show.isVisible() and show.text() == '«'
+    # At the right end of the plot buttons, after More.
+    assert row._end_buttons[-1] is show
+    assert show.x() > window.btn_more.x()
+    assert show.size() == window.btn_more.size()      # one more square button
+    assert show.mapTo(window, QPoint(show.width(), 0)).x() <= row.mapTo(
+        window, QPoint(row.width(), 0)).x()
+
+    show.click()
+    qapp.processEvents()
+    assert rail.isVisible() and not show.isVisible()
+    assert plots.width() == width
+
+
+def test_panes_stay_open_while_the_rail_is_hidden(window, qapp):
+    panel = window.plot_panel
+    window.btn_xy.click()
+    window.pane_rail.hide_button.click()
+    qapp.processEvents()
+    assert panel.xy_view_active() and panel.xy_view.isVisible()
+
+
+def test_a_hidden_rail_is_hidden_at_the_next_start(window, qapp, tmp_path):
+    from gui.main_window import MainWindow
+    from gui.user_settings import read_setting
+    settings = tmp_path / 'osvanta_user_settings.json'
+    assert read_setting(settings, 'pane_rail_shown') is None      # not written at start
+    window.pane_rail.hide_button.click()
+    assert read_setting(settings, 'pane_rail_shown') is False
+
+    again = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
+    again.show()
+    qapp.processEvents()
+    assert not again.pane_rail.isVisible() and again.btn_show_rail.isVisible()
+    again.btn_show_rail.click()
+    assert read_setting(settings, 'pane_rail_shown') is True
+    again.close()
+
+
+def test_a_hidden_show_button_takes_no_room_on_the_row(window, qapp):
+    row = window.plot_button_row
+    shown = row._end_width()
+    window.pane_rail.hide_button.click()
+    qapp.processEvents()
+    assert row._end_width() == shown + window.btn_show_rail.sizeHint().width() + row.SPACING
+
+
+# ── Trace on the rail ────────────────────────────────────────────────────
+
+
+def test_the_trace_button_follows_its_action_and_opens_the_trace(window, monkeypatch):
+    button, action = window.btn_trace, window._act_can_trace
+    assert not button.isEnabled()                    # nothing decoded
+    action.setEnabled(True)
+    action.setToolTip('Open the Trace')
+    assert button.isEnabled() and button.toolTip() == 'Open the Trace'
+    opened = []
+    action.triggered.disconnect()
+    action.triggered.connect(lambda *_: opened.append(1))
+    button.click()
+    assert opened == [1]
+    action.setEnabled(False)
+    assert not button.isEnabled()
+
+
+def test_trace_is_not_on_the_top_row(window):
+    toolbar = window.title_row.toolbar
+    assert window._act_can_trace not in toolbar.actions()
