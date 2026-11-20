@@ -73,6 +73,10 @@ DRAWINGS: dict[str, str] = {
     'delete_markers': ('<path d="M4.5 3v18" stroke-dasharray="3 3"/>'
                        '<g transform="translate(6.7 3.3) scale(.72)" stroke-width="2.4">'
                        + _BIN + '</g>'),
+    # A marker, dashed as on the plot, with a flag: markers are added and
+    # deleted from its menu.
+    'markers': ('<path d="M6 3v18" stroke-dasharray="3 3"/>'
+                '<path d="M6 4.5h12l-3 3.5 3 3.5H6"/>'),
     # For the top row's Decode: square bus pulses that become a smooth signal,
     # drawn heavier to stand beside its bold text.
     'decode': '<path stroke-width="2.3" d="M2 16h2.5V8H7.5v8H10c1.8 0 2.4-8 5-8s3.2 8 5 8h2"/>',
