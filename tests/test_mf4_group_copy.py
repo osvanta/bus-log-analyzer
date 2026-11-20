@@ -192,7 +192,9 @@ def test_a_channel_the_copy_cannot_take_is_read_directly(mf4, quick):
         assert source._copies[group] is not None
         got = _parts(source.read_groups([group], {"Vector"}), group, "Vector")
         _same(got, _read_direct(source, group, "Vector"))
-        assert got[0].values.shape == (CYCLES, 3)
+        # Three bytes a sample: text, one label per sample (test_array_channels).
+        assert got[0].values.shape == (CYCLES,)
+        assert got[0].display[1] == "03 04 05"
     finally:
         source.close()
 
