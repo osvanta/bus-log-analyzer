@@ -149,6 +149,38 @@ class LazyTextValues:
         return (self._decode(value) for value in self._values)
 
 
+class ArrayRowLabels(LazyTextValues):
+    """
+    The labels of a channel that holds several values per sample: a byte
+    array (the payload column of a bus frame), a member array of a structure,
+    an array channel. A signal has one value per time stamp, so such a
+    channel is text, as a structure channel is: bytes as ``0A 00 FF``, any
+    other row as its list of values. Written when shown; the rows stay as
+    they were read.
+    """
+
+    __slots__ = ()
+
+    @staticmethod
+    def _decode(row) -> str:
+        row = np.asarray(row)
+        if row.ndim == 1 and row.dtype == np.uint8:
+            return row.tobytes().hex(" ").upper()
+        return str(row.tolist())
+
+
+def _one_value_per_sample(num_arr, labels, samples):
+    """
+    *num_arr* and *labels* as they are when *samples* holds one value per
+    sample. Where it holds several, the channel is read as text: each
+    sample's position as its number, as for any text without one, and its
+    row as the label (ArrayRowLabels).
+    """
+    if np.ndim(num_arr) == 1:
+        return num_arr, labels
+    return np.arange(len(samples), dtype=np.float64), ArrayRowLabels(samples)
+
+
 def _numeric_default(conversion):
     """
     The numeric conversion an MDF4 value table falls back to, or None.
@@ -832,6 +864,7 @@ class MDFReader:
                         num_arr   = np.arange(len(ts_arr), dtype=np.float64)
                         disp_list = _decode_str_arr(eng_arr)
 
+                num_arr, disp_list = _one_value_per_sample(num_arr, disp_list, eng_arr)
                 item = ((grp_name, ch_name, unit), ts_arr, num_arr, disp_list)
                 if include_group_index:
                     yield (group_idx, *item)
@@ -970,6 +1003,7 @@ class MDFReader:
                     num_arr = np.arange(len(ts_arr), dtype=np.float64)
                     disp_values = LazyTextValues(eng_arr)
 
+            num_arr, disp_values = _one_value_per_sample(num_arr, disp_values, eng_arr)
             item = (
                 (group_names[group_idx], ch_name, unit),
                 ts_arr,
@@ -1381,12 +1415,13 @@ def _physical_arrays(raw: np.ndarray, conversion):
     """
     default = _numeric_default(conversion)
     if default is not None:
-        return _table_arrays(raw, conversion, default)
+        return _one_value_per_sample(*_table_arrays(raw, conversion, default), raw)
     eng = conversion.convert(raw) if conversion else raw
     if _is_text(eng):
         # Text through a conversion: the raw number, and the text to show.
-        return np.asarray(raw, dtype=np.float64), LazyTextValues(eng)
+        return _one_value_per_sample(
+            np.asarray(raw, dtype=np.float64), LazyTextValues(eng), eng)
     try:
-        return np.asarray(eng, dtype=np.float64), []
+        return _one_value_per_sample(np.asarray(eng, dtype=np.float64), [], eng)
     except (TypeError, ValueError):
         return np.arange(len(eng), dtype=np.float64), LazyTextValues(eng)
