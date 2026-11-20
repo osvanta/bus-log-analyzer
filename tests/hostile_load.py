@@ -65,6 +65,7 @@ else:
         out["signals"][str(getattr(series, "name", key))] = len(series.numpy_timestamps())
     trace = getattr(store, "raw_frame_store", None)
     out["frames"] = len(trace) if trace is not None else 0
+    out["warnings"] = list(getattr(store, "load_warnings", ()) or ())
     store.close()
 print("RESULT " + json.dumps(out), flush=True)
 """

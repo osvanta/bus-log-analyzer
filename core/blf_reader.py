@@ -315,6 +315,8 @@ class BLFReaderService:
         # What the logger recorded about the bus (BusStatus, absolute times),
         # from the same pass.
         self.bus_status: list[BusStatus] = []
+        # Why that pass ended before the end of the log, if it did.
+        self.load_warnings: list[str] = []
 
     def __iter__(self) -> Iterator[RawFrame]:
         """Yield RawFrame objects. **CAN only** — python-can skips LIN.
@@ -441,6 +443,7 @@ class BLFReaderService:
                 yield batch(pending)
             self.lin_event_objects = reader.lin_event_objects
             self.bus_status = reader.bus_status
+            self.load_warnings = list(reader.load_warnings)
         except Exception as exc:
             raise BLFReadError(f"Failed to read BLF file '{self.path}': {exc}") from exc
 

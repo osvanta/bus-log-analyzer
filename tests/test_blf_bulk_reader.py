@@ -407,14 +407,34 @@ def test_padding_that_starts_like_a_signature(tmp_path):
     assert len(_assert_same_rows(path)["timestamps"]) == 200
 
 
-def test_object_of_size_zero_is_an_error_not_a_hang(tmp_path):
-    rng = random.Random(6)
+@pytest.mark.parametrize("seed", range(6))
+def test_object_of_size_zero_ends_the_log_with_a_warning_not_a_hang(tmp_path, seed):
+    # The one case read differently from the per-object reader, which fails:
+    # the frames before the object are kept. The containers are cut at
+    # random places, so the object also falls across a container boundary.
+    rng = random.Random(seed)
     good = _object(86, _CAN_MSG.pack(1, 0, 8, 0x100, bytes(8)), 1)
     zero = _BASE.pack(b"LOBJ", 32, 1, 0, 86) + bytes(32)
     path = tmp_path / "zero_size.blf"
-    _write_blf(path, good * 5 + zero + good * 5, rng)
+    _write_blf(path, good * 50 + zero + good * 50, rng, container_sizes=(20, 400))
+
+    service = BLFReaderService(path)
+    rows = sum(len(batch[1]) for batch in service.iter_raw_batches())
+
+    assert rows == 50
+    assert service.load_warnings == [bulk.DAMAGED_OBJECT_WARNING]
     with pytest.raises(BLFReadError):
-        list(BLFReaderService(path).iter_raw_batches())
+        list(service.iter_raw_batches_per_object())
+
+
+def test_a_whole_log_has_no_warning(tmp_path):
+    path = tmp_path / "whole.blf"
+    _random_blf(path, seed=3, objects=200)
+
+    service = BLFReaderService(path)
+    list(service.iter_raw_batches())
+
+    assert service.load_warnings == []
 
 
 def test_a_partial_read_stops_the_workers(tmp_path, monkeypatch):

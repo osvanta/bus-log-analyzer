@@ -8,9 +8,10 @@
 
 Opening a log whose last object stated a size of zero froze the window for
 good: the channel pre-scan reads through python-can on the GUI thread, and
-python-can found that object again and again. Every read that could loop
-runs in a child process with a time limit, so a regression fails here instead
-of freezing the test run.
+python-can found that object again and again. Such a log now opens with the
+frames before that object and a warning that the rest was skipped. Every read
+that could loop runs in a child process with a time limit, so a regression
+fails here instead of freezing the test run.
 """
 
 from __future__ import annotations
@@ -102,31 +103,47 @@ def test_an_object_cut_by_the_end_of_the_data_is_left_to_the_reader():
 # ── Opening such a log ────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("bad", _BAD_OBJECTS.values(), ids=_BAD_OBJECTS.keys())
-def test_a_log_ending_in_an_undersized_object_opens_or_is_refused(
+def test_a_log_ending_in_an_undersized_object_opens_with_its_good_frames(
         tmp_path, sample_dbc_path, bad):
     path = _blf(tmp_path / "undersized.blf", _GOOD, bad)
 
     result = load_in_child(path, sample_dbc_path, tmp_path)
 
-    # The pre-scan still offers the channel and frame of the good part.
-    assert result["channels"] == [["CAN", 1]]
-    assert result["ids"] == [0x100]
-    if result["outcome"] == "refused":
-        assert "smaller than its own header" in result["message"]
-    else:
-        assert result["outcome"] == "loaded"
-        assert result["signals"]["EngSpeed"] == FRAMES
+    _assert_the_good_part_loaded(result)
 
 
-def test_an_undersized_object_between_good_ones_does_not_hang(
-        tmp_path, sample_dbc_path):
-    bad = _BAD_OBJECTS["zero size, version 1"]
+@pytest.mark.parametrize("bad", _BAD_OBJECTS.values(), ids=_BAD_OBJECTS.keys())
+def test_frames_after_an_undersized_object_are_skipped_with_a_warning(
+        tmp_path, sample_dbc_path, bad):
+    # Nothing after the object can be found again: its size is the only
+    # way to the next one.
     path = _blf(tmp_path / "middle.blf", _GOOD + bad + _GOOD)
 
     result = load_in_child(path, sample_dbc_path, tmp_path)
 
+    _assert_the_good_part_loaded(result)
+
+
+def test_a_log_that_starts_with_an_undersized_object_is_refused(
+        tmp_path, sample_dbc_path):
+    path = _blf(tmp_path / "first.blf", _BAD_OBJECTS["zero size, all zeros"] + _GOOD)
+
+    result = load_in_child(path, sample_dbc_path, tmp_path)
+
+    assert result["channels"] == []
+    assert result["outcome"] == "refused"
+
+
+def _assert_the_good_part_loaded(result: dict) -> None:
+    # The pre-scan offers the channel and frame of the good part.
     assert result["channels"] == [["CAN", 1]]
-    assert result["outcome"] in ("refused", "loaded")
+    assert result["ids"] == [0x100]
+    assert result["outcome"] == "loaded", result
+    samples = {name.split("::")[-1]: count for name, count in result["signals"].items()}
+    assert samples["EngSpeed"] == FRAMES
+    assert result["frames"] == FRAMES
+    assert len(result["warnings"]) == 1
+    assert "smaller than its own header" in result["warnings"][0]
 
 
 _EVERY_READER = r"""
@@ -161,3 +178,5 @@ def test_no_blf_reader_loops_on_a_zero_size_object(tmp_path):
     assert len(lines) == 5, stderr[-3000:]
     for line in lines:
         assert " refused " in line or line.endswith(f" read {FRAMES}"), line
+    # The reader the application loads with keeps the good frames.
+    assert f"batches read {FRAMES}" in lines
