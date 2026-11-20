@@ -27,6 +27,11 @@ back to following the candidates one at a time, which is still exact.
 ``tests/test_blf_bulk_reader.py`` compares every row against the per-object
 reader on files built to break it: payloads holding ``LOBJ``, objects split
 across containers, every frame type and both header versions.
+
+One case is handled differently on purpose.  An object that states a size
+smaller than its own header cannot be stepped over, so nothing after it can
+be read.  The per-object reader fails there; this reader keeps the frames
+before it, stops, and says so in ``load_warnings``.
 """
 from __future__ import annotations
 
@@ -437,12 +442,20 @@ def _chain_status(scan: _Scan, indices) -> list[BusStatus]:
     return [scan.status[i] for i in indices if i in scan.status]
 
 
-def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int, list[BusStatus]]:
+#: Said when a log is read only up to an object it cannot step over.
+DAMAGED_OBJECT_WARNING = (
+    "The log is damaged: an object states a size smaller than its own header. "
+    "The frames before it were loaded; everything after it was skipped."
+)
+
+
+def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int, list[BusStatus], bool]:
     """Walk the object chain from *pos* the way python-can does.
 
     Returns the frames of every complete object on the chain, the offset the
     walk stopped at (where the next block's data must be appended), how many
-    LIN bus events it passed, and the bus status records it passed.
+    LIN bus events it passed, the bus status records it passed, and whether
+    it stopped at an object smaller than its own header, which ends the log.
     """
     starts = scan.starts
     count = len(starts)
@@ -471,7 +484,7 @@ def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int, list[BusStatus]]:
             rows = slice(int(scan.frame_rows[first]), int(scan.frame_rows[stop]))
             events = int(np.count_nonzero(scan.events[first:stop]))
             status = _chain_status(scan, sorted(i for i in scan.status if first <= i < stop))
-            return scan.frames.select(rows), consumed, events, status
+            return scan.frames.select(rows), consumed, events, status, False
 
     # A candidate inside some payload: follow the chain one object at a time.
     begin = starts.tolist()
@@ -481,6 +494,7 @@ def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int, list[BusStatus]]:
     following = np.searchsorted(starts, scan.ends).tolist()
     chain: list[int] = []
     index = first
+    damaged = False
     while True:
         if index >= count or begin[index] > pos + 4:
             if pos + 8 > scan.limit:
@@ -489,7 +503,8 @@ def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int, list[BusStatus]]:
         if not complete[index]:
             break
         if size[index] < _BASE_SIZE:
-            raise _blf.BLFParseError("Object smaller than its own header")
+            damaged = True
+            break
         chain.append(index)
         pos = end[index]
         index = following[index]
@@ -498,7 +513,7 @@ def _follow(scan: _Scan, pos: int) -> tuple[_Frames, int, int, list[BusStatus]]:
     is_frame = scan.frame_rows[chain_array + 1] > frame_rows
     events = int(np.count_nonzero(scan.events[chain_array]))
     return (scan.frames.select(frame_rows[is_frame]), pos, events,
-            _chain_status(scan, chain))
+            _chain_status(scan, chain), damaged)
 
 
 def _decompress_block(containers: list[tuple[int, memoryview]],
@@ -598,6 +613,8 @@ class BulkBLFReader:
         self.lin_event_objects = 0
         # What the logger recorded about the bus, from the same pass.
         self.bus_status: list[BusStatus] = []
+        # Why the last pass ended before the end of the log, if it did.
+        self.load_warnings: list[str] = []
 
     def iter_frames(self) -> Iterator[_Frames]:
         """Yield frame columns block by block, in file order."""
@@ -617,7 +634,9 @@ class BulkBLFReader:
             # pre-scan) does not wait for a dozen blocks it will never read.
             in_flight = 2
             exhausted = False
-            while True:
+            damaged = False
+            self.load_warnings = []
+            while not damaged:
                 while not exhausted and len(pending) < in_flight:
                     group = next(groups, None)
                     if group is None:
@@ -634,24 +653,26 @@ class BulkBLFReader:
                 parts: list[_Frames] = []
                 pos = 0
                 if carry:
-                    carry, pos, carried_events, carried, carried_status = self._straddle(
-                        carry, scan, start_timestamp
-                    )
+                    (carry, pos, carried_events, carried, carried_status,
+                     damaged) = self._straddle(carry, scan, start_timestamp)
                     events += carried_events
                     status += carried_status
                     if len(carried):
                         parts.append(carried)
-                    if carry:
+                    if carry and not damaged:
                         # One object spans the whole block; keep collecting.
                         continue
-                frames, consumed, block_events, block_status = _follow(scan, pos)
-                events += block_events
-                status += block_status
-                if len(frames):
-                    parts.append(frames)
-                carry = scan.data[consumed:scan.limit]
+                if not damaged:
+                    frames, consumed, block_events, block_status, damaged = _follow(scan, pos)
+                    events += block_events
+                    status += block_status
+                    if len(frames):
+                        parts.append(frames)
+                    carry = scan.data[consumed:scan.limit]
                 if parts:
                     yield _Frames.join(parts)
+            if damaged:
+                self.load_warnings = [DAMAGED_OBJECT_WARNING]
             self.lin_event_objects = events
             self.bus_status = status
         finally:
@@ -664,7 +685,8 @@ class BulkBLFReader:
 
         Returns what is still carried (non-empty only when the object is not
         finished even with all of *scan*), where the walk resumes in *scan*,
-        the LIN events passed, the frames found and the bus status records.
+        the LIN events passed, the frames found, the bus status records, and
+        whether the walk stopped at an object smaller than its own header.
         """
         # Enough of this block to finish the object, if its size is readable
         # yet; the signature may follow up to four bytes of padding.
@@ -678,11 +700,13 @@ class BulkBLFReader:
             head = min(head, scan.limit)
             joined = carry + scan.data[:head]
             small = _scan(joined + _PAD_BYTES, start_timestamp)
-            frames, consumed, events, status = _follow(small, 0)
+            frames, consumed, events, status, damaged = _follow(small, 0)
+            if damaged:
+                return b"", 0, events, frames, status, True
             if consumed > len(carry):
                 # Finished; the walk resumes in this block where it stopped.
-                return b"", consumed - len(carry), events, frames, status
+                return b"", consumed - len(carry), events, frames, status, False
             if head == scan.limit:
                 # The object is not finished even by the end of this block.
-                return joined[consumed:], 0, events, frames, status
+                return joined[consumed:], 0, events, frames, status, False
             head *= 2

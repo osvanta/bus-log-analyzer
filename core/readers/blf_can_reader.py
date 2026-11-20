@@ -100,6 +100,13 @@ class BLFCANReader:
         return service.bus_status if service is not None else []
 
     @property
+    def load_warnings(self) -> list[str]:
+        """Why the last iter_raw_batches() pass ended before the end of the
+        log, if it did; the load worker shows these to the user."""
+        service = getattr(self, '_service', None)
+        return service.load_warnings if service is not None else []
+
+    @property
     def decoder(self) -> DBCDecoder:
         """Expose the decoder so LoadWorker can call diagnostics_text()."""
         return self._decoder
