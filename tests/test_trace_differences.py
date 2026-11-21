@@ -225,7 +225,7 @@ def test_changed_bytes_are_marked(dialog):
 def test_a_filter_does_not_change_delta_time(dialog, qapp):
     # Showing only every frame of 0x100 whose data has "AA": still 10 ms.
     dialog.search_edit.setText('100')
-    dialog._on_filter_changed()
+    dialog.only_hits_button.setChecked(True)     # only the frames found
     rows = _rows(dialog)
     assert {r[0] for r in rows} == {'100'}
     assert {r[2] for r in rows[1:]} == {'10.000'}
