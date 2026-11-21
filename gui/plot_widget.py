@@ -140,6 +140,36 @@ class _CursorLine(pg.InfiniteLine):
 
 #: Markers: dashed amber lines, named at the top of the plot.
 _MARKER_COLOR = '#E8A317'
+#: Where a marker's name stands along its line (1.0 is the top of the plot),
+#: the room kept between two names on one row, and around a row [pixels].
+_MARKER_NAME_POSITION = 0.97
+_MARKER_NAME_GAP = 8.0
+_MARKER_ROW_PAD = 2.0
+
+
+def marker_name_rows(spans: list[tuple[float, float]], rows: int,
+                     gap: float = _MARKER_NAME_GAP) -> list[int]:
+    """The row for each marker name so that no two names share pixels.
+
+    *spans* are the names' ``(left, right)`` edges in pixels, in any order;
+    the answer has one row per span, 0 for the top row.  A name takes the
+    highest row that is free where it starts, *gap* pixels clear of the name
+    before it.  With every one of the *rows* taken it goes where the least is
+    covered: the row whose last name ends first.
+    """
+    out = [0] * len(spans)
+    ends: list[float] = []            # right edge of the last name, per row
+    for i in sorted(range(len(spans)), key=lambda k: spans[k]):
+        left, right = spans[i]
+        row = next((r for r, end in enumerate(ends) if left >= end + gap), None)
+        if row is None and len(ends) < max(1, rows):
+            ends.append(right)
+            row = len(ends) - 1
+        elif row is None:
+            row = min(range(len(ends)), key=ends.__getitem__)
+        ends[row] = max(ends[row], right)
+        out[i] = row
+    return out
 
 
 @dataclass(slots=True)
@@ -161,7 +191,8 @@ class _MarkerLine(pg.InfiniteLine):
             pen=pg.mkPen(color=_MARKER_COLOR, width=1.2, style=style),
             hoverPen=pg.mkPen(color=_MARKER_COLOR, width=3.0, style=style),
             label=marker.name if named else None,
-            labelOpts={'position': 0.97, 'color': _MARKER_COLOR, 'movable': False})
+            labelOpts={'position': _MARKER_NAME_POSITION, 'color': _MARKER_COLOR,
+                       'movable': False})
         self.marker = marker
         self.siblings: list[_MarkerLine] = [self]
         self._panel = weakref.ref(panel)
@@ -1205,6 +1236,8 @@ class PlotPanel(QWidget):
         # Markers the user set, by time, and the lines drawn for them.
         self._markers: list[PlotMarker] = []
         self._marker_lines: list[tuple[object, _MarkerLine]] = []
+        # The view the marker names are laid out in (the top plot's).
+        self._marker_names_view = None
         self._install_plot_background_menu()
         self._install_plot_click_deselect()
 
@@ -3377,6 +3410,7 @@ class PlotPanel(QWidget):
             except Exception:
                 pass   # its plot was rebuilt away
         self._marker_lines = []
+        self._watch_marker_names_view(None)
         if not self._markers:
             return
         targets = (self._stacked_plots if self._stacked_mode and self._stacked_plots
@@ -3391,6 +3425,73 @@ class PlotPanel(QWidget):
                 line.sigPositionChangeFinished.connect(self._on_marker_moved)
                 plot_item.addItem(line, ignoreBounds=True)
                 self._marker_lines.append((plot_item, line))
+        self._watch_marker_names_view(targets[0].getViewBox())
+        self._place_marker_names()
+
+    def _watch_marker_names_view(self, view) -> None:
+        """Lay the marker names out again whenever *view*, the plot they are
+        written in, is zoomed, panned or resized; None watches nothing."""
+        old = self._marker_names_view
+        if old is not None:
+            try:
+                old.sigXRangeChanged.disconnect(self._place_marker_names)
+                old.sigResized.disconnect(self._place_marker_names)
+            except (RuntimeError, TypeError):
+                pass   # the plot was rebuilt away
+        self._marker_names_view = view
+        if view is not None:
+            view.sigXRangeChanged.connect(self._place_marker_names)
+            view.sigResized.connect(self._place_marker_names)
+
+    def _place_marker_names(self, *_args) -> None:
+        """Put marker names that would write over each other on rows of
+        their own, the one that starts further left on the top row.
+
+        Two markers closer than a name is wide had their names on top of
+        each other, and neither could be read.  The rows follow the zoom: the
+        same markers, zoomed in far enough, stand on one row again.  A plot
+        too low for another row (a stack of many signals) keeps what fits.
+        """
+        view = self._marker_names_view
+        named = [line for _plot, line in self._marker_lines
+                 if getattr(line, 'label', None) is not None]
+        if view is None or not named:
+            return
+        (x0, x1), width, height = view.viewRange()[0], view.width(), view.height()
+        if not (x1 > x0 and width > 0 and height > 0):
+            return
+        per_second, centre = width / (x1 - x0), 0.5 * (x0 + x1)
+        spans, shown, name_height, margin = [], [], 0.0, 0.0
+        for line in named:
+            box = line.label.boundingRect()
+            x = (line.value() - x0) * per_second
+            # A name stands right of its line in the left half of the view
+            # and left of it in the right half, as the plotting library
+            # places it, so that it stays inside the plot.
+            left = x if line.value() < centre else x - box.width()
+            if left < width and left + box.width() > 0:      # in view, at least in part
+                spans.append((left, left + box.width()))
+                shown.append(line)
+                name_height = max(name_height, box.height())
+                margin = line.label.textItem.document().documentMargin()
+        if not shown:
+            return
+        # A name's rectangle has an empty margin around its letters.  Rows
+        # and edges are measured on the letters: the rows stand a line of
+        # text apart, and a margin may lie over the next row or the edge.
+        letters = max(1.0, name_height - 2.0 * margin)
+        step = letters + _MARKER_ROW_PAD
+        # The top row as high as it always was, but in a low plot no higher
+        # than the letters fit under the plot's upper edge.  [pixels down
+        # from that edge to the middle of the top row]
+        first = max((1.0 - _MARKER_NAME_POSITION) * height,
+                    _MARKER_ROW_PAD + 0.5 * letters)
+        fit = 1 + int(max(0.0, height - _MARKER_ROW_PAD - 0.5 * letters - first) // step)
+        rows = marker_name_rows(spans, fit)
+        for line, row in zip(shown, rows):
+            position = 1.0 - (first + row * step) / height
+            if abs(line.label.orthoPos - position) > 1e-9:
+                line.label.setPosition(position)
 
     def _on_marker_dragged(self, line: _MarkerLine) -> None:
         for other in line.siblings:
@@ -3398,10 +3499,12 @@ class PlotPanel(QWidget):
                 other.blockSignals(True)
                 other.setPos(line.value())
                 other.blockSignals(False)
+        self._place_marker_names()
 
     def _on_marker_moved(self, line: _MarkerLine) -> None:
         line.marker.time = float(line.value())
         self._markers.sort(key=lambda m: m.time)
+        self._place_marker_names()
         self.markersChanged.emit()
 
     # ── Table view ────────────────────────────────────────────────────────
