@@ -277,8 +277,8 @@ def test_typing_searches_once_after_a_pause(qapp, searched_store, monkeypatch):
 
     dialog = RawFrameDialog(searched_store)
     calls = []
-    real = searched_store.matching_indices
-    monkeypatch.setattr(searched_store, "matching_indices",
+    real = searched_store.search
+    monkeypatch.setattr(searched_store, "search",
                         lambda *a: calls.append(a) or real(*a))
     for typed in ("m", "ms", "msg"):
         dialog.search_edit.setText(typed)
@@ -291,6 +291,6 @@ def test_typing_searches_once_after_a_pause(qapp, searched_store, monkeypatch):
     dialog.search_edit.setText("gear")
     dialog.search_edit.returnPressed.emit()      # Enter searches at once
     assert calls[-1] == ("gear", None)
-    assert isinstance(dialog._matching, np.ndarray)
-    assert not isinstance(dialog._matching, array.array)
+    assert isinstance(dialog._hits, np.ndarray)
+    assert not isinstance(dialog._hits, array.array)
     dialog.close()
