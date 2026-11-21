@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
 from core.signal_properties import hex_text
 from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
+from gui.configuration import usable_colour
 from gui.tabular_view import TabularView
 from gui.edge_tab import _mix
 from gui.plot_icons import drawing_pixmap
@@ -2078,6 +2079,7 @@ class PlotPanel(QWidget):
             self._push_undo()
         # A queued colour takes the place of the next one, which is still used
         # up, so the signals added after it get the colours they always got.
+        color = usable_colour(color)
         default = next(self._color_cycle) if color is None else None
         color = color or self._pending_colors.pop(key, None) or default
         was_empty = not self._items
@@ -3997,7 +3999,10 @@ class PlotPanel(QWidget):
     # ── Color / background ────────────────────────────────────────────────
 
     def set_series_color(self, key: str, color: str) -> None:
-        if key not in self._items:
+        """Colour one series. A colour that cannot be drawn is ignored: kept,
+        it raised at every redraw from then on and was saved with the plot."""
+        color = usable_colour(color)
+        if key not in self._items or color is None:
             return
         self._push_undo()
         plotted = self._items[key]
@@ -4046,10 +4051,18 @@ class PlotPanel(QWidget):
     def set_pending_colors(self, colors: dict[str, str]) -> None:
         """Queue colours for series that are not plotted yet, as
         set_pending_line_styles does line styles. Replaces any previous queue;
-        each entry is consumed once."""
-        self._pending_colors = {str(key): str(color) for key, color in (colors or {}).items()}
+        each entry is consumed once. One that cannot be drawn is left out,
+        so its series gets the next colour as if none had been queued."""
+        usable = {str(key): usable_colour(color) for key, color in (colors or {}).items()}
+        self._pending_colors = {key: color for key, color in usable.items()
+                                if color is not None}
 
     def set_background_color(self, color: str) -> None:
+        """Colour the plot's background; a colour that cannot be drawn is
+        ignored."""
+        color = usable_colour(color)
+        if color is None:
+            return
         self._background_color = color
         self.plot.setBackground(color)
         self.glw.setBackground(color)
