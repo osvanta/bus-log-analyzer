@@ -100,8 +100,11 @@ def test_only_the_time_shown_is_drawn_unless_the_whole_is_asked_for(view):
     view._redraw()                      # what the timer does once the range rests
     assert _drawn(view) == ([20, 30, 40], [2, 3, 4])
     view.whole_box.setChecked(True)
+    assert _drawn(view)[0] == [20, 30, 40]          # not until Update
+    view.apply_settings()
     assert len(_drawn(view)[0]) == 5
     view.whole_box.setChecked(False)
+    view.apply_settings()
     assert _drawn(view)[0] == [20, 30, 40]
 
 
@@ -154,6 +157,7 @@ def test_the_choices_are_kept_and_taken_back(view):
     view.choose('color', 'S')
     view.whole_box.setChecked(True)
     view.equal_box.setChecked(True)
+    view.apply_settings()
     state = view.state()
     assert state == {'x': 'T', 'y': 'C', 'color': 'S',
                      'whole_measurement': True, 'equal_scale': True,
@@ -184,8 +188,10 @@ def test_equal_scale_locks_the_two_axes_together(view):
     view_box = view.plot.getPlotItem().vb
     assert not view_box.state['aspectLocked']
     view.equal_box.setChecked(True)
+    view.apply_settings()
     assert view_box.state['aspectLocked']
     view.equal_box.setChecked(False)
+    view.apply_settings()
     assert not view_box.state['aspectLocked']
 
 
@@ -211,21 +217,28 @@ def window(qapp, monkeypatch, tmp_path):
     qapp.processEvents()
 
 
+def _left_and_width(panel, widget):
+    from PySide6.QtCore import QPoint
+    return widget.mapTo(panel, QPoint(0, 0)).x(), widget.width()
+
+
 def test_the_xy_button_puts_the_xy_plot_right_of_the_plot(window, qapp):
     panel = window.plot_panel
     window.resize(1400, 800)
     window.show()
     qapp.processEvents()
     assert not panel.xy_view.isVisible()
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     qapp.processEvents()
     assert panel.xy_view_active()
     assert panel.view_stack.isVisible() and panel.xy_view.isVisible()
-    plots, xy = panel.side_stack.sizes()
-    assert plots > xy > 0
+    # A panel right of the plot, narrower than it (gui.panel_area).
+    plots, xy = _left_and_width(panel, panel.view_stack), _left_and_width(panel, panel.xy_view)
+    assert plots[0] < xy[0]
+    assert plots[1] > xy[1] > 0
     assert panel.xy_view.x_box.count() == 3
     assert (panel.xy_view.chosen('x'), panel.xy_view.chosen('y')) == ('Speed', 'Torque')
-    window.btn_xy.setChecked(False)
+    window.plot_panel.set_xy_view(False)
     qapp.processEvents()
     assert not panel.xy_view_active() and not panel.xy_view.isVisible()
     assert panel.view_stack.isVisible()
@@ -237,11 +250,15 @@ def test_the_xy_plot_and_the_table_can_both_be_shown(window, qapp):
     window.show()
     qapp.processEvents()
     window.btn_table.setChecked(True)
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     qapp.processEvents()
     assert panel.view_stack.isVisible() and panel.tabular.isVisible()
     assert panel.xy_view.isVisible()
-    assert all(size > 0 for size in panel.area_stack.sizes() + panel.side_stack.sizes())
+    # The table right of the plot, the XY plot right of both, as before panels.
+    plots, table, xy = (_left_and_width(panel, widget)
+                        for widget in (panel.view_stack, panel.tabular, panel.xy_view))
+    assert plots[0] < table[0] < xy[0]
+    assert all(width > 0 for _left, width in (plots, table, xy))
 
 
 def test_the_xy_plot_keeps_the_width_it_was_dragged_to(window, qapp):
@@ -249,19 +266,23 @@ def test_the_xy_plot_keeps_the_width_it_was_dragged_to(window, qapp):
     window.resize(1400, 800)
     window.show()
     qapp.processEvents()
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     qapp.processEvents()
-    total = sum(panel.side_stack.sizes())
-    panel.side_stack.setSizes([total - 320, 320])
-    window.btn_xy.setChecked(False)
-    window.btn_xy.setChecked(True)
+    splitter = panel.xy_view.parentWidget().parentWidget().parentWidget()   # its place's
+    total = sum(splitter.sizes())
+    splitter.setSizes([total - 320, 320])
     qapp.processEvents()
-    assert panel.side_stack.sizes()[1] == 320
+    window.plot_panel.set_xy_view(False)
+    qapp.processEvents()
+    window.plot_panel.set_xy_view(True)
+    qapp.processEvents()
+    from gui.panel_area import CARD_INSET
+    assert abs(panel.xy_view.width() + 2 * CARD_INSET - 320) <= 2      # inside its card
 
 
 def test_it_follows_the_time_the_time_plot_shows(window, qapp):
     panel = window.plot_panel
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     panel.show_time_range(0.9, 3.1)
     qapp.processEvents()
     panel.xy_view._redraw()
@@ -270,7 +291,7 @@ def test_it_follows_the_time_the_time_plot_shows(window, qapp):
 
 def test_plotting_another_signal_offers_it(window, qapp):
     panel = window.plot_panel
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     panel.add_series('Load', _series('Load', _TIMES, [0, 0, 1, 1, 2]))
     panel._rebuild_curves(preserve_selection=True)
     assert panel.xy_view.x_box.count() == 4
@@ -281,7 +302,7 @@ def test_a_click_on_a_point_places_cursor_1(window, qapp):
     panel = window.plot_panel
     window.resize(1400, 800)
     window.show()
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     qapp.processEvents()
     assert panel.xy_view.pick(40.0, 4.0)
     assert window.btn_cursor1.isChecked()
@@ -291,7 +312,7 @@ def test_a_click_on_a_point_places_cursor_1(window, qapp):
 
 def test_the_cursors_moving_move_their_marks(window):
     panel = window.plot_panel
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     assert panel.xy_view.mark_position(1) is None
     window.btn_cursor1.setChecked(True)
     panel.move_cursor1(1.2)
@@ -309,7 +330,7 @@ def test_the_marks_are_right_when_the_view_opens_with_a_cursor_on(window):
     panel = window.plot_panel
     window.btn_cursor1.setChecked(True)
     panel.move_cursor1(2.0)
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     assert panel.xy_view.mark_position(1) == (30.0, 3.0)
 
 
@@ -320,34 +341,36 @@ def test_the_background_colour_is_the_plots(window):
     assert panel.xy_view._foreground != '#ffffff'
 
 
-def test_each_tab_has_its_own_xy_plot_and_the_button_follows(window, qapp):
+def test_each_tab_has_its_own_xy_plots(window, qapp):
     first = window.plot_panel
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     window.plot_tabs.add_tab()
     second = window.plot_panel
     assert second is not first
-    assert not window.btn_xy.isChecked() and not second.xy_view_active()
+    assert not second.xy_view_active() and second.xy_views() == {}
     window.plot_tabs.bar.setCurrentIndex(0)
-    assert window.btn_xy.isChecked() and first.xy_view_active()
+    assert first.xy_view_active() and list(first.xy_views()) == ['xy']
 
 
 def test_a_tab_is_described_with_its_xy_plot_and_set_up_from_it(window):
     from gui.plot_tabs import describe_tab
     panel = window.plot_panel
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     panel.xy_view.choose('x', 'Torque')
     panel.xy_view.choose('y', 'Temp')
     panel.xy_view.choose('color', 'Speed')
     saved = describe_tab(panel, 'Plot 1')
-    assert saved['xy'] == {'shown': True, 'x': 'Torque', 'y': 'Temp', 'color': 'Speed',
-                           'whole_measurement': False, 'equal_scale': False,
-                           'view': 'scatter', 'bins': '', 'show': 'percent', 'gap': '',
-                           'y_bins': '', 'log_color': False}
+    assert 'xy' not in saved
+    assert saved['xy_views'] == [{'key': 'xy', 'name': 'XY plot',
+                                  'x': 'Torque', 'y': 'Temp', 'color': 'Speed',
+                                  'whole_measurement': False, 'equal_scale': False,
+                                  'view': 'scatter', 'bins': '', 'show': 'percent', 'gap': '',
+                                  'y_bins': '', 'log_color': False}]
 
     window.plot_tabs.add_tab()
     other = window.plot_panel
     window._apply_tab_settings(saved)                 # as a configuration does,
-    assert window.btn_xy.isChecked() and other.xy_view_active()
+    assert other.xy_view_active() and other.panels.is_open('xy')
     for key in ('Speed', 'Torque', 'Temp'):           # then its signals
         other.add_series(key, panel._items[key].series)
     other._rebuild_curves(preserve_selection=True)
@@ -356,22 +379,438 @@ def test_a_tab_is_described_with_its_xy_plot_and_set_up_from_it(window):
 
 
 def test_a_configuration_without_an_xy_plot_leaves_it_as_it_is(window):
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     window._apply_tab_settings({'plot_type': 'stacked'})
     assert window.plot_panel.xy_view_active()
     window._apply_tab_settings({'xy': {'shown': False}})
-    assert not window.plot_panel.xy_view_active() and not window.btn_xy.isChecked()
+    assert not window.plot_panel.xy_view_active()
+
+
+def test_an_older_configurations_unused_xy_plot_makes_no_view(window):
+    window._apply_tab_settings({'xy': {'shown': False, 'x': None, 'y': None, 'color': None}})
+    assert window.plot_panel.xy_views() == {}
+    window._apply_tab_settings({'xy': {'shown': False, 'x': 'Speed', 'y': 'Torque'}})
+    assert list(window.plot_panel.xy_views()) == ['xy']             # its choices are kept
+    assert not window.plot_panel.xy_view_active()
 
 
 def test_a_renamed_signal_stays_chosen(window):
     from gui.plot_tabs import SavedTabs
     panel = window.plot_panel
-    window.btn_xy.setChecked(True)
+    window.plot_panel.set_xy_view(True)
     panel.rename_series_key('Torque', 'Torque2')
     panel._rebuild_curves(preserve_selection=True)
     assert panel.xy_view.chosen('y') == 'Torque2'
     assert list(panel.xy_view.scatter.getData()[1]) == [1, 2, 3, 4, 5]
 
-    saved = SavedTabs([{'xy': {'x': 'A', 'y': 'B', 'color': 'A'}, 'signals': []}])
+    saved = SavedTabs([{'xy': {'x': 'A', 'y': 'B', 'color': 'A'},
+                        'xy_views': [{'key': 'xy', 'x': 'B', 'y': 'A'},
+                                     {'key': 'histogram', 'x': 'A'}],
+                        'signals': []}])
     saved.rename_signal('A', 'A2')
     assert saved.tabs[0]['xy'] == {'x': 'A2', 'y': 'B', 'color': 'A2'}
+    assert saved.tabs[0]['xy_views'] == [{'key': 'xy', 'x': 'B', 'y': 'A2'},
+                                         {'key': 'histogram', 'x': 'A2'}]
+
+
+# ── Its settings, behind the gear ────────────────────────────────────────
+
+
+_SCATTER_SETTINGS = ('x_box', 'y_box', 'color_box', 'whole_box', 'equal_box')
+
+
+def test_the_settings_are_behind_the_gear_and_the_plot_has_the_room(view, qapp):
+    from PySide6.QtCore import QPoint
+    view.show()
+    qapp.processEvents()
+    assert view.settings_button.isVisible() and view.summary.isVisible()
+    assert not any(getattr(view, name).isVisible() for name in _SCATTER_SETTINGS)
+    assert not view.copy_button.isVisible() and not view.export_button.isVisible()
+    # One row above the plot: the name, what it shows and the gear.
+    assert view.plot.mapTo(view, QPoint(0, 0)).y() == view.header.height()
+    view.open_settings()
+    qapp.processEvents()
+    assert view.settings_box.isVisible() and view.settings_box.isWindow()
+    assert all(getattr(view, name).isVisible() for name in _SCATTER_SETTINGS)
+    assert not view.bins_edit.isVisible() and not view.log_box.isVisible()
+    view.settings_box.hide()
+
+
+def test_update_draws_with_the_settings_and_closes_the_box(view, qapp):
+    view.show()
+    view.open_settings()
+    view.y_box.setCurrentIndex(view.y_box.findData('C'))
+    view.color_box.setCurrentIndex(view.color_box.findData('S'))
+    assert _drawn(view)[1] == [1, 2, 3, 4, 5]               # not yet
+    view.update_button.click()
+    qapp.processEvents()
+    assert not view.settings_box.isVisible()
+    assert (view.chosen('y'), view.chosen('color')) == ('C', 'S')
+    assert _drawn(view)[1] == [60, 70, 80, 90, 100] and not view.scale.isHidden()
+
+
+def test_cancel_leaves_the_view_as_it_was_and_the_box_forgets(view, qapp):
+    view.show()
+    view.open_settings()
+    view.x_box.setCurrentIndex(view.x_box.findData('C'))
+    view.whole_box.setChecked(True)
+    view.cancel_button.click()
+    qapp.processEvents()
+    assert not view.settings_box.isVisible()
+    assert view.chosen('x') == 'S' and not view.option('whole_measurement')
+    assert _drawn(view)[0] == [10, 20, 30, 40, 50]
+    # Drawn again later, as the time shown changes: still as it was applied.
+    view.set_time_range((1.0, 3.0))
+    view._redraw()
+    assert _drawn(view)[0] == [20, 30, 40]
+    view.open_settings()                                 # what is drawn, again
+    assert view.x_box.currentData() == 'S' and not view.whole_box.isChecked()
+    view.settings_box.hide()
+
+
+def test_escape_is_cancel(view, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    view.show()
+    view.open_settings()
+    qapp.processEvents()
+    view.y_box.setCurrentIndex(view.y_box.findData('C'))
+    QTest.keyClick(view.settings_box, Qt.Key.Key_Escape)
+    qapp.processEvents()
+    assert not view.settings_box.isVisible() and view.chosen('y') == 'T'
+
+
+def test_enter_in_a_typed_setting_is_update(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from gui.xy_view import HISTOGRAM, XYView
+    v = XYView(HISTOGRAM)
+    v.set_signals(_signals())
+    v.show()
+    v.open_settings()
+    v.bins_edit.setText('20')
+    assert v.option('bins') == ''
+    QTest.keyClick(v.bins_edit, Qt.Key.Key_Return)
+    qapp.processEvents()
+    assert v.option('bins') == '20' and not v.settings_box.isVisible()
+    assert v.bars.edges[1] - v.bars.edges[0] == 20.0
+    v.close()
+
+
+def test_what_it_shows_fits_its_row_and_its_tooltip_has_all(qapp):
+    from PySide6.QtCore import QPoint
+    from gui.xy_view import HISTOGRAM, XYView
+    v = XYView(HISTOGRAM)
+    v.set_signals(_signals())
+    v.resize(300, 300)
+    v.show()
+    qapp.processEvents()
+    text = v.summary.text()
+    assert 'counted' in text and 'mean' in text and v.summary.toolTip() == text
+    shown = v.summary.shown_text()
+    assert shown.endswith('…') and len(shown) < len(text)
+    # On the gear's row, however long: the plot starts under that one row.
+    assert v.hist_plot.mapTo(v, QPoint(0, 0)).y() == v.header.height()
+    v.close()
+
+
+# ── Several views in a tab ───────────────────────────────────────────────
+
+
+def _views_menu(window):
+    from PySide6.QtWidgets import QMenu
+    menu = QMenu()
+    window._fill_views_menu(menu)
+    window._kept_menu = menu                   # alive while its actions are used
+    return {action.text().split('\t')[0]: action
+            for action in menu.actions() if not action.isSeparator()}
+
+
+def test_views_of_each_kind_are_added_and_share_the_right_side(window, qapp):
+    from PySide6.QtCore import QPoint
+    from gui.xy_view import HISTOGRAM, RESIDENCY, SCATTER
+    panel = window.plot_panel
+    window.resize(1400, 900)
+    window.show()
+    qapp.processEvents()
+    keys = [panel.add_xy_view(kind) for kind in (RESIDENCY, SCATTER, SCATTER, HISTOGRAM)]
+    qapp.processEvents()
+    assert keys == ['residency', 'xy', 'xy-2', 'histogram']
+    views = panel.xy_views()
+    assert list(views) == keys
+    assert [panel.panels.title(key) for key in keys] == [
+        'Residency map', 'XY plot', 'XY plot 2', 'Histogram']
+    assert [views[key].view() for key in keys] == [RESIDENCY, SCATTER, SCATTER, HISTOGRAM]
+    assert all(view.isVisible() and view.x_box.count() == 3 for view in views.values())
+    # Right of the time plot, each under the one before.
+    plot = panel.view_stack.mapTo(panel, QPoint(0, 0))
+    places = [views[key].mapTo(panel, QPoint(0, 0)) for key in keys]
+    assert all(place.x() > plot.x() for place in places)
+    assert len({place.x() for place in places}) == 1
+    assert [place.y() for place in places] == sorted({place.y() for place in places})
+    # Each an equal part of that side, not half of the one before.
+    heights = [panel.panels._group_of(key).height() for key in keys]
+    assert max(heights) - min(heights) <= 4, heights
+
+
+def test_the_views_menu_lists_each_view_to_close_and_open_again(window, qapp):
+    panel = window.plot_panel
+    _views_menu(window)['Add residency map'].trigger()
+    _views_menu(window)['Add residency map'].trigger()
+    entries = _views_menu(window)
+    assert list(entries)[:3] == ['Table', 'Residency map', 'Residency map 2']
+    assert entries['Residency map'].isChecked() and entries['Residency map 2'].isChecked()
+    entries['Residency map'].trigger()
+    assert not panel.panels.is_open('residency') and panel.panels.is_open('residency-2')
+    entries = _views_menu(window)
+    assert not entries['Residency map'].isChecked()
+    assert entries['Reopen Residency map'].isEnabled()
+    entries['Residency map'].trigger()
+    assert panel.panels.is_open('residency')
+    assert panel.xy_views()['residency'].x_box.count() == 3       # given the signals
+
+
+def test_one_views_shading_lets_the_others_go(window, qapp):
+    panel = window.plot_panel
+    keys = panel.add_xy_view('histogram'), panel.add_xy_view('residency')
+    histogram, residency = (panel.xy_views()[key] for key in keys)
+    for view in (histogram, residency):
+        view.whole_box.setChecked(True)
+        view.apply_settings()
+    histogram.pick_bar(next(i for i, held in enumerate(histogram.bars.times) if held > 0))
+    assert histogram.picked_spans() and panel.time_spans() == histogram.picked_spans()
+    grid = residency.grid
+    cell = next((i, j) for i in range(grid.times.shape[0]) for j in range(grid.times.shape[1])
+                if grid.times[i, j] > 0)
+    residency.pick_cell(cell)
+    assert histogram.picked_spans() == []
+    assert residency.picked_spans() and panel.time_spans() == residency.picked_spans()
+
+
+def test_a_tab_keeps_its_views_with_their_names_kinds_and_settings(window, qapp):
+    from gui.panel_area import layout_keys
+    from gui.plot_tabs import describe_tab
+    panel = window.plot_panel
+    window.resize(1400, 900)
+    window.show()
+    for kind in ('residency', 'scatter', 'scatter'):
+        panel.add_xy_view(kind)
+    panel.panels.set_title('xy-2', 'Gear map')
+    views = panel.xy_views()
+    views['residency'].y_bins_edit.setText('4')
+    views['residency'].apply_settings()
+    panel.panels.close_panel('xy', user=True)            # closed, but kept
+    qapp.processEvents()
+    saved = describe_tab(panel, 'Tab 1')
+    assert [(entry['key'], entry['name'], entry['view']) for entry in saved['xy_views']] == [
+        ('residency', 'Residency map', 'residency'), ('xy', 'XY plot', 'scatter'),
+        ('xy-2', 'Gear map', 'scatter')]
+    assert saved['xy_views'][0]['y_bins'] == '4'
+    assert sorted(layout_keys(saved['panels'])) == ['plot', 'residency', 'xy-2']
+
+    window.plot_tabs.add_tab()
+    other = window.plot_panel
+    window._apply_tab_settings(saved)
+    qapp.processEvents()
+    assert list(other.xy_views()) == ['residency', 'xy', 'xy-2']
+    assert other.panels.title('xy-2') == 'Gear map'
+    assert other.xy_views()['residency'].option('y_bins') == '4'
+    assert [other.panels.is_open(key) for key in other.xy_views()] == [True, False, True]
+    again = describe_tab(other, 'Tab 1')
+    assert again['xy_views'] == saved['xy_views'] and again['panels'] == saved['panels']
+
+    # A configuration's views replace the tab's: one it does not name goes.
+    window._apply_tab_settings({'xy_views': [saved['xy_views'][2]]})
+    assert list(other.xy_views()) == ['xy-2'] and other.panels.panel('residency') is None
+
+def test_the_gear_is_where_its_titles_gear_is_never_under_its_close(window, qapp):
+    from PySide6.QtCore import QPoint, QRect
+    panel = window.plot_panel
+    window.resize(1400, 800)
+    window.show()
+    panel.set_xy_view(True)
+    qapp.processEvents()
+    view, area = panel.xy_view, panel.panels
+    area._timer.stop()                      # the pointer is driven here
+    row_gear = view.settings_button
+    assert row_gear.isVisible()
+
+    def on_screen(widget):
+        return QRect(widget.mapToGlobal(QPoint(0, 0)), widget.size())
+
+    at_rest = on_screen(row_gear)
+    place = area._group_of('xy')
+    area.peek(place, hold=60)               # its title, over its own row
+    qapp.processEvents()
+    title_gear = place.settings_button
+    assert place.strip.isVisible() and title_gear.isVisible()
+    assert abs(on_screen(title_gear).center().x() - at_rest.center().x()) <= 1
+    assert not on_screen(place.close_button).intersects(at_rest)
+    assert not on_screen(place.max_button).intersects(at_rest)
+    title_gear.click()                      # opens under the title's gear
+    qapp.processEvents()
+    box = view.settings_box
+    assert box.isVisible() and box.y() >= on_screen(title_gear).bottom()
+    box.hide()
+    area.peek(None)
+    # With titles shown as their own row, the title's gear opens the box
+    # under itself, not under the row's (hidden) gear below it.
+    window._set_panel_titles_shown(True)
+    qapp.processEvents()
+    assert not row_gear.isVisible() and title_gear.isVisible()
+    title_gear.click()
+    qapp.processEvents()
+    assert box.isVisible() and box.y() == on_screen(title_gear).bottom() + 1
+    box.hide()
+    window._set_panel_titles_shown(False)
+
+
+# ── Deleting a view ──────────────────────────────────────────────────────
+
+
+def _open_views_menu(window, qapp):
+    """Views ▾ as a click opens it, shown (not run) so its rows have places.
+    Events are handled first: the window showing would close it."""
+    qapp.processEvents()
+    menu = window.btn_views.menu()
+    menu.popup(window.btn_views.mapToGlobal(window.btn_views.rect().bottomLeft()))
+    window._kept_menu = menu
+    return menu, {action.text().split('\t')[0]: action
+                  for action in menu.actions() if not action.isSeparator()}
+
+
+def _click(menu, pos):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+    for kind, held in ((QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+                       (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)):
+        QApplication.sendEvent(menu, QMouseEvent(
+            kind, QPointF(pos), QPointF(menu.mapToGlobal(pos)), Qt.MouseButton.LeftButton,
+            held, Qt.KeyboardModifier.NoModifier))
+
+
+def test_each_view_in_views_has_a_bin_right_after_its_name(window, qapp):
+    from gui.bin_menu import BinMenu
+    panel = window.plot_panel
+    window.resize(1400, 800)
+    window.show()
+    for kind in ('scatter', 'histogram', 'scatter'):
+        panel.add_xy_view(kind)
+    long_name = 'A view name longer than any other entry here'
+    panel.panels.set_title('xy-2', long_name)
+    panel.panels.close_panel('histogram')                  # an unticked row
+    menu, entries = _open_views_menu(window, qapp)
+    assert isinstance(menu, BinMenu)
+    rows = [entries[name] for name in ('XY plot', 'Histogram', long_name)]
+    assert menu.bin_rows() == rows                       # the views, and nothing else
+    # The menu drawn without its bins: where each name ends.
+    bins = dict(menu._bins)
+    menu._bins.clear()
+    plain = menu.grab().toImage()
+    menu._bins.update(bins)
+    ratio = plain.devicePixelRatio()
+    for row in rows:
+        area, geometry = menu.bin_area(row), menu.actionGeometry(row)
+        # The row's own background: its right end, where a view's row is empty.
+        background = plain.pixelColor(int((geometry.right() - 8) * ratio),
+                                      int(geometry.center().y() * ratio))
+        assert area.right() <= menu.width()              # the menu has room for it
+        drawn = [x for x in range(int((geometry.left() + 2) * ratio),
+                                  int((geometry.right() - 12) * ratio))
+                 for y in range(int((geometry.top() + 2) * ratio),
+                                int((geometry.bottom() - 1) * ratio))
+                 if plain.pixelColor(x, y) != background]
+        # Just after the name as the style draws it, clear of it.
+        assert drawn and 0 < area.left() * ratio - max(drawn) <= (menu.BIN_GAP + 6) * ratio
+    # After the name, so a short name's bin is further left.
+    assert menu.bin_area(rows[0]).left() < menu.bin_area(rows[2]).left()
+    # Room for the longest name's bin, whatever else is in the menu.
+    assert menu.sizeHint().width() >= (menu.text_left() + menu.BIN_GAP + menu.BIN_AREA
+                                       + menu.fontMetrics().horizontalAdvance(long_name))
+    # Its tooltip names what it deletes.
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QHelpEvent
+    from PySide6.QtWidgets import QApplication, QToolTip
+    pos = menu.bin_area(rows[1]).center()
+    QApplication.sendEvent(menu, QHelpEvent(QEvent.Type.ToolTip, pos, menu.mapToGlobal(pos)))
+    assert QToolTip.text() == 'Delete Histogram'
+    QToolTip.hideText()
+    menu.hide()
+
+
+def test_a_bin_deletes_its_view_and_the_menu_stays_open_on_the_rest(window, qapp):
+    panel = window.plot_panel
+    window.resize(1400, 800)
+    window.show()
+    for kind in ('scatter', 'residency', 'scatter'):
+        panel.add_xy_view(kind)
+    panel.panels.close_panel('xy-2', user=True)            # closed, and last closed
+    view = panel.xy_views()['residency']
+    view.pick_cell((0, 0))
+    menu, entries = _open_views_menu(window, qapp)
+    assert entries['Reopen XY plot 2'].isEnabled()
+    _click(menu, menu.bin_area(entries['XY plot 2']).center())
+    qapp.processEvents()
+    assert list(panel.xy_views()) == ['xy', 'residency']
+    assert panel.panels.panel('xy-2') is None and 'xy-2' not in panel.panels.closed_keys()
+    assert menu.isVisible() and 'XY plot 2' not in [a.text() for a in menu.actions()]
+    reopen = [a for a in menu.actions() if a.text().startswith('Reopen')][0]
+    assert reopen.text() == 'Reopen closed panel' and not reopen.isEnabled()
+    # An open view goes from the tab, its shading with it.
+    _click(menu, menu.bin_area(entries['Residency map']).center())
+    qapp.processEvents()
+    assert list(panel.xy_views()) == ['xy'] and panel.time_spans() == []
+    assert not panel.panels.is_open('residency')
+    menu.hide()
+    # Its name is free again.
+    assert panel.panels.title(panel.add_xy_view('residency')) == 'Residency map'
+
+
+def test_delete_in_a_views_menu_deletes_it_and_close_keeps_it(window, qapp):
+    panel = window.plot_panel
+    window.btn_table.setChecked(True)
+    key = panel.add_xy_view('histogram')
+    texts = [a.text() for a in panel.panels.panel_menu(key).actions() if a.text()]
+    assert texts[-2:] == ['Close', 'Delete']
+    assert 'Delete' not in [a.text() for a in panel.panels.panel_menu('table').actions()]
+    menu = panel.panels.panel_menu(key)
+    [a for a in menu.actions() if a.text() == 'Close'][0].trigger()
+    assert key in panel.xy_views()
+    menu = panel.panels.panel_menu(key)
+    [a for a in menu.actions() if a.text() == 'Delete'][0].trigger()
+    assert key not in panel.xy_views() and panel.panels.panel(key) is None
+
+def test_its_header_is_a_band_the_title_covers_exactly(window, qapp):
+    from PySide6.QtCore import QPoint, QRect
+    from PySide6.QtGui import QPalette
+    from gui.panel_area import TAB_HEIGHT, HeaderBand
+    panel = window.plot_panel
+    window.resize(1400, 800)
+    window.show()
+    panel.set_xy_view(True)
+    qapp.processEvents()
+    view, area = panel.xy_view, panel.panels
+    area._timer.stop()
+    header = view.header
+    assert isinstance(header, HeaderBand) and header.height() == TAB_HEIGHT
+    assert view.name_label.parentWidget() is header and view.settings_button.parentWidget() is header
+    # A shade off the card, with a hairline under it.
+    image = header.grab().toImage()
+    ratio = image.devicePixelRatio()
+    window_color = header.palette().color(QPalette.ColorRole.Window)
+    inside = image.pixelColor(int(header.width() * ratio) - 3, int(header.height() * ratio) // 2)
+    line = image.pixelColor(int(header.width() * ratio) - 3, int(header.height() * ratio) - 1)
+    assert inside != window_color and line not in (inside, window_color)
+
+    def on_screen(widget):
+        return QRect(widget.mapToGlobal(QPoint(0, 0)), widget.size())
+
+    place = area._group_of('xy')
+    area.peek(place, hold=60)
+    qapp.processEvents()
+    assert on_screen(place.strip) == on_screen(header)        # the title covers it exactly
+    gear, title_gear = view.settings_button, place.settings_button
+    assert on_screen(title_gear).center().y() == on_screen(gear).center().y()
+    area.peek(None)
+

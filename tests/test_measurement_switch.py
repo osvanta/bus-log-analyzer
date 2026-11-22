@@ -129,10 +129,9 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
                 "hide_plot_lines": False,
                 "cursor1": False,
                 "cursor2": False,
-                "xy": {"shown": False, "x": None, "y": None, "color": None,
-                       "whole_measurement": False, "equal_scale": False,
-                       "view": "scatter", "bins": "", "show": "percent", "gap": "",
-                       "y_bins": "", "log_color": False},
+                "plot_name": "Time plot",
+                "xy_views": [],
+                "panels": {"tree": {"panels": ["plot"], "current": "plot"}},
                 "signals": [
                     {
                         "key": old_series.key,

@@ -79,6 +79,18 @@ def test_keys_an_older_file_lacks_do_not_count():
     assert not session_restore.differs({'stacked': True, 'markers': []}, snapshot)
 
 
+def test_keys_a_tab_of_an_older_file_lacks_do_not_count():
+    # A tab from before panels: one 'xy', and no 'xy_views' or 'panels'.
+    snapshot = {'tabs': [{'name': 'Tab 1', 'xy': {'shown': False}, 'signals': [{'key': 'a'}]}]}
+    current = {'tabs': [{'name': 'Tab 1', 'xy_views': [], 'panels': {'tree': {}},
+                         'signals': [{'key': 'a'}]}]}
+
+    assert not session_restore.differs(current, snapshot)
+    assert session_restore.differs({'tabs': [{**current['tabs'][0], 'signals': []}]}, snapshot)
+    assert session_restore.differs({'tabs': [{**current['tabs'][0], 'name': 'B'}]}, snapshot)
+    assert session_restore.differs({'tabs': current['tabs'] * 2}, snapshot)
+
+
 def test_compared_as_a_file_holds_it():
     # Tuples come back from JSON as lists: the same configuration.
     assert not session_restore.differs({'widths': (10, 20)}, {'widths': [10, 20]})
@@ -407,6 +419,10 @@ def test_an_older_configuration_opened_and_closed_unchanged_does_not_ask(
     older = json.loads(saved_as['path'].read_text(encoding='utf-8'))
     older['version'] = '00.01.00'
     del older['markers']
+    for tab in older['tabs']:               # as tabs were before panels
+        for key in ('plot_name', 'xy_views', 'panels'):
+            del tab[key]
+        tab['xy'] = {'shown': False, 'x': None, 'y': None, 'color': None}
     saved_as['path'].write_text(json.dumps(older), encoding='utf-8')
 
     window = windows(show=True)

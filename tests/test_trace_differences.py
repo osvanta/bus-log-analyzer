@@ -396,6 +396,10 @@ def test_the_main_window_wires_the_trace_to_the_plot(qapp, trace_store, monkeypa
     window = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
     try:
         window.store = SimpleNamespace(raw_frame_store=trace_store)
+        # The Trace is a panel of the window's tab, so it is on screen, and
+        # follows Cursor 1, while the window is.
+        window.show()
+        qapp.processEvents()
         window.btn_cursor1.setChecked(True)
         window.plot_panel.move_cursor1(0.3)
         window.show_raw_frames()

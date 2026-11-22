@@ -22,7 +22,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QCursor, QDrag, QDragEnterEvent, QDropEvent, QFont,
-    QKeySequence, QPen, QPainter, QPalette, QPixmap,
+    QKeySequence, QPen, QPainter, QPalette,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -39,13 +39,11 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSizePolicy,
-    QSplitter,
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -55,12 +53,14 @@ from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
 from core.export import _column_headers
 from gui.tabular_view import TabularView
-from gui.xy_view import XYView
+from gui.xy_view import KIND_NAMES, KINDS, SCATTER, XYView
 from gui.edge_tab import _mix
-from gui.plot_icons import drawing_pixmap
+from gui.bin_menu import BinMenu
+from gui.panel_area import PanelArea
 from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
 from gui.stack_sections import StackSectionArea
+from gui.tab_drawing import _NameEditor
 
 
 # A cursor is black on a light plot background and white on a dark one.
@@ -239,133 +239,40 @@ class _MarkerLine(pg.InfiniteLine):
         super().mouseClickEvent(ev)
 
 
-class _MarkerListMenu(QMenu):
+class _MarkerListMenu(BinMenu):
     """Go to marker: a row per marker, "name · time s", that goes to it, with
-    a waste bin right after the name that deletes it. The menu stays open on
-    the markers left, so several go in a row of clicks; Delete deletes the
-    highlighted one."""
+    a waste bin right after the name that deletes it (gui.bin_menu). The menu
+    stays open on the markers left, so several go in a row of clicks; Delete
+    deletes the highlighted one."""
 
-    _BIN = 16                  # the bin's side, in pixels
-    _BIN_AREA = 24             # its click target's width; the row's height high
-    _BIN_GAP = 6               # from the end of the text to the click target
     _TEXT_LEFT = 12            # the text's indent, as the plot menus' style has it
-    _BIN_HOT = '#c62828'       # behind the bin under the pointer, drawn white
+    TEXT_LEFT = _TEXT_LEFT
     # The text's indent, and room past the longest text for its bin.
     _BIN_ROOM = (f'QMenu::item {{ padding-left: {_TEXT_LEFT}px; '
-                 f'padding-right: {_BIN_GAP + _BIN_AREA + 6}px; }}')
+                 f'padding-right: {BinMenu.BIN_GAP + BinMenu.BIN_AREA + 6}px; }}')
 
     def __init__(self, panel: 'PlotPanel', parent: QMenu) -> None:
         super().__init__('Go to marker', parent)
         self._panel = weakref.ref(panel)
-        self._rows: dict[QAction, PlotMarker] = {}
-        self._hot: QAction | None = None       # the row whose bin is under the pointer
-        self._pixmaps: dict[tuple[int, float], QPixmap] = {}
         self.setStyleSheet(self._BIN_ROOM)
-        self.setMouseTracking(True)
         for marker in panel.markers():
             action = self.addAction(f'{marker.name}  ·  {marker.time:.3f} s',
                                     lambda *_, m=marker: panel.go_to_marker(m))
-            self._rows[action] = marker
-        self.setEnabled(bool(self._rows))
+            self.add_bin(action, lambda m=marker: self._delete(m), f'Delete {marker.name}')
+        self.setEnabled(bool(self.bin_rows()))
 
-    def bin_area(self, action: QAction) -> QRect:
-        """Just after the text of action's row: the bin, and its click target."""
-        row = self.actionGeometry(action)
-        text_end = (row.left() + self._TEXT_LEFT
-                    + self.fontMetrics().horizontalAdvance(action.text()))
-        return QRect(text_end + self._BIN_GAP, row.top(), self._BIN_AREA, row.height())
-
-    def delete_row(self, action: QAction) -> None:
-        """Delete action's marker and take its row out; the menu stays open
-        on the rest, and closes once none is left."""
-        marker = self._rows.pop(action, None)
+    def _delete(self, marker: PlotMarker) -> None:
         panel = self._panel()
-        if marker is None or panel is None:
-            return
-        panel.remove_marker(marker)
-        self.removeAction(action)
-        action.deleteLater()
-        self._hot = None
-        if not self._rows:
+        if panel is not None:
+            panel.remove_marker(marker)
+
+    def _after_delete(self) -> bool:
+        # It closes once no marker is left.
+        if not self.bin_rows():
             self.setEnabled(False)
             self.hide()
-            return
-        # The next row moves up under the pointer: its bin is the one now.
-        self._set_hot(self._bin_row_at(self.mapFromGlobal(QCursor.pos())))
-
-    def _bin_row_at(self, pos) -> QAction | None:
-        # A list taller than the screen wraps into columns (the styles used
-        # here do not scroll menus), so every row and its bin stay in view.
-        action = self.actionAt(pos)
-        if action in self._rows and self.bin_area(action).contains(pos):
-            return action
-        return None
-
-    def _set_hot(self, action: QAction | None) -> None:
-        if action is not self._hot:
-            self._hot = action
-            self.update()
-
-    def _bin_pixmap(self, color: QColor) -> QPixmap:
-        scale = self.devicePixelRatioF()
-        key = (color.rgba(), scale)
-        if key not in self._pixmaps:
-            self._pixmaps[key] = drawing_pixmap('clear_plot', self._BIN, color, scale)
-        return self._pixmaps[key]
-
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for action in self._rows:
-            area = self.bin_area(action)
-            if action is self._hot:
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(self._BIN_HOT))
-                square = min(area.width(), area.height()) - 4
-                hot = QRectF(0, 0, square, square)
-                hot.moveCenter(QRectF(area).center())
-                painter.drawRoundedRect(hot, 4, 4)
-                color = QColor(Qt.GlobalColor.white)
-            else:
-                color = self.palette().color(QPalette.ColorRole.Text)
-            painter.drawPixmap(area.left() + (area.width() - self._BIN) // 2,
-                               area.top() + (area.height() - self._BIN) // 2,
-                               self._bin_pixmap(color))
-        painter.end()
-
-    def mouseMoveEvent(self, event) -> None:
-        super().mouseMoveEvent(event)
-        self._set_hot(self._bin_row_at(event.position().toPoint()))
-
-    def leaveEvent(self, event) -> None:
-        super().leaveEvent(event)
-        self._set_hot(None)
-
-    def mouseReleaseEvent(self, event) -> None:
-        action = self._bin_row_at(event.position().toPoint())
-        if action is None or event.button() != Qt.MouseButton.LeftButton:
-            super().mouseReleaseEvent(event)
-            return
-        event.accept()
-        self.delete_row(action)
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_Delete and self.activeAction() in self._rows:
-            event.accept()
-            self.delete_row(self.activeAction())
-            return
-        super().keyPressEvent(event)
-
-    def event(self, event) -> bool:
-        if event.type() == QEvent.Type.ToolTip:
-            action = self._bin_row_at(event.pos())
-            if action is None:
-                QToolTip.hideText()
-            else:
-                QToolTip.showText(event.globalPos(), f'Delete {self._rows[action].name}', self)
-            return True
-        return super().event(event)
+            return False
+        return True
 
 
 class _LeftAxis(pg.AxisItem):
@@ -776,6 +683,10 @@ class _CheckDelegate(QStyledItemDelegate):
 
 # Rows dragged out of a signal table: their signal keys, one to a line.
 ROW_MIME_TYPE = 'application/x-osvanta-row-reorder'
+# The time plot's name until the user gives it one. It heads the signal
+# table's name column, so the column reads as that plot's signals.
+PLOT_NAME = 'Time plot'
+MAX_PLOT_NAME = 40
 
 
 class _ReorderTable(QTableWidget):
@@ -1154,6 +1065,11 @@ class PlotPanel(QWidget):
     # Signals to move to another tab: their keys, and that tab's position,
     # or -1 for a new tab.
     moveToTabRequested = Signal(list, int)
+    # The user closed one of the tab's panels: 'table', an XY view's key
+    # ('xy', 'histogram-2', ...) or 'trace'.
+    panelClosedByUser = Signal(str)
+    # The user renamed the time plot: its new name.
+    plotNameChanged = Signal(str)
 
     # Adaptive data-point display: symbols are drawn only when the number of
     # samples visible in the current X viewport is at or below this cap (per
@@ -1349,7 +1265,7 @@ class PlotPanel(QWidget):
         # ── Signal table ──────────────────────────────────────────────────
         self.table = _ReorderTable(0, _HEX_COL + 1)
         self.table.setHorizontalHeaderLabels(
-            ['☑', 'Signal', 'Cursor 1', 'Cursor 2', 'Unit', 'Ax', 'Axis', *STAT_COLUMNS,
+            ['☑', PLOT_NAME, 'Cursor 1', 'Cursor 2', 'Unit', 'Ax', 'Axis', *STAT_COLUMNS,
              DELTA_COLUMN, HEX_COLUMN])
         self._column_choices = {name: shown for name, (_c, shown) in OPTIONAL_COLUMNS.items()}
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -1392,6 +1308,11 @@ class PlotPanel(QWidget):
         self._apply_column_visibility()
         hdr.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         hdr.customContextMenuRequested.connect(self._show_table_header_menu)
+        # The name column's header is the time plot's name: a double-click
+        # renames the plot.
+        hdr.sectionDoubleClicked.connect(lambda section: section == 1 and self.rename_plot())
+        self.table.horizontalHeaderItem(1).setToolTip(
+            "The time plot's name. Double-click to rename it.")
 
         self.table_panel = QWidget()
         _tbl_layout = QVBoxLayout(self.table_panel)
@@ -1474,38 +1395,35 @@ class PlotPanel(QWidget):
         # ── Root layout ───────────────────────────────────────────────────
         _root = QVBoxLayout(self)
         _root.setContentsMargins(4, 4, 4, 4)
-        # The plots, and right of them the plotted signals as a table
-        # (set_table_view). Apart from view_stack, which rebuilds switch
-        # between its two plot layouts.
+        # The tab's panels (gui.panel_area): the plots, and beside them the
+        # views opened from Views: the plotted signals as a table
+        # (set_table_view), XY plots, histograms and residency maps, as many
+        # as wanted (add_xy_view), and the window's CAN Trace. view_stack
+        # switches between the plots' two layouts as they are rebuilt.
         self.tabular = TabularView()
         # The plots set the height, never the table: its minimum height would
         # make the plot area taller.
         self.tabular.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         self.tabular.timeClicked.connect(self.plotAreaClicked.emit)
-        self.area_stack = QSplitter(Qt.Orientation.Horizontal)
-        self.area_stack.setChildrenCollapsible(False)
-        self.area_stack.addWidget(self.view_stack)   # the plots
-        self.area_stack.addWidget(self.tabular)      # the table, while Table is on
-        self.area_stack.setStretchFactor(0, 1)       # a wider window widens the plots
-        self.tabular.hide()
         self._table_view_on = False
-        self._table_view_width = 0                   # the user's last width for it
-        # Right of both, one plotted signal against another (set_xy_view).
-        self.xy_view = XYView()
-        self.xy_view.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
-        self.xy_view.timeClicked.connect(self.plotAreaClicked.emit)
-        self.xy_view.spansChosen.connect(self.set_time_spans)
-        self.xy_view.set_colors(self._background_color,
-                                _cursor_color_on(self._background_color))
-        self.side_stack = QSplitter(Qt.Orientation.Horizontal)
-        self.side_stack.setChildrenCollapsible(False)
-        self.side_stack.addWidget(self.area_stack)   # the plots, and the table
-        self.side_stack.addWidget(self.xy_view)      # the XY plot, while XY is on
-        self.side_stack.setStretchFactor(0, 1)
-        self.xy_view.hide()
-        self._xy_view_on = False
-        self._xy_view_width = 0                      # the user's last width for it
-        _root.addWidget(self.side_stack, stretch=1)
+        # The XY views by panel key, open or closed, in the order made: made
+        # when first opened, so a tab without them pays nothing.
+        self._xy_views: dict[str, XYView] = {}
+        # Those open and given the plotted signals.
+        self._xy_live: set[str] = set()
+        self._plot_name = PLOT_NAME
+        self.panels = PanelArea()
+        # The time plot stays: a tab keeps one.
+        self.panels.add('plot', self.view_stack, self._plot_name,
+                        closable=False, floatable=False, home={'edge': 'left'},
+                        rename=self.rename_plot)
+        # Where the table opens the first time: right of the plots. XY views
+        # go right of everything (_make_xy_view).
+        self.panels.add('table', self.tabular, 'Table',
+                        home={'beside': 'plot', 'side': 'right', 'share': self._TABLE_VIEW_SHARE})
+        self.panels.panelClosed.connect(self._on_panel_closed)
+        self.panels.panelsChanged.connect(self._sync_xy_views)
+        _root.addWidget(self.panels, stretch=1)
         # The cursor line keeps a line's height under the empty plot, but no
         # width. Plotting the first signals then resizes neither the plot nor
         # the table beside it, which would draw every stacked row once more.
@@ -2246,7 +2164,8 @@ class PlotPanel(QWidget):
         ]
         plotted = self._items[old_key]
         plotted.key = new_key
-        self.xy_view.rename_signal(old_key, new_key)
+        for view in self._xy_views.values():
+            view.rename_signal(old_key, new_key)
         self._items = {
             (new_key if key == old_key else key): item
             for key, item in self._items.items()
@@ -3063,8 +2982,8 @@ class PlotPanel(QWidget):
         if self._show_points:
             self._points_timer.start(self._POINTS_DEBOUNCE_MS)
         self._schedule_statistics()
-        if self.xy_view_active():
-            self.xy_view.set_time_range(self.time_range())
+        for view in self._open_xy_views():
+            view.set_time_range(self.time_range())
 
     def _connect_xrange_signals(self) -> None:
         """Listen to the current driving ViewBox's sigXRangeChanged.
@@ -3521,80 +3440,259 @@ class PlotPanel(QWidget):
     _TABLE_VIEW_SHARE = 0.38
 
     def set_table_view(self, on: bool) -> None:
-        """Show the plotted signals as a table right of the plots, or hide it.
-        The table keeps the width the user last dragged it to."""
+        """Open the Table panel, the plotted signals as a table, or close it.
+        It opens where it was last, right of the plots the first time."""
         on = bool(on)
         if on == self._table_view_on:
             return
         self._table_view_on = on
         if on:
             self._fill_tabular()
-            self.tabular.show()
-            total = sum(self.area_stack.sizes()) or self.area_stack.width()
-            width = self._table_view_width or int(total * self._TABLE_VIEW_SHARE)
-            width = min(width, int(total * 0.8))
-            self.area_stack.setSizes([max(1, total - width), width])
+            self.panels.open_panel('table')
             if self._cursor1_enabled:
                 self.tabular.select_time(self.v_line.value())
         else:
-            self._table_view_width = self.area_stack.sizes()[1]
-            self.tabular.hide()
+            self.panels.close_panel('table')
 
     def _fill_tabular(self) -> None:
         self.tabular.set_series(
             [p.series for p in self._items.values() if p.visible])
 
-    # ── XY view ───────────────────────────────────────────────────────────
+    # ── XY views: XY plots, histograms, residency maps ────────────────────
+
+    #: The first XY view's share of the width.
+    _XY_VIEW_SHARE = 0.4
+    #: Each kind's panel key, and the start of the keys of its later views.
+    _XY_KEYS = {'scatter': 'xy', 'histogram': 'histogram', 'residency': 'residency'}
+
+    def xy_views(self) -> dict[str, XYView]:
+        """The tab's XY views by panel key, open or closed, in the order made."""
+        return dict(getattr(self, '_xy_views', {}))
+
+    @property
+    def xy_view(self) -> XYView:
+        """The tab's first XY plot ('xy'), made if it is not yet."""
+        view = self._xy_views.get('xy')
+        return view if view is not None else self._make_xy_view('xy', SCATTER)
+
+    def _open_xy_views(self) -> list[XYView]:
+        views = getattr(self, '_xy_views', {})   # none while being built
+        return [view for key, view in views.items() if key in self._xy_live]
 
     def xy_view_active(self) -> bool:
-        return getattr(self, '_xy_view_on', False)   # False while being built
-
-    #: The XY plot's share of the width the first time it is shown.
-    _XY_VIEW_SHARE = 0.4
+        """Whether an XY view is open in the tab."""
+        return bool(self._open_xy_views())
 
     def set_xy_view(self, on: bool) -> None:
-        """Show the XY plot right of the plots, or hide it. It keeps the
-        width the user last dragged it to, and its signal choices."""
-        on = bool(on)
-        if on == self._xy_view_on:
-            return
-        self._xy_view_on = on
+        """Open the tab's first XY plot, or close it. It opens where it was
+        last, right of everything the first time, and keeps its settings."""
         if on:
-            self._fill_xy()
-            self.xy_view.show()
-            total = sum(self.side_stack.sizes()) or self.side_stack.width()
-            width = self._xy_view_width or int(total * self._XY_VIEW_SHARE)
-            width = min(width, int(total * 0.8))
-            self.side_stack.setSizes([max(1, total - width), width])
-        else:
-            self._xy_view_width = self.side_stack.sizes()[1]
-            self.xy_view.hide()
-            self.xy_view.pick_bar(None)    # its shading goes with it
+            self.open_xy_view('xy')
+        elif 'xy' in self._xy_views:
+            self.panels.close_panel('xy')
+
+    def open_xy_view(self, key: str) -> None:
+        """Open an XY view where it was last; 'xy' is made as an XY plot if
+        it is not yet."""
+        if key == 'xy' and key not in self._xy_views:
+            self._make_xy_view('xy', SCATTER)
+        if key in self._xy_views:
+            self.panels.open_panel(key)
+
+    def add_xy_view(self, kind: str) -> str:
+        """Open a new view of kind (SCATTER, HISTOGRAM or RESIDENCY) beside
+        the others; its key."""
+        prefix = self._XY_KEYS.get(kind, 'xy')
+        key, number = prefix, 2
+        while key in self._xy_views or self.panels.panel(key) is not None:
+            key, number = f'{prefix}-{number}', number + 1
+        self._make_xy_view(key, kind)
+        self.panels.open_panel(key)
+        return key
+
+    def _new_xy_name(self, kind: str) -> str:
+        """XY plot, then XY plot 2, ...: the first free."""
+        base = KIND_NAMES.get(kind, KIND_NAMES[SCATTER])
+        names = {self.panels.title(key) for key in self._xy_views}
+        name, number = base, 2
+        while name in names:
+            name, number = f'{base} {number}', number + 1
+        return name
+
+    def _make_xy_view(self, key: str, kind: str, name: str | None = None) -> XYView:
+        view = XYView(kind)
+        view.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        view.timeClicked.connect(self.plotAreaClicked.emit)
+        view.spansChosen.connect(lambda spans, key=key: self._on_xy_spans(key, spans))
+        view.set_colors(self._background_color, _cursor_color_on(self._background_color))
+        name = name or self._new_xy_name(kind)
+        # The first right of everything, as before there were panels; the
+        # next under the last one open in the tab, so they share that side,
+        # each an equal part of it.
+        shown = [other for other in self._xy_views
+                 if self.panels.is_open(other) and not self.panels.is_floating(other)]
+        home = ({'beside': shown[-1], 'side': 'bottom', 'share': 0.5,
+                 'whole': 1 / (len(shown) + 1)} if shown
+                else {'edge': 'right', 'share': self._XY_VIEW_SHARE})
+        self._xy_views[key] = view
+        self.panels.add(key, view, name, home=home, name_label=view.name_label,
+                        rename=lambda: self.panels.edit_title(key, MAX_PLOT_NAME),
+                        settings=view.open_settings, settings_button=view.settings_button,
+                        delete=lambda: self.delete_xy_view(key))
+        return view
+
+    def delete_xy_view(self, key: str) -> None:
+        """Delete an XY view: its panel, its settings and its name go, open or
+        closed. The next one added of its kind may take its name again."""
+        self._remove_xy_view(key)
+
+    def _remove_xy_view(self, key: str) -> None:
+        view = self._xy_views.pop(key, None)
+        if view is None:
+            return
+        view.pick_bar(None)
+        self._xy_live.discard(key)
+        self.panels.remove(key)
+        view.deleteLater()
+
+    def _sync_xy_views(self) -> None:
+        """Views opened get the plotted signals; those closed let go of the
+        times they shaded."""
+        for key, view in list(self._xy_views.items()):
+            shown = self.panels.is_open(key)
+            if shown and key not in self._xy_live:
+                self._xy_live.add(key)
+                self._fill_xy_view(view)
+            elif not shown and key in self._xy_live:
+                self._xy_live.discard(key)
+                view.pick_bar(None)    # its shading goes with it
+
+    def _on_xy_spans(self, key: str, spans: list) -> None:
+        """One view's bar or cell shades its times; another's then lets go."""
+        if spans:
+            for other_key, other in self._xy_views.items():
+                if other_key != key:
+                    other.pick_bar(None)
+        self.set_time_spans(spans)
+
+    def _on_panel_closed(self, key: str) -> None:
+        """The user closed a panel by its ✕, its menu or the keyboard."""
+        if key == 'table':
+            self._table_view_on = False
+        self.panelClosedByUser.emit(key)
+
+    # ── The time plot's name ──────────────────────────────────────────────
+
+    def plot_name(self) -> str:
+        return self._plot_name
+
+    def set_plot_name(self, name: str) -> None:
+        """Name the time plot. The name heads the signal table's name column
+        and the plot's panel title."""
+        name = ' '.join(str(name or '').split())[:MAX_PLOT_NAME] or PLOT_NAME
+        self._plot_name = name
+        item = self.table.horizontalHeaderItem(1)
+        if item is not None:
+            item.setText(name)
+        self.panels.set_title('plot', name)
+
+    def rename_plot(self) -> None:
+        """Edit the plot's name in place, over the name column's header:
+        Enter keeps it, Escape does not."""
+        header = self.table.horizontalHeader()
+        editor = _NameEditor(header)
+        editor.setMaxLength(MAX_PLOT_NAME)
+        editor.setText(self._plot_name)
+        editor.selectAll()
+        left = header.sectionViewportPosition(1)
+        editor.setGeometry(left, 0, max(header.sectionSize(1), 120), header.height())
+
+        def finish(keep: bool) -> None:
+            if keep and editor.text().strip() and editor.text().strip() != self._plot_name:
+                self.set_plot_name(editor.text())
+                self.plotNameChanged.emit(self._plot_name)
+            editor.deleteLater()
+
+        editor.done.connect(finish)
+        editor.show()
+        editor.setFocus()
+
+    def restore_panels(self, layout: dict) -> None:
+        """Arrange the tab's panels as a configuration saved them
+        (PanelArea.describe), the views among them opened or closed."""
+        self.panels.restore_layout(layout)
+        table = self.panels.is_open('table')
+        if table != self._table_view_on:
+            self._table_view_on = table
+            if table:
+                self._fill_tabular()
 
     def _fill_xy(self) -> None:
+        for view in self._open_xy_views():
+            self._fill_xy_view(view)
+
+    def _fill_xy_view(self, view: XYView) -> None:
         plotted = list(self._items.items())
         names = _column_headers([p.series for _key, p in plotted])
-        self.xy_view.set_signals([(key, name, p.series, p.color)
-                                  for (key, p), name in zip(plotted, names)])
-        self.xy_view.set_time_range(self.time_range())
-        self._show_xy_cursors()
+        view.set_signals([(key, name, p.series, p.color)
+                          for (key, p), name in zip(plotted, names)])
+        view.set_time_range(self.time_range())
+        self._show_xy_cursors([view])
 
-    def _show_xy_cursors(self) -> None:
-        self.xy_view.set_cursors(
-            float(self.v_line.value()) if self._cursor1_enabled else None,
-            float(self.v_line2.value()) if self._cursor2_enabled else None)
+    def _show_xy_cursors(self, views: list[XYView] | None = None) -> None:
+        cursor1 = float(self.v_line.value()) if self._cursor1_enabled else None
+        cursor2 = float(self.v_line2.value()) if self._cursor2_enabled else None
+        for view in self._open_xy_views() if views is None else views:
+            view.set_cursors(cursor1, cursor2)
 
-    def xy_state(self) -> dict:
-        """The XY view as a configuration keeps it: shown or not, and its
-        signal choices."""
-        return {'shown': self._xy_view_on, **self.xy_view.state()}
+    def xy_views_state(self) -> list[dict]:
+        """The XY views as a configuration keeps them, open or closed: each
+        with its key, name, kind ('view') and settings. Which are open, and
+        where, the panels say (PanelArea.describe)."""
+        return [{'key': key, 'name': self.panels.title(key), **view.state()}
+                for key, view in self._xy_views.items()]
+
+    def set_xy_views_state(self, entries: list) -> None:
+        """Make the XY views a configuration names, with their names and
+        settings, closed until restore_panels() opens those it shows. Views
+        it does not name go."""
+        named = []
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            key, kind = entry.get('key'), entry.get('view')
+            if (not isinstance(key, str) or not key or key in named
+                    or key in ('plot', 'table', 'trace') or kind not in KINDS):
+                continue
+            view = self._xy_views.get(key)
+            if view is not None and view.kind() != kind:
+                self._remove_xy_view(key)
+                view = None
+            name = ' '.join(str(entry.get('name') or '').split())[:MAX_PLOT_NAME]
+            if view is None:
+                view = self._make_xy_view(key, kind, name or None)
+            elif name:
+                self.panels.set_title(key, name)
+            view.restore(entry)
+            named.append(key)
+        for key in [key for key in self._xy_views if key not in named]:
+            self._remove_xy_view(key)
 
     def set_xy_state(self, state: dict) -> None:
+        """A configuration from before views of their own: its one XY view,
+        Scatter, Histogram or Residency by its 'view', and whether shown."""
         if not isinstance(state, dict):
             return
-        self.xy_view.restore(state)
+        kind = state.get('view') if state.get('view') in KINDS else SCATTER
+        chosen = any(state.get(role) for role in ('x', 'y', 'color'))
+        if not (state.get('shown') or chosen or 'xy' in self._xy_views):
+            return              # never used: nothing to make
+        self.set_xy_views_state([{**state, 'key': 'xy', 'view': kind}])
         if 'shown' in state:
-            self.set_xy_view(bool(state['shown']))
+            if state['shown']:
+                self.panels.open_panel('xy')
+            else:
+                self.panels.close_panel('xy')
 
     # ── Column choice (table header menu) ─────────────────────────────────
 
@@ -3642,7 +3740,15 @@ class PlotPanel(QWidget):
             sections.mirror_columns()
 
     def _show_table_header_menu(self, position) -> None:
-        self._table_header_menu().exec(self.table.horizontalHeader().mapToGlobal(position))
+        menu = self._table_header_menu()
+        # First, the plot's name, which heads the name column.
+        rename = QAction('Rename plot…', menu)
+        rename.setToolTip('Name this time plot: the name heads this column.')
+        rename.triggered.connect(self.rename_plot)
+        first = menu.actions()[0] if menu.actions() else None
+        menu.insertAction(first, rename)
+        menu.insertSeparator(first)
+        menu.exec(self.table.horizontalHeader().mapToGlobal(position))
 
     def _table_header_menu(self) -> QMenu:
         menu = self._make_menu()
@@ -4220,7 +4326,8 @@ class PlotPanel(QWidget):
         for line in (self.v_line, self.v_line2,
                      *self._stacked_c1_lines, *self._stacked_c2_lines):
             line.set_color(cursor_color)
-        self.xy_view.set_colors(color, cursor_color)
+        for view in self._xy_views.values():
+            view.set_colors(color, cursor_color)
         self.table.viewport().update()
         self.backgroundColorChanged.emit(color)
 
@@ -5829,7 +5936,7 @@ class PlotPanel(QWidget):
         # The table and this panel both reach the bottom of the main
         # window's splitter, so the space under the plot here is the space
         # to leave under the table.
-        plot = self.side_stack.geometry()   # the plots, and the table and XY plot beside them
+        plot = self.panels.geometry()   # the plots, and the panels beside them
         self._table_bottom_gap.setFixedHeight(max(0, self.height() - plot.y() - plot.height()))
         # The tag lies as far under the table as the cursor line under the
         # plot, and as tall, so the two read as one line.

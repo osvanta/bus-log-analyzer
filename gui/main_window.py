@@ -73,6 +73,7 @@ from core.bus_types import (
 )
 from core.channel_config import ChannelConfig
 from gui import app_data, app_log, session_restore, survey_prompt
+from gui.bin_menu import BinMenu
 from gui.brand_logo import BrandLogo, leave_logo_unframed
 from gui.dbc_manager import DBCManagerDialog
 from gui.edge_tab import EdgeTab
@@ -82,18 +83,20 @@ from core.signal_store import SignalStore
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button, plot_icon
 from gui.plot_toolbar import (
-    LAYOUT_NAMES, LAYOUTS, MENU_MARK, MenuButton, PaneRail,
+    LAYOUT_NAMES, LAYOUTS, MENU_MARK, MenuButton,
 )
 from gui.plot_tabs import (
     MAX_NAME_LENGTH,
     PLOT_TYPES,
     PlotTabs,
     SavedTabs,
+    TimeView,
     describe_tab,
     plot_type,
     signal_entries,
 )
 from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
+from gui.panel_area import layout_keys
 from gui.plot_widget import PlotPanel
 from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
@@ -449,6 +452,15 @@ class MainWindow(QMainWindow):
         panel.markersChanged.connect(lambda p=panel: self._share_markers(p))
         panel.clearRequested.connect(self.clear_plot)
         panel.cursor1Moved.connect(lambda x, p=panel: self._forward_cursor1(p, x))
+        # Its panels: titles as Display ▸ Show panel titles says, and an own
+        # window named after the tab.
+        if getattr(self, '_panel_titles_shown', None) is None:
+            self._panel_titles_shown = bool(read_setting(
+                self._user_settings_path, 'panel_titles_shown', False))
+        panel.panels.set_titles_shown(self._panel_titles_shown)
+        panel.panels.window_title = lambda title, p=panel: self._window_title_for(p, title)
+        panel.panelClosedByUser.connect(lambda key, p=panel: self._on_panel_closed(p, key))
+        panel.panels.panelsChanged.connect(self._panels_changed)
         return panel
 
     def _share_markers(self, panel: PlotPanel) -> None:
@@ -471,9 +483,17 @@ class MainWindow(QMainWindow):
         self.btn_delete_markers.setEnabled(bool(self.plot_panel.markers()))
 
     def _forward_cursor1(self, panel: PlotPanel, x: float) -> None:
-        """Cursor 1 of the tab on screen moved: the Trace follows it."""
-        if panel is self.plot_panel:
-            self.plotCursor1Moved.emit(x)
+        """Cursor 1 of the tab on screen moved: the Trace follows it, and so
+        do synchronized tabs with a panel in a window of its own, which is on
+        screen while its tab is not."""
+        if panel is not self.plot_panel:
+            return
+        self.plotCursor1Moved.emit(x)
+        if self.plot_tabs.synchronized:
+            view = TimeView.of(panel)
+            for other in self.plot_tabs.panels():
+                if other is not panel and other.panels.has_windows():
+                    view.show_in(other)
 
     def _show_plot_tab(self, panel: PlotPanel) -> None:
         """Set the plot buttons to the tab now on screen, without acting on it."""
@@ -486,7 +506,6 @@ class MainWindow(QMainWindow):
             self.btn_points: panel._show_points,
             self.btn_hide_line: panel._hide_lines,
             self.btn_table: panel._table_view_on,
-            self.btn_xy: panel._xy_view_on,
         }
         for button, state in checked.items():
             button.blockSignals(True)
@@ -539,12 +558,6 @@ class MainWindow(QMainWindow):
         self.btn_table.setCheckable(True)
         self.btn_table.setToolTip('Table: the plotted signals as a table, a row per sample time.\n'
                                   'Click a row to put Cursor 1 there. Click again for the plot.')
-        # Nor is this: one plotted signal against another, beside the plot.
-        self.btn_xy = QPushButton('XY')
-        self.btn_xy.setCheckable(True)
-        self.btn_xy.setToolTip('XY: one plotted signal against another, beside the plot,\n'
-                               'coloured by a third if you choose one.\n'
-                               'Click a point to put Cursor 1 at its time.')
         self.btn_cursor1 = icon_button('cursor1', 'Cursor 1',
                                        'Cursor 1, or click the plot to place it')
         self.btn_cursor1.setCheckable(True)
@@ -605,14 +618,20 @@ class MainWindow(QMainWindow):
                     self.btn_delete_markers, self.btn_clear_plot):
             btn.setParent(self)
             btn.hide()
-        # The views that open beside the plot, in a glass list that the
-        # pointer brings out of its right edge: the Trace window first, then
-        # the two panes.
+        # The views that open as panels beside the plot (gui.panel_area) are
+        # in the Views menu; these buttons still hold their state.
         self.btn_trace = QPushButton('Trace')
         self.btn_trace.setEnabled(False)  # enabled after decode
-        self.pane_rail = PaneRail()
-        for btn in (self.btn_trace, self.btn_table, self.btn_xy):
-            self.pane_rail.add_button(btn)
+        for btn in (self.btn_trace, self.btn_table):
+            btn.setParent(self)
+            btn.hide()
+        # Each view in it has a bin that deletes it (gui.bin_menu).
+        self.btn_views = MenuButton(self._fill_views_menu, menu_type=BinMenu)
+        self.btn_views.setText('Views' + MENU_MARK)
+        self.btn_views.setToolTip('Views: open the Table, XY plots, histograms, residency '
+                                  'maps or the CAN Trace beside the plot, as panels')
+        self.btn_views.setFixedHeight(height)
+        self.plot_button_row.add_end_button(self.btn_views)
         # Apart from the plot's own buttons, at the right end of the row.
         self.btn_sync_tabs = icon_button(
             'sync_tabs', 'Synchronize Tabs',
@@ -633,7 +652,6 @@ class MainWindow(QMainWindow):
         self.btn_stacked.toggled.connect(self._toggle_stacked)
         self.btn_multistack.toggled.connect(self._toggle_multistack)
         self.btn_table.toggled.connect(lambda on: self.plot_panel.set_table_view(on))
-        self.btn_xy.toggled.connect(lambda on: self.plot_panel.set_xy_view(on))
         self.btn_cursor1.toggled.connect(self._toggle_cursor1)
         self.btn_cursor2.toggled.connect(self._toggle_cursor2)
         self.btn_line_mode.clicked.connect(self._toggle_line_mode)
@@ -650,6 +668,7 @@ class MainWindow(QMainWindow):
         self.plot_tabs.currentPanelChanged.connect(self._show_plot_tab)
         self.plot_tabs.signalsDropped.connect(self._add_signals_to_tab)
         self.plot_tabs.signalsMoved.connect(self._move_signals_to_tab)
+        self.plot_tabs.tabClosing.connect(self._on_tab_closing)
 
         # The plot buttons sit above the plot only, level with the signal
         # table's header, so the table runs the full height of the panel.
@@ -660,9 +679,6 @@ class MainWindow(QMainWindow):
         plot_column_layout.setSpacing(0)
         plot_column_layout.addWidget(self.plot_button_row)
         plot_column_layout.addWidget(self.plot_tabs.plots, stretch=1)
-        # Not in the layout: the rail floats over the plots' right edge.
-        self.pane_rail.setParent(plot_column)
-        self.pane_rail.attach(self.plot_tabs.plots)
         self._level_plot_buttons_with_table_header()
 
         center_panel = QWidget()
@@ -830,8 +846,8 @@ class MainWindow(QMainWindow):
         self._act_can_trace = QAction('Trace', self)
         self._act_can_trace.triggered.connect(self.show_raw_frames)
         self._act_can_trace.setEnabled(False)  # enabled after decode
-        # Not on this row: its button is first on the rail beside the plot,
-        # with the other views of the plotted data.
+        # Not on this row: it is in the plot's Views menu, with the other
+        # views of the plotted data.
         self.addAction(self._act_can_trace)
         self.btn_trace.clicked.connect(self._act_can_trace.trigger)
         self._act_can_trace.changed.connect(self._show_trace_state)
@@ -871,11 +887,12 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence('V'), self, activated=lambda: self.plot_panel.fit_vertical())
         QShortcut(QKeySequence('Z'), self, activated=self.btn_zoom_rect.toggle)
         QShortcut(QKeySequence('S'), self, activated=self._toggle_line_mode)
-        # Esc leaves Rectangle Zoom; while it is off, Esc is left to others,
-        # such as a table cell being edited.
+        # Esc leaves Rectangle Zoom, else gives a maximised panel's room
+        # back; while neither is on, Esc is left to others, such as a table
+        # cell being edited.
         self._esc_rect_zoom = QShortcut(QKeySequence(Qt.Key.Key_Escape), self,
-                                        activated=lambda: self.btn_zoom_rect.setChecked(False))
-        self._esc_rect_zoom.setEnabled(self.btn_zoom_rect.isChecked())
+                                        activated=self._escape)
+        self._update_escape()
         QShortcut(QKeySequence('C'), self, activated=self._shortcut_change_signal_color)
         QShortcut(QKeySequence('R'), self, activated=self._shortcut_toggle_cursors)
         QShortcut(QKeySequence('M'), self, activated=self._shortcut_add_marker)
@@ -886,6 +903,12 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence('Ctrl+Z'), self, activated=lambda: self.plot_panel.undo())
         QShortcut(QKeySequence('Ctrl+Tab'), self, activated=lambda: self.plot_tabs.show_neighbour(1))
         QShortcut(QKeySequence('Ctrl+Shift+Tab'), self, activated=lambda: self.plot_tabs.show_neighbour(-1))
+        # The panels of the tab on screen: the one with the keyboard focus,
+        # else the time plot.
+        QShortcut(QKeySequence('Ctrl+Shift+Return'), self, activated=self._toggle_panel_maximised)
+        QShortcut(QKeySequence('Ctrl+Shift+Enter'), self, activated=self._toggle_panel_maximised)
+        QShortcut(QKeySequence('Ctrl+F4'), self, activated=self._close_focused_panel)
+        QShortcut(QKeySequence('Ctrl+Shift+T'), self, activated=self._reopen_panel)
 
     def toggle_debug_mode(self) -> None:
         """Toggle the hidden, session-only CAN load forensic mode."""
@@ -1512,6 +1535,7 @@ class MainWindow(QMainWindow):
                     if not self.plot_tabs.panels()[index].plotted_keys():
                         self.plot_tabs.close_tab(index)
             self.plot_tabs.bar.setCurrentIndex(min(shown, self.plot_tabs.count() - 1))
+        self._open_saved_trace(saved)
 
     @contextmanager
     def _tabs_each_on_their_own(self):
@@ -1537,9 +1561,16 @@ class MainWindow(QMainWindow):
             self.btn_cursor1.setChecked(bool(tab['cursor1']))
         if 'cursor2' in tab:
             self.btn_cursor2.setChecked(bool(tab['cursor2']))
-        if isinstance(tab.get('xy'), dict):
+        # XY views: each its own since the panels; before them a tab had one.
+        if isinstance(tab.get('xy_views'), list):
+            self.plot_panel.set_xy_views_state(tab['xy_views'])
+        elif isinstance(tab.get('xy'), dict):
             self.plot_panel.set_xy_state(tab['xy'])
-            self.btn_xy.setChecked(self.plot_panel.xy_view_active())
+        if isinstance(tab.get('plot_name'), str):
+            self.plot_panel.set_plot_name(tab['plot_name'])
+        if isinstance(tab.get('panels'), dict):
+            self.plot_panel.restore_panels(tab['panels'])
+            self._show_plot_tab(self.plot_panel)
 
     def _plot_saved_signals(self, tab: dict) -> None:
         """Plot a saved tab's signals in the tab on screen, with their look.
@@ -1669,6 +1700,10 @@ class MainWindow(QMainWindow):
         dialog, self._raw_frame_dialog = self._raw_frame_dialog, None
         if dialog is None:
             return
+        # Out of the tab it is a panel of.
+        for panel in self.plot_tabs.panels():
+            if panel.panels.panel('trace') is not None:
+                panel.panels.remove('trace')
         try:
             self.plotCursor1Moved.disconnect(dialog.follow_time)
         except (RuntimeError, TypeError):
@@ -1938,16 +1973,175 @@ class MainWindow(QMainWindow):
         hide.setChecked(self.btn_hide_line.isChecked())
         hide.setEnabled(self.btn_hide_line.isEnabled())
         hide.setToolTip('The data points only, once they are shown')
+        menu.addSeparator()
+        titles = menu.addAction('Show panel titles')
+        titles.setCheckable(True)
+        titles.setChecked(bool(self._panel_titles_shown))
+        titles.triggered.connect(self._set_panel_titles_shown)
+        titles.setToolTip("Every panel's title in view. Off: a panel shows its title "
+                          'while the pointer rests on its top edge.')
 
     def _fill_more_menu(self, menu: QMenu) -> None:
         clear = menu.addAction(plot_icon('clear_plot'), 'Clear Plot', self.clear_plot)
         clear.setEnabled(self.btn_clear_plot.isEnabled())
         clear.setToolTip('Remove every signal from the plot. Undo (Ctrl+Z) brings them back.')
 
+    # ── Panels: the views beside the plot (gui.panel_area) ────────────────
+
+    #: What Views ▾ offers to add, by kind: its text and tooltip.
+    _ADD_VIEWS = (
+        ('scatter', 'Add XY plot', 'One plotted signal against another, a point per sample, '
+                                   'coloured by a third if you choose one'),
+        ('histogram', 'Add histogram', 'How long one signal spent at each value'),
+        ('residency', 'Add residency map', 'How long two signals spent together in each '
+                                           'cell of a grid: a load collective'),
+    )
+
+    def _fill_views_menu(self, menu: QMenu) -> None:
+        """The views a tab can show beside its plot, each ticked while it is
+        open in the tab on screen; XY plots, histograms and residency maps,
+        as many as wanted, each its own panel."""
+        panel = self.plot_panel
+        area = panel.panels
+        table = menu.addAction('Table', lambda *_: self.btn_table.toggle())
+        table.setCheckable(True)
+        table.setChecked(self.btn_table.isChecked())
+        table.setToolTip('The plotted signals as a table, a row per sample time')
+        views = panel.xy_views()
+        if views:
+            menu.addSeparator()
+        for key in views:
+            action = menu.addAction(area.title(key),
+                                    lambda *_, key=key: self._toggle_xy_view(key))
+            action.setCheckable(True)
+            action.setChecked(area.is_open(key))
+            if isinstance(menu, BinMenu):
+                menu.add_bin(action, lambda key=key: self._delete_xy_view(key),
+                             f'Delete {area.title(key)}')
+        menu.addSeparator()
+        for kind, text, tip in self._ADD_VIEWS:
+            action = menu.addAction(text, lambda *_, kind=kind: panel.add_xy_view(kind))
+            action.setToolTip(tip)
+        menu.addSeparator()
+        trace_here = area.is_open('trace')
+        trace = menu.addAction('CAN Trace	Ctrl+Shift+R', self._toggle_trace_panel)
+        trace.setCheckable(True)
+        trace.setChecked(trace_here)
+        trace.setEnabled(self._act_can_trace.isEnabled() or trace_here)
+        trace.setToolTip(self._act_can_trace.toolTip())
+        menu.addSeparator()
+        reopen = menu.addAction('', self._reopen_panel)
+        self._name_reopen(reopen)
+        self._views_reopen = reopen
+
+    def _name_reopen(self, reopen: QAction) -> None:
+        """Views ▾'s Reopen, named after the panel it reopens."""
+        area = self.plot_panel.panels
+        closed = [key for key in area.closed_keys() if area.panel(key) is not None]
+        reopen.setText(f'Reopen {area.title(closed[-1])}	Ctrl+Shift+T' if closed
+                       else 'Reopen closed panel')
+        reopen.setEnabled(bool(closed))
+
+    def _delete_xy_view(self, key: str) -> None:
+        """A view deleted by its bin in Views ▾: the menu stays open, and its
+        Reopen names a panel still there."""
+        self.plot_panel.delete_xy_view(key)
+        reopen = getattr(self, '_views_reopen', None)
+        try:
+            if reopen is not None:
+                self._name_reopen(reopen)
+        except RuntimeError:
+            pass                      # its menu has gone
+
+    def _toggle_xy_view(self, key: str) -> None:
+        panel = self.plot_panel
+        if panel.panels.is_open(key):
+            panel.panels.close_panel(key)
+        else:
+            panel.open_xy_view(key)
+
+    def _toggle_trace_panel(self) -> None:
+        area = self.plot_panel.panels
+        if area.is_open('trace'):
+            area.close_panel('trace')
+        else:
+            self.show_raw_frames()
+
+    def _focused_panel_key(self) -> str:
+        return self.plot_panel.panels.focused_key() or 'plot'
+
+    def _toggle_panel_maximised(self) -> None:
+        self.plot_panel.panels.maximise(self._focused_panel_key())
+        self._update_escape()
+
+    def _close_focused_panel(self) -> None:
+        self.plot_panel.panels.close_panel(self._focused_panel_key(), user=True)
+
+    def _reopen_panel(self) -> None:
+        """Open the panel of the tab on screen closed last, where it was."""
+        area = self.plot_panel.panels
+        closed = area.closed_keys()
+        if not closed:
+            return
+        key = closed[-1]
+        if key == 'table':
+            self.btn_table.setChecked(True)
+        elif key == 'trace':
+            self.show_raw_frames()
+        else:
+            area.reopen_last()
+
+    def _on_panel_closed(self, panel: PlotPanel, key: str) -> None:
+        """A panel closed by its ✕, its menu or Ctrl+F4: the buttons that
+        hold its state follow. A closed Trace stays, with its search and
+        place, to open again; the next measurement lets it go."""
+        if panel is self.plot_panel:
+            self._show_plot_tab(panel)
+
+    def _on_tab_closing(self, panel: PlotPanel) -> None:
+        """The CAN Trace goes with the tab it is a panel of."""
+        if panel.panels.panel('trace') is not None:
+            self._close_trace_window()
+
+    def _panels_changed(self) -> None:
+        self._update_escape()
+
+    def _escape(self) -> None:
+        if self.btn_zoom_rect.isChecked():
+            self.btn_zoom_rect.setChecked(False)
+        elif self.plot_panel.panels.maximised() is not None:
+            self.plot_panel.panels.restore()
+        self._update_escape()
+
+    def _update_escape(self) -> None:
+        if not hasattr(self, '_esc_rect_zoom'):
+            return
+        self._esc_rect_zoom.setEnabled(
+            self.btn_zoom_rect.isChecked()
+            or self.plot_panel.panels.maximised() is not None)
+
+    def _set_panel_titles_shown(self, shown: bool) -> None:
+        """Display ▸ Show panel titles: every panel's title in view, or each
+        only while the pointer is at its panel's top edge."""
+        self._panel_titles_shown = bool(shown)
+        for panel in self.plot_tabs.panels():
+            panel.panels.set_titles_shown(shown)
+        try:
+            write_setting(self._user_settings_path, 'panel_titles_shown', bool(shown))
+        except OSError as exc:
+            self._log(f'Settings save warning: {exc}')
+
+    def _window_title_for(self, panel: PlotPanel, title: str) -> str:
+        """A panel's own window names its plot tab too."""
+        for each, name in zip(self.plot_tabs.panels(), self.plot_tabs.names()):
+            if each is panel:
+                return f'{name} · {title}'
+        return title
+
     def _toggle_rect_zoom(self, checked: bool) -> None:
         for panel in self.plot_tabs.panels():     # it stays on from tab to tab
             panel.set_rect_zoom(checked)
-        self._esc_rect_zoom.setEnabled(checked)
+        self._update_escape()
         if checked:
             # No longer than the other hints: the status bar widens the window
             # to show the whole text.
@@ -2012,17 +2206,53 @@ class MainWindow(QMainWindow):
             ) if self.store else 'Load a measurement file first.'
             QMessageBox.information(self, 'Trace unavailable', reason)
             return
-        self._close_trace_window()
-        self._raw_frame_dialog = RawFrameDialog(rfs, self, settings_path=self._user_settings_path)
-        # Picking a frame places a cursor there; Cursor 1 brings its frame into view.
-        self._raw_frame_dialog.timeClicked.connect(self._place_cursor1)
-        self._raw_frame_dialog.cursor2Requested.connect(self._place_cursor2)
-        self.plotCursor1Moved.connect(self._raw_frame_dialog.follow_time)
-        if self.btn_cursor1.isChecked():
-            self._raw_frame_dialog.follow_time(self.plot_panel.v_line.value())
-        self._raw_frame_dialog.show()
-        self._raw_frame_dialog.raise_()
-        self._raw_frame_dialog.activateWindow()
+        self._open_trace(self.plot_panel, rfs)
+
+    def _open_trace(self, tab: PlotPanel, rfs) -> None:
+        """Show the CAN Trace as a panel of a tab: where it was in that tab,
+        else along the tab's foot."""
+        area = tab.panels
+        dialog = self._raw_frame_dialog
+        if dialog is not None and area.panel('trace') is not None:
+            # Already in this tab: open it again if closed, and bring it up.
+            area.open_panel('trace')
+            if area.is_floating('trace'):
+                dialog.window().raise_()
+                dialog.window().activateWindow()
+            return
+        if dialog is not None:
+            # One Trace for the window: it moves to the tab on screen, with
+            # its search, filter and place in the frames.
+            for panel in self.plot_tabs.panels():
+                if panel.panels.panel('trace') is not None:
+                    panel.panels.remove('trace')
+        else:
+            dialog = RawFrameDialog(rfs, None, settings_path=self._user_settings_path)
+            # A panel of the tab, not a window of its own (gui.panel_area).
+            dialog.setWindowFlags(Qt.WindowType.Widget)
+            # Picking a frame places a cursor there; Cursor 1 brings its frame into view.
+            dialog.timeClicked.connect(self._place_cursor1)
+            dialog.cursor2Requested.connect(self._place_cursor2)
+            self.plotCursor1Moved.connect(dialog.follow_time)
+            self._raw_frame_dialog = dialog
+        area.add('trace', dialog, 'CAN Trace', home={'edge': 'bottom', 'share': 0.38},
+                 name_label=dialog.name_label)
+        area.open_panel('trace')
+        if tab._cursor1_enabled:
+            dialog.follow_time(tab.v_line.value())
+        dialog.search_edit.setFocus()
+
+    def _open_saved_trace(self, saved: SavedTabs) -> None:
+        """Open the CAN Trace where a configuration's tab had it, once the
+        measurement is decoded: in the first tab whose panels name it."""
+        rfs = getattr(self.store, 'raw_frame_store', None) if self.store else None
+        if not rfs or len(rfs) == 0:
+            return
+        panels = self.plot_tabs.panels()
+        for index, tab in zip(self._tab_positions(saved), saved.tabs):
+            if 0 <= index < len(panels) and 'trace' in layout_keys(tab.get('panels')):
+                self._open_trace(panels[index], rfs)
+                return
 
     # The line mode: icon, name and tooltip of the button, by step or not.
     _LINE_MODES = {
@@ -3363,7 +3593,7 @@ class MainWindow(QMainWindow):
         ('Z',               'Rectangle Zoom on/off — drag a box on the plot to zoom into it'),
         ('Shift + drag on plot', 'In Rectangle Zoom: zoom out around the box; a smaller box zooms out further'),
         ('Double-click on plot', 'In Rectangle Zoom: fit to window, the whole recording'),
-        ('Esc',             'Leave Rectangle Zoom'),
+        ('Esc',             'Leave Rectangle Zoom, or give a maximised panel its room back'),
         ('S',               'Step Mode or Interpolation Mode — each value held until the next sample, or straight lines'),
         ('Space',           'Plot selected signal(s) from the signal tree'),
         ('C',               'Change color of the selected signal'),
@@ -3375,7 +3605,10 @@ class MainWindow(QMainWindow):
         ('Ctrl + Z',        'Undo last plot action (up to 3 levels)'),
         ('Ctrl + Tab',      'Show the next plot tab (Ctrl + Shift + Tab: the previous one)'),
         ('Double-click on a tab', 'Rename the tab'),
-        ('Ctrl + Shift + R','Open the Trace — the raw CAN and LIN frames'),
+        ('Ctrl + Shift + R','Open the Trace — the raw CAN and LIN frames, as a panel of the tab'),
+        ('Ctrl + Shift + Enter', 'Maximise the panel you are in to fill the tab, or give the room back'),
+        ('Ctrl + F4',       'Close the panel you are in (Table, XY plot, Trace, ...)'),
+        ('Ctrl + Shift + T','Open the panel closed last, where it was'),
         ('Shift + F3',      'In Calculated Signal: Insert function — every function, with how to use each'),
     ]
 
@@ -3662,6 +3895,10 @@ class MainWindow(QMainWindow):
             self._close_retry.start()
             return
         self._close_retry.stop()
+        # Panels in windows of their own come back first: a window left open
+        # would keep the application running behind a closed main window.
+        for panel in self.plot_tabs.panels():
+            panel.panels.dock_all()
         self._release_store()
         super().closeEvent(event)
         if self._closing and QApplication.quitOnLastWindowClosed():
@@ -3826,7 +4063,7 @@ class MainWindow(QMainWindow):
             )
 
     def _show_trace_state(self) -> None:
-        """The rail's Trace button is enabled, and explained, as its action is."""
+        """The Trace's button is enabled, and explained, as its action is."""
         self.btn_trace.setEnabled(self._act_can_trace.isEnabled())
         self.btn_trace.setToolTip(self._act_can_trace.toolTip())
 

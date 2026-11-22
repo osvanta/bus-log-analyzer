@@ -90,15 +90,28 @@ def _plotted_signals(config: dict) -> tuple[int, int]:
 def differs(config: dict, snapshot: dict | None) -> bool:
     """Whether *config* holds a change from *snapshot*, the configuration last
     saved or opened (None when there is none). A key the snapshot lacks was
-    written by a later version than the file's and does not count."""
+    written by a later version than the file's and does not count, nor does
+    one a tab of it lacks."""
     if snapshot is None:
         return True
     current = as_saved(config)
     return any(
-        value != snapshot[key]
+        _tabs_differ(value, snapshot[key]) if key == 'tabs' else value != snapshot[key]
         for key, value in current.items()
         if key not in _IGNORED_KEYS and key in snapshot
     )
+
+
+def _tabs_differ(tabs, before) -> bool:
+    if not (isinstance(tabs, list) and isinstance(before, list)) or len(tabs) != len(before):
+        return tabs != before
+    for tab, old in zip(tabs, before):
+        if isinstance(tab, dict) and isinstance(old, dict):
+            if any(value != old[key] for key, value in tab.items() if key in old):
+                return True
+        elif tab != old:
+            return True
+    return False
 
 
 def read(path: Path) -> dict | None:

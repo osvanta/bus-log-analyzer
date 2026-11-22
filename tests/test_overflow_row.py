@@ -281,10 +281,11 @@ def test_plot_buttons_are_level_with_the_table_header(window):
     row_top, _ = top_and_bottom(row)
     table_top, _ = top_and_bottom(table)
     first_row_top, _ = top_and_bottom(table.viewport())
-    plot_top, _ = top_and_bottom(window.plot_panel.view_stack)
+    # The plot's card (gui.panel_area): its outline is the plot's edge.
+    plot_top, _ = top_and_bottom(window.plot_panel.panels._group_of('plot'))
 
     assert row_top == table_top
-    # The plot and the table's first row start on one line.
+    # The plot's card and the table's first row start on one line.
     assert plot_top == first_row_top
 
 
@@ -302,7 +303,9 @@ def test_the_table_ends_level_with_the_plot(qapp, window):
 
     def assert_level():
         qapp.processEvents()
-        assert bottom(window.plot_panel.table) == bottom(window.plot_panel.view_stack)
+        # The plot's card (gui.panel_area): its outline is the plot's edge.
+        card = window.plot_panel.panels._group_of('plot')
+        assert bottom(window.plot_panel.table) == bottom(card)
 
     assert_level()
     ts = array.array('d', (i * 0.1 for i in range(100)))

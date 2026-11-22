@@ -71,8 +71,9 @@ def _row(window):
 def test_the_row_reads_in_the_order_of_the_work(window):
     assert _row(window) == ['File', '|', 'Open Measurement', 'Databases', 'Decode', '|',
                             'Calculated Signal', 'Tools', '|', 'Help']
-    # Trace is first on the rail beside the plot.
-    assert window.pane_rail.buttons()[0].text() == 'Trace'
+    # Trace is in the plot's Views menu, with the other panels.
+    assert 'CAN Trace' in [action.text().split('	')[0]
+                           for action in window.btn_views.menu().actions()]
 
 
 def test_the_file_menu_holds_what_is_done_now_and_then(window):

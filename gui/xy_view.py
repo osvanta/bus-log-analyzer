@@ -5,12 +5,13 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-The XY view: one plotted signal against another, a point per sample of the X
-signal, optionally coloured by a third signal. Its Histogram view instead
-shows how long the X signal spent at each value (core.histogram), and its
-Residency view how long X and Y spent together in each cell of a grid
-(core.residency). A click on a bar or a cell asks for the times it covers
-to be shaded (*spansChosen*).
+The views beside the time plot that show one signal against another. The XY
+plot: one plotted signal against another, a point per sample of the X
+signal, optionally coloured by a third signal. The histogram: how long the X
+signal spent at each value (core.histogram). The residency map: how long X
+and Y spent together in each cell of a grid (core.residency). Each is a view
+of its own, an XYView of one kind, so a tab can show several at once. A click
+on a bar or a cell asks for the times it covers to be shaded (*spansChosen*).
 
 It shows the time range the time plot shows (or the whole measurement), marks
 where each cursor is, and a click on a point asks for Cursor 1 at that
@@ -20,11 +21,11 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
+from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
 from core import histogram as hist
@@ -34,6 +35,8 @@ from core.signal_store import SignalSeries
 from core.xy_data import (
     COLOR_LEVELS, EMPTY, XYPoints, color_steps, nearest_point, xy_at, xy_points,
 )
+from gui.panel_area import STRIP_BUTTON_SIZE, TITLE_BUTTONS_ROOM, HeaderBand
+from gui.plot_icons import plot_icon
 
 #: Blue for low to red for high (the turbo scale without its two dark ends,
 #: which a black plot background would hide).
@@ -46,10 +49,16 @@ _REDRAW_MS = 60
 _POINT_SIZE = 5
 _MARK_SIZE = 15
 SCATTER, HISTOGRAM, RESIDENCY = 'scatter', 'histogram', 'residency'
-_VIEWS = (SCATTER, HISTOGRAM, RESIDENCY)
+KINDS = (SCATTER, HISTOGRAM, RESIDENCY)
+#: Each kind's name, as a new view of it is called.
+KIND_NAMES = {SCATTER: 'XY plot', HISTOGRAM: 'Histogram', RESIDENCY: 'Residency map'}
 #: What the bars' heights show, as the Show box offers it.
 PERCENT, SECONDS, SAMPLES = 'percent', 'seconds', 'samples'
 _SHOW_CHOICES = ((PERCENT, '% of time'), (SECONDS, 'Seconds'), (SAMPLES, 'Samples'))
+_SHOW_KEYS = tuple(key for key, _text in _SHOW_CHOICES)
+#: The settings a new view is drawn with, by their names in its state.
+_DEFAULT_OPTIONS = {'whole_measurement': False, 'equal_scale': False, 'bins': '',
+                    'show': PERCENT, 'gap': '', 'y_bins': '', 'log_color': False}
 #: The bar a click picked.
 _PICKED_COLOR = '#faba39'
 
@@ -185,222 +194,282 @@ class _CellGrid(pg.GraphicsObject):
         self._written = written
 
 
+class _ElidedLabel(QLabel):
+    """One line of text, cut short with "…" where the room ends; the whole
+    of it in its tooltip. It never holds the pane wider."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumWidth(1)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        self.setToolTip(text)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(1, super().minimumSizeHint().height())
+
+    def shown_text(self) -> str:
+        """The text as it fits."""
+        return self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight,
+                                             max(self.contentsRect().width(), 1))
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(self.contentsRect(),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         self.shown_text())
+        painter.end()
+
+
 class XYView(QWidget):
-    """The XY plot with its signal choices. set_signals() gives it the
-    plotted signals to choose from; the choices are kept by signal key, so
-    one named before its signal is plotted takes effect once it is."""
+    """One of the views beside the time plot: the XY plot (SCATTER), the
+    histogram (HISTOGRAM) or the residency map (RESIDENCY), each its own
+    panel. set_signals() gives it the plotted signals to choose from; the
+    choices are kept by signal key, so one named before its signal is
+    plotted takes effect once it is.
+
+    Its settings are behind the gear in its top row. They change the view
+    only when Update is pressed; closing the box without it leaves the view
+    as it was."""
 
     timeClicked = Signal(float)
     #: The stretches of time a clicked bar covers, [(start, end), ...];
     #: empty to clear them.
     spansChosen = Signal(list)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, kind: str = SCATTER, parent=None) -> None:
         super().__init__(parent)
+        self._kind = kind = kind if kind in KINDS else SCATTER
+        self._view = kind
         # key -> (label, series, plot colour), in plotted order.
         self._signals: dict[str, tuple[str, SignalSeries, str]] = {}
         self._chosen: dict[str, str | None] = {'x': None, 'y': None, 'color': None}
+        # The settings the view is drawn with. The gear's box shows them, and
+        # Update takes what it holds.
+        self._options: dict = dict(_DEFAULT_OPTIONS)
         self._time_range: tuple[float, float] | None = None
         self._cursors: tuple[float | None, float | None] = (None, None)
         self._foreground = '#000000'
         self.points: XYPoints = EMPTY
         self._fitted: tuple[str | None, str | None] = (None, None)
-        self._view = SCATTER
         self.bars: hist.Histogram | None = None
+        self.grid: res.Residency | None = None
         # The bar a click picked, by its edges, its stretches, and which one
         # Cursor 1 was last sent to.
         self._picked: tuple[float, float] | None = None
         self._spans: list[tuple[float, float]] = []
         self._span_index = -1
+        bars, cells = kind == HISTOGRAM, kind == RESIDENCY
 
-        self.scatter_button = QPushButton('Scatter')
-        self.histogram_button = QPushButton('Histogram')
-        self.residency_button = QPushButton('Residency')
-        self.residency_button.setToolTip('How long X and Y spent together in each cell of '
-                                         'a grid: a load collective.')
-        self.scatter_button.setToolTip('One signal against another, a point per sample.')
-        self.histogram_button.setToolTip('How long one signal spent at each value.')
-        views = QHBoxLayout()
-        views.setContentsMargins(4, 2, 4, 0)
-        views.setSpacing(0)
-        self._view_group = QButtonGroup(self)
-        for view, button in ((SCATTER, self.scatter_button), (HISTOGRAM, self.histogram_button),
-                             (RESIDENCY, self.residency_button)):
-            button.setCheckable(True)
-            button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-            self._view_group.addButton(button)
-            button.clicked.connect(lambda _on, view=view: self.set_view(view))
-            views.addWidget(button)
-        views.addStretch(1)
-        self.scatter_button.setChecked(True)
+        # ── Its top row: its name while its title is folded away
+        # (gui.panel_area), what it shows, and the gear ──────────────────
+        self.name_label = QLabel(KIND_NAMES[kind])
+        self.name_label.setContentsMargins(2, 0, 10, 0)
+        self.name_label.hide()
+        self.summary = _ElidedLabel()
+        self.summary.setContentsMargins(4, 0, 4, 0)
+        # As wide as their words: the row keeps its room for what it shows.
+        self.copy_button = QToolButton()
+        self.copy_button.setText('Copy')
+        self.copy_button.setToolTip('Copy the grid as a table, to paste into a spreadsheet.')
+        self.copy_button.clicked.connect(self.copy_table)
+        self.export_button = QToolButton()
+        self.export_button.setText('CSV…')
+        self.export_button.setToolTip('Export the grid as a table to a CSV file.')
+        self.export_button.clicked.connect(self._export_clicked)
+        self.settings_button = QToolButton()
+        self.settings_button.setIcon(plot_icon('settings'))
+        self.settings_button.setIconSize(QSize(16, 16))
+        self.settings_button.setFixedSize(STRIP_BUTTON_SIZE, STRIP_BUTTON_SIZE)
+        self.settings_button.setAutoRaise(True)
+        self.settings_button.setAccessibleName('Settings')
+        self.settings_button.setToolTip(
+            {SCATTER: 'Settings: the X, Y and colour signals, and the time shown',
+             HISTOGRAM: 'Settings: the signal, its bars, and the time shown',
+             RESIDENCY: 'Settings: the X and Y signals, the grid, and the time shown'}[kind])
+        self.settings_button.clicked.connect(self.open_settings)
+        # Its header band (gui.panel_area): name, reading, gear.
+        self.header = HeaderBand()
+        top = QHBoxLayout(self.header)
+        top.setContentsMargins(4, 0, 0, 0)
+        top.setSpacing(2)
+        top.addWidget(self.name_label)
+        top.addWidget(self.summary, 1)
+        if cells:
+            top.addWidget(self.copy_button)
+            top.addWidget(self.export_button)
+        else:
+            self.copy_button.setParent(self)
+            self.copy_button.hide()
+            self.export_button.setParent(self)
+            self.export_button.hide()
+        top.addWidget(self.settings_button)
+        # Where its panel's title has the gear too: left of the title's
+        # maximise, undock and close, so a title shown over this row never
+        # puts its close where the pointer went for the gear.
+        top.addSpacing(TITLE_BUTTONS_ROOM)
 
+        # ── Its settings, in the box the gear opens ──────────────────────
+        self.settings_box = QFrame(self, Qt.WindowType.Popup)
+        self.settings_box.setFrameShape(QFrame.Shape.StyledPanel)
         self.x_box, self.y_box, self.color_box = QComboBox(), QComboBox(), QComboBox()
-        choices = QHBoxLayout()
-        choices.setContentsMargins(4, 2, 4, 0)
-        self._role_labels: dict[str, QLabel] = {}
-        for role, text, box in (('x', 'X', self.x_box), ('y', 'Y', self.y_box),
-                                ('color', 'Colour', self.color_box)):
-            # A narrow pane beside the plot is not held wider by a long name.
+        for box in (self.x_box, self.y_box, self.color_box):
             box.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-            box.setMinimumContentsLength(4)
-            box.setMinimumWidth(50)
-            box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            box.activated.connect(lambda _index, role=role, box=box:
-                                  self._choose(role, box.currentData()))
-            self._role_labels[role] = label = QLabel(text)
-            choices.addWidget(label)
-            choices.addWidget(box, 1)
-        self.x_box.setToolTip('The signal along the bottom. Each of its samples is a point.')
-        self.y_box.setToolTip('The signal up the side: the value it had at each point\'s time.')
-        self.color_box.setToolTip('A third signal as each point\'s colour, blue for low '
-                                  'values and red for high.')
-
+            box.setMinimumContentsLength(18)
+        self.x_box.setToolTip('The signal whose values the bars count.' if bars
+                              else 'The signal along the bottom. Each of its samples is a point.')
+        self.y_box.setToolTip("The signal up the side: the value it had at each point's time.")
+        self.color_box.setToolTip(
+            'A third signal whose average each cell shows instead of the time.' if cells
+            else "A third signal as each point's colour, blue for low values and red for high.")
+        self.color_box.currentIndexChanged.connect(lambda _index: self._sync_log_box())
         self.whole_box = QCheckBox('Whole measurement')
         self.whole_box.setToolTip('Off: only the time range the time plot shows.')
-        self.whole_box.toggled.connect(lambda _on: self._redraw())
         self.equal_box = QCheckBox('Equal scale')
         self.equal_box.setToolTip('One unit of X as long as one unit of Y, as for a '
                                   'track of latitude against longitude.')
-        self.equal_box.toggled.connect(self._set_equal_scale)
-        options = QHBoxLayout()
-        options.setContentsMargins(4, 0, 4, 0)
-        options.addWidget(self.whole_box)
-        options.addWidget(self.equal_box)
-        options.addStretch(1)
-
-        # The histogram's own choices, shown in its view only.
         self.bins_edit = QLineEdit()
         self.bins_edit.setPlaceholderText('Auto')
         self.bins_edit.setToolTip('Empty for automatic bars, one number for the bar width '
                                   '(2 for 2 °C), or edges such as 0, 25, 45, 60.')
-        self.bins_edit.editingFinished.connect(self._redraw)
         self.show_box = QComboBox()
         for key, text in _SHOW_CHOICES:
             self.show_box.addItem(text, key)
         self.show_box.setToolTip('What the bar heights show. Time counts how long each '
                                  'value held; Samples counts the samples taken.')
-        self.show_box.activated.connect(lambda _index: self._redraw())
         self.gap_edit = QLineEdit()
         self.gap_edit.setPlaceholderText('Auto')
         self.gap_edit.setToolTip('A value held longer than this many seconds (a logger '
                                  'pause, a silent bus) is not counted. Auto: ten sample '
                                  'periods, at least 1 s.')
-        self.gap_edit.editingFinished.connect(self._redraw)
-        for edit in (self.bins_edit, self.gap_edit):
-            edit.setMinimumWidth(40)
-            edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.histogram_options = QWidget()
-        bar_options = QHBoxLayout(self.histogram_options)
-        bar_options.setContentsMargins(4, 0, 4, 0)
-        self._bins_label = QLabel('Bins')
-        for label, widget, stretch in ((self._bins_label, self.bins_edit, 2),
-                                       (QLabel('Show'), self.show_box, 0),
-                                       (QLabel('Gap s'), self.gap_edit, 1)):
-            bar_options.addWidget(label)
-            bar_options.addWidget(widget, stretch)
-        self.histogram_options.hide()
-
-        # The residency map's own choices, below those it shares.
         self.y_bins_edit = QLineEdit()
         self.y_bins_edit.setPlaceholderText('Auto')
         self.y_bins_edit.setToolTip('As for X: empty for automatic, a cell height, or edges.')
-        self.y_bins_edit.editingFinished.connect(self._redraw)
-        self.y_bins_edit.setMinimumWidth(40)
-        self.y_bins_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.log_box = QCheckBox('Log')
-        self.log_box.setToolTip('Log colour: colour by the logarithm of the time, so that a cell '
-                                'holding most of it (idle, say) does not wash out the rest.')
-        self.log_box.toggled.connect(lambda _on: self._redraw())
-        self.copy_button = QPushButton('Copy')
-        self.copy_button.setToolTip('Copy the grid as a table, to paste into a spreadsheet.')
-        self.copy_button.clicked.connect(self.copy_table)
-        self.export_button = QPushButton('CSV…')
-        self.export_button.setToolTip('Export the grid as a table to a CSV file.')
-        self.export_button.clicked.connect(self._export_clicked)
-        self.residency_options = QWidget()
-        cell_options = QHBoxLayout(self.residency_options)
-        cell_options.setContentsMargins(4, 0, 4, 0)
-        cell_options.addWidget(QLabel('Y bins'))
-        cell_options.addWidget(self.y_bins_edit, 1)
-        cell_options.addWidget(self.log_box)
-        cell_options.addWidget(self.copy_button)
-        cell_options.addWidget(self.export_button)
-        self.residency_options.hide()
-        # On its own line and wrapping, so it never holds the pane wider.
-        self.summary = QLabel()
-        self.summary.setWordWrap(True)
-        self.summary.setMinimumWidth(1)
-        self.summary.setContentsMargins(4, 0, 4, 2)
+        self.log_box = QCheckBox('Log colour')
+        self.log_box.setToolTip('Colour by the logarithm of the time, so that a cell holding '
+                                'most of it (idle, say) does not wash out the rest.')
+        for edit in (self.bins_edit, self.gap_edit, self.y_bins_edit):
+            edit.returnPressed.connect(self.apply_settings)
+        self._role_labels: dict[str, QLabel] = {
+            'x': QLabel('Signal' if bars else 'X'), 'y': QLabel('Y'),
+            'color': QLabel('Mean of' if cells else 'Colour')}
+        rows = {
+            SCATTER: [(self._role_labels['x'], self.x_box), (self._role_labels['y'], self.y_box),
+                      (self._role_labels['color'], self.color_box),
+                      (None, self.whole_box), (None, self.equal_box)],
+            HISTOGRAM: [(self._role_labels['x'], self.x_box), ('Bins', self.bins_edit),
+                        ('Show', self.show_box), ('Gap s', self.gap_edit),
+                        (None, self.whole_box)],
+            RESIDENCY: [(self._role_labels['x'], self.x_box), (self._role_labels['y'], self.y_box),
+                        (self._role_labels['color'], self.color_box),
+                        ('X bins', self.bins_edit), ('Y bins', self.y_bins_edit),
+                        ('Show', self.show_box), ('Gap s', self.gap_edit),
+                        (None, self.log_box), (None, self.whole_box)],
+        }[kind]
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        used = set()
+        for label, widget in rows:
+            used.add(id(widget))
+            if label is None:
+                form.addRow(widget)
+            else:
+                if isinstance(label, QLabel):
+                    used.add(id(label))
+                form.addRow(label, widget)
+        # Those this kind does not use are kept, unseen, for its state.
+        for widget in (self.x_box, self.y_box, self.color_box, self.whole_box, self.equal_box,
+                       self.bins_edit, self.show_box, self.gap_edit, self.y_bins_edit,
+                       self.log_box, *self._role_labels.values()):
+            if id(widget) not in used:
+                widget.setParent(self.settings_box)
+                widget.hide()
+        self.update_button = QPushButton('Update')
+        self.update_button.setToolTip('Draw the view with these settings')
+        self.update_button.setDefault(True)
+        self.update_button.clicked.connect(self.apply_settings)
+        self.cancel_button = QPushButton('Cancel')
+        self.cancel_button.setToolTip('Close, leaving the view as it was')
+        self.cancel_button.clicked.connect(self.settings_box.hide)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.update_button)
+        box_layout = QVBoxLayout(self.settings_box)
+        box_layout.setContentsMargins(10, 10, 10, 10)
+        box_layout.addLayout(form)
+        box_layout.addLayout(buttons)
 
-        self.plot = pg.PlotWidget()
-        self.plot.setMenuEnabled(False)
-        self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.scatter = pg.ScatterPlotItem(pxMode=True, size=_POINT_SIZE, pen=None)
-        self.mark1 = pg.ScatterPlotItem(pxMode=True, size=_MARK_SIZE, symbol='o', brush=None)
-        self.mark2 = pg.ScatterPlotItem(pxMode=True, size=_MARK_SIZE, symbol='d', brush=None)
-        for z, item in enumerate((self.scatter, self.mark1, self.mark2)):
-            item.setZValue(z)
-            self.plot.addItem(item)
-        self.plot.scene().sigMouseClicked.connect(self._on_click)
+        # ── The plot ─────────────────────────────────────────────────────
+        self.plot = self.hist_plot = self.res_plot = None
+        self.scatter = self.mark1 = self.mark2 = None
+        self.bar_item = self.picked_item = None
+        self.cells: _CellGrid | None = None
+        self.cursor_lines: list[pg.InfiniteLine] = []
+        self.res_marks: list[pg.ScatterPlotItem] = []
+        if kind == SCATTER:
+            self.plot = shown = pg.PlotWidget()
+            self.plot.setMenuEnabled(False)
+            self.plot.showGrid(x=True, y=True, alpha=0.25)
+            self.scatter = pg.ScatterPlotItem(pxMode=True, size=_POINT_SIZE, pen=None)
+            self.mark1 = pg.ScatterPlotItem(pxMode=True, size=_MARK_SIZE, symbol='o', brush=None)
+            self.mark2 = pg.ScatterPlotItem(pxMode=True, size=_MARK_SIZE, symbol='d', brush=None)
+            for z, item in enumerate((self.scatter, self.mark1, self.mark2)):
+                item.setZValue(z)
+                self.plot.addItem(item)
+            self.plot.scene().sigMouseClicked.connect(self._on_click)
+        elif bars:
+            self.hist_plot = shown = pg.PlotWidget()
+            self.hist_plot.setMenuEnabled(False)
+            self.hist_plot.showGrid(x=False, y=True, alpha=0.25)
+            self.hist_plot.getPlotItem().vb.setMouseEnabled(x=False, y=False)
+            self.bar_item = pg.BarGraphItem(x=[], height=[], width=1.0)
+            self.picked_item = pg.BarGraphItem(x=[], height=[], width=1.0,
+                                               brush=_PICKED_COLOR, pen=None)
+            self.hist_plot.addItem(self.bar_item)
+            self.hist_plot.addItem(self.picked_item)
+            for style in (Qt.PenStyle.DashLine, Qt.PenStyle.DotLine):
+                line = pg.InfiniteLine(angle=90, movable=False)
+                line.setZValue(5)
+                line.hide()
+                line.pen_style = style
+                self.hist_plot.addItem(line, ignoreBounds=True)
+                self.cursor_lines.append(line)
+            self.hist_plot.scene().sigMouseMoved.connect(self._on_bar_hover)
+            self.hist_plot.scene().sigMouseClicked.connect(self._on_bar_click)
+        else:
+            self.res_plot = shown = pg.PlotWidget()
+            self.res_plot.setMenuEnabled(False)
+            self.res_plot.getPlotItem().vb.setMouseEnabled(x=False, y=False)
+            self.cells = _CellGrid()
+            self.res_plot.addItem(self.cells)
+            for symbol in ('o', 'd'):
+                mark = pg.ScatterPlotItem(pxMode=True, size=_MARK_SIZE, symbol=symbol, brush=None)
+                mark.setZValue(5)
+                self.res_plot.addItem(mark)
+                self.res_marks.append(mark)
+            self.res_plot.scene().sigMouseMoved.connect(self._on_cell_hover)
+            self.res_plot.scene().sigMouseClicked.connect(self._on_cell_click)
+        # One line, as the point count is: cut short where the room ends,
+        # the whole of it in its tooltip.
+        self.readout = _ElidedLabel()
+        self.readout.setText(
+            'Point at a cell to read it. Click it to shade its times on the plot.' if cells
+            else 'Point at a bar to read it. Click it to shade its times on the plot.')
+        self.readout.setContentsMargins(4, 2, 4, 2)
+        self.readout.setVisible(bars or cells)
         self.scale = _ColorScale()
         self.scale.hide()
-
-        self.hist_plot = pg.PlotWidget()
-        self.hist_plot.setMenuEnabled(False)
-        self.hist_plot.showGrid(x=False, y=True, alpha=0.25)
-        self.hist_plot.getPlotItem().vb.setMouseEnabled(x=False, y=False)
-        self.bar_item = pg.BarGraphItem(x=[], height=[], width=1.0)
-        self.picked_item = pg.BarGraphItem(x=[], height=[], width=1.0,
-                                           brush=_PICKED_COLOR, pen=None)
-        self.hist_plot.addItem(self.bar_item)
-        self.hist_plot.addItem(self.picked_item)
-        self.cursor_lines = []
-        for style in (Qt.PenStyle.DashLine, Qt.PenStyle.DotLine):
-            line = pg.InfiniteLine(angle=90, movable=False)
-            line.setZValue(5)
-            line.hide()
-            line.pen_style = style
-            self.hist_plot.addItem(line, ignoreBounds=True)
-            self.cursor_lines.append(line)
-        self.hist_plot.scene().sigMouseMoved.connect(self._on_bar_hover)
-        self.hist_plot.scene().sigMouseClicked.connect(self._on_bar_click)
-        self.readout = QLabel('Point at a bar to read it. Click it to shade its times on the plot.')
-        self.readout.setWordWrap(True)
-        self.readout.setMinimumWidth(1)
-        self.readout.setContentsMargins(4, 2, 4, 2)
-        self.readout.hide()
-
-        self.res_plot = pg.PlotWidget()
-        self.res_plot.setMenuEnabled(False)
-        self.res_plot.getPlotItem().vb.setMouseEnabled(x=False, y=False)
-        self.cells = _CellGrid()
-        self.res_plot.addItem(self.cells)
-        self.res_marks = []
-        for symbol in ('o', 'd'):
-            mark = pg.ScatterPlotItem(pxMode=True, size=_MARK_SIZE, symbol=symbol, brush=None)
-            mark.setZValue(5)
-            self.res_plot.addItem(mark)
-            self.res_marks.append(mark)
-        self.res_plot.scene().sigMouseMoved.connect(self._on_cell_hover)
-        self.res_plot.scene().sigMouseClicked.connect(self._on_cell_click)
-        self.grid: res.Residency | None = None
-
-        self.plots = QStackedWidget()
-        self.plots.addWidget(self.plot)
-        self.plots.addWidget(self.hist_plot)
-        self.plots.addWidget(self.res_plot)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addLayout(views)
-        layout.addLayout(choices)
-        layout.addLayout(options)
-        layout.addWidget(self.histogram_options)
-        layout.addWidget(self.residency_options)
-        layout.addWidget(self.summary)
-        layout.addWidget(self.plots, 1)
+        layout.addWidget(self.header)
+        layout.addWidget(shown, 1)
         layout.addWidget(self.readout)
         layout.addWidget(self.scale)
         # Its own, not the widest row's: the pane may be dragged narrow.
@@ -412,6 +481,7 @@ class XYView(QWidget):
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._redraw)
         self.set_colors('#ffffff', '#000000')
+        self._load_settings()
         self._redraw()
 
     # ── What it is given ──────────────────────────────────────────────────
@@ -435,11 +505,8 @@ class XYView(QWidget):
             for key, (label, _series, _color) in self._signals.items():
                 box.addItem(label, key)
                 box.setItemData(box.count() - 1, key, Qt.ItemDataRole.ToolTipRole)
-            chosen = self._chosen[role]
-            # A chosen signal that is not plotted leaves the box empty.
-            box.setCurrentIndex(box.findData(chosen) if chosen in self._signals
-                                else 0 if role == 'color' and chosen is None else -1)
             box.blockSignals(False)
+        self._load_choices()
         self._redraw()
 
     def set_time_range(self, time_range: tuple[float, float] | None) -> None:
@@ -447,7 +514,7 @@ class XYView(QWidget):
         if time_range == self._time_range:
             return
         self._time_range = time_range
-        if not self.whole_box.isChecked():
+        if not self._options['whole_measurement']:
             self._timer.start(_REDRAW_MS)
 
     def set_cursors(self, cursor1: float | None, cursor2: float | None) -> None:
@@ -459,56 +526,117 @@ class XYView(QWidget):
         """The plot's background, and the colour for its axes and cursor marks."""
         self._foreground = foreground
         for plot in (self.plot, self.hist_plot, self.res_plot):
+            if plot is None:
+                continue
             plot.setBackground(background)
             for name in ('bottom', 'left'):
                 axis = plot.getAxis(name)
                 axis.setPen(foreground)
                 axis.setTextPen(foreground)
         pen = pg.mkPen(foreground, width=2)
-        self.mark1.setPen(pen)
-        self.mark2.setPen(pen)
+        for mark in (self.mark1, self.mark2, *self.res_marks):
+            if mark is not None:
+                mark.setPen(pen)
         for line in self.cursor_lines:
             line.setPen(pg.mkPen(foreground, width=1.5, style=line.pen_style))
-        for mark in self.res_marks:
-            mark.setPen(pen)
         self._draw_marks()
+
+    # ── Its settings ──────────────────────────────────────────────────────
+
+    def open_settings(self, anchor: QWidget | None = None) -> None:
+        """Open the settings box under the gear, or under anchor (its
+        panel title's gear), showing the settings the view is drawn with."""
+        self._load_settings()
+        box = self.settings_box
+        box.adjustSize()
+        gear = anchor if anchor is not None else self.settings_button
+        corner = gear.mapToGlobal(QPoint(gear.width(), gear.height()))
+        rect = QRect(QPoint(corner.x() - box.width(), corner.y()), box.size())
+        screen = QGuiApplication.screenAt(corner) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            room = screen.availableGeometry()
+            rect.moveLeft(max(room.left(), min(rect.left(), room.right() - rect.width())))
+            if rect.bottom() > room.bottom():
+                rect.moveBottom(gear.mapToGlobal(QPoint(0, 0)).y())
+            rect.moveTop(max(room.top(), rect.top()))
+        box.move(rect.topLeft())
+        box.show()
+        self.x_box.setFocus()
+
+    def apply_settings(self) -> None:
+        """Draw the view with what the settings box holds (its Update), and
+        close the box."""
+        chosen = dict(self._chosen)
+        for role, box in (('x', self.x_box), ('y', self.y_box), ('color', self.color_box)):
+            if box.currentIndex() >= 0:
+                chosen[role] = box.currentData()
+        options = {'whole_measurement': self.whole_box.isChecked(),
+                   'equal_scale': self.equal_box.isChecked(),
+                   'bins': self.bins_edit.text().strip(),
+                   'show': self.show_box.currentData(),
+                   'gap': self.gap_edit.text().strip(),
+                   'y_bins': self.y_bins_edit.text().strip(),
+                   'log_color': self.log_box.isChecked()}
+        self.settings_box.hide()
+        if (chosen['x'], chosen['y']) != (self._chosen['x'], self._chosen['y']):
+            self._clear_pick()
+        equal = options['equal_scale'] != self._options['equal_scale']
+        self._chosen, self._options = chosen, options
+        if equal:
+            self._set_equal_scale(options['equal_scale'])
+        self._redraw()
+
+    def _load_settings(self) -> None:
+        """Set the settings box to the settings the view is drawn with."""
+        self._load_choices()
+        options = self._options
+        self.whole_box.setChecked(bool(options['whole_measurement']))
+        self.equal_box.setChecked(bool(options['equal_scale']))
+        self.bins_edit.setText(options['bins'])
+        self.gap_edit.setText(options['gap'])
+        self.y_bins_edit.setText(options['y_bins'])
+        self.log_box.setChecked(bool(options['log_color']))
+        index = self.show_box.findData(options['show'])
+        self.show_box.setCurrentIndex(max(index, 0))
+
+    def _load_choices(self) -> None:
+        for role, box in (('x', self.x_box), ('y', self.y_box), ('color', self.color_box)):
+            chosen = self._chosen[role]
+            box.blockSignals(True)
+            # A chosen signal that is not plotted leaves the box empty.
+            box.setCurrentIndex(box.findData(chosen) if chosen in self._signals
+                                else 0 if role == 'color' and chosen is None else -1)
+            box.blockSignals(False)
+        self._sync_log_box()
+
+    def _sync_log_box(self) -> None:
+        # A mean is coloured by its value, never by a logarithm of time.
+        self.log_box.setEnabled(self.color_box.currentData() is None)
 
     # ── What it keeps ─────────────────────────────────────────────────────
 
     def state(self) -> dict:
         """The choices, as a configuration keeps them."""
-        return {**self._chosen,
-                'whole_measurement': self.whole_box.isChecked(),
-                'equal_scale': self.equal_box.isChecked(),
-                'view': self._view,
-                'bins': self.bins_edit.text().strip(),
-                'show': self.show_box.currentData(),
-                'gap': self.gap_edit.text().strip(),
-                'y_bins': self.y_bins_edit.text().strip(),
-                'log_color': self.log_box.isChecked()}
+        return {**self._chosen, **self._options, 'view': self._kind}
 
     def restore(self, state: dict) -> None:
-        """Take saved choices; a signal not plotted yet is chosen once it is."""
+        """Take saved choices; a signal not plotted yet is chosen once it is.
+        Its kind stays: a configuration's 'view' picked it."""
         for role in self._chosen:
             if role in state:
                 self._chosen[role] = str(state[role]) if state[role] else None
-        if 'whole_measurement' in state:
-            self.whole_box.setChecked(bool(state['whole_measurement']))
-        if 'equal_scale' in state:
-            self.equal_box.setChecked(bool(state['equal_scale']))
-        if 'bins' in state:
-            self.bins_edit.setText(str(state['bins'] or ''))
-        if 'gap' in state:
-            self.gap_edit.setText(str(state['gap'] or ''))
-        if 'y_bins' in state:
-            self.y_bins_edit.setText(str(state['y_bins'] or ''))
-        if 'log_color' in state:
-            self.log_box.setChecked(bool(state['log_color']))
-        index = self.show_box.findData(state.get('show'))
-        if index >= 0:
-            self.show_box.setCurrentIndex(index)
-        # An older configuration has no view: it opens in Scatter.
-        self._set_view(state.get('view') if state.get('view') in _VIEWS else SCATTER)
+        options = self._options
+        for name in ('whole_measurement', 'equal_scale', 'log_color'):
+            if name in state:
+                options[name] = bool(state[name])
+        for name in ('bins', 'gap', 'y_bins'):
+            if name in state:
+                options[name] = str(state[name] or '').strip()
+        if state.get('show') in _SHOW_KEYS:
+            options['show'] = state['show']
+        self._clear_pick()
+        self._set_equal_scale(options['equal_scale'])
+        self._load_settings()
         self.set_signals([(key, label, series, color)
                           for key, (label, series, color) in self._signals.items()])
 
@@ -522,48 +650,21 @@ class XYView(QWidget):
         return self._chosen[role]
 
     def choose(self, role: str, key: str | None) -> None:
-        """Choose a plotted signal as 'x', 'y' or 'color' (None: no colour)."""
+        """Choose a plotted signal as 'x', 'y' or 'color' (None: no colour),
+        at once."""
         self._choose(role, key)
         box = {'x': self.x_box, 'y': self.y_box, 'color': self.color_box}[role]
         box.setCurrentIndex(box.findData(key))
 
+    def option(self, name: str):
+        """A setting the view is drawn with, by its state name."""
+        return self._options[name]
+
     def view(self) -> str:
-        """SCATTER or HISTOGRAM."""
-        return self._view
+        """SCATTER, HISTOGRAM or RESIDENCY: what it is, for good."""
+        return self._kind
 
-    def set_view(self, view: str) -> None:
-        """Show the scatter plot, the histogram of the X signal or the
-        residency map of X and Y."""
-        if view != self._view:
-            self._set_view(view)
-            self._redraw()
-
-    def _set_view(self, view: str) -> None:
-        self._view = view = view if view in _VIEWS else SCATTER
-        bars, cells = view == HISTOGRAM, view == RESIDENCY
-        {SCATTER: self.scatter_button, HISTOGRAM: self.histogram_button,
-         RESIDENCY: self.residency_button}[view].setChecked(True)
-        for role, box in (('y', self.y_box), ('color', self.color_box)):
-            self._role_labels[role].setVisible(not bars)
-            box.setVisible(not bars)
-        self._role_labels['x'].setText('Signal' if bars else 'X')
-        self._role_labels['color'].setText('Mean of' if cells else 'Colour')
-        self.color_box.setToolTip(
-            'A third signal whose average each cell shows instead of the time.' if cells
-            else 'A third signal as each point\'s colour, blue for low values and red for high.')
-        self._bins_label.setText('X bins' if cells else 'Bins')
-        self.equal_box.setVisible(view == SCATTER)
-        self.histogram_options.setVisible(bars or cells)
-        self.residency_options.setVisible(cells)
-        self.readout.setVisible(bars or cells)
-        self.readout.setText(
-            'Point at a cell to read it. Click it to shade its times on the plot.' if cells
-            else 'Point at a bar to read it. Click it to shade its times on the plot.')
-        self.plots.setCurrentWidget({SCATTER: self.plot, HISTOGRAM: self.hist_plot,
-                                     RESIDENCY: self.res_plot}[view])
-        if view != SCATTER:
-            self.scale.hide()
-        self._clear_pick()
+    kind = view
 
     # ── Drawing ───────────────────────────────────────────────────────────
 
@@ -578,8 +679,9 @@ class XYView(QWidget):
         return entry[1] if entry else None
 
     def _set_equal_scale(self, on: bool) -> None:
-        self.plot.setAspectLocked(bool(on))
-        self.plot.enableAutoRange()
+        if self.plot is not None:
+            self.plot.setAspectLocked(bool(on))
+            self.plot.enableAutoRange()
 
     def _redraw(self) -> None:
         self._timer.stop()
@@ -600,7 +702,7 @@ class XYView(QWidget):
                                  if len(self._signals) < 2 else 'Choose the X and Y signals.')
             self._draw_marks()
             return
-        whole = self.whole_box.isChecked()
+        whole = self._options['whole_measurement']
         self.points = points = xy_points(
             x, y, color, None if whole else self._time_range)
         if points.color is not None:
@@ -677,11 +779,11 @@ class XYView(QWidget):
     # ── Histogram ─────────────────────────────────────────────────────────
 
     def _histogram_range(self) -> tuple[float, float] | None:
-        return None if self.whole_box.isChecked() else self._time_range
+        return None if self._options['whole_measurement'] else self._time_range
 
     def _gap(self) -> float | None:
         try:
-            gap = float(self.gap_edit.text().strip())
+            gap = float(self._options['gap'])
         except ValueError:
             return None
         return gap if gap > 0 else None
@@ -700,12 +802,12 @@ class XYView(QWidget):
             return
         problem = ''
         try:
-            bins = hist.parse_bins(self.bins_edit.text())
+            bins = hist.parse_bins(self._options['bins'])
         except ValueError:
             bins = None
             problem = ('Bins not understood, shown automatic: type a width such as 2, '
                        'or edges such as 0, 25, 45. ')
-        show = self.show_box.currentData()
+        show = self._options['show']
         self.bars = bars = hist.histogram(
             series, self._histogram_range(), bins,
             hist.SAMPLES if show == SAMPLES else hist.TIME, self._gap())
@@ -725,14 +827,14 @@ class XYView(QWidget):
         self._draw_cursor_lines()
 
     def _heights(self, bars: hist.Histogram) -> np.ndarray:
-        if self.show_box.currentData() == PERCENT:
+        if self._options['show'] == PERCENT:
             total = bars.total
             return bars.weights * (100.0 / total) if total > 0 else bars.weights * 0.0
         return bars.weights
 
     def _histogram_summary(self, bars: hist.Histogram) -> str:
         if not bars.weights.size:
-            return ('No samples of this signal.' if self.whole_box.isChecked()
+            return ('No samples of this signal.' if self._options['whole_measurement']
                     else 'No samples of this signal in the time shown.')
         text = (f'{duration_text(bars.counted)} of {duration_text(bars.covered)} counted '
                 f'(gap limit {bars.gap_limit:.3g} s)')
@@ -827,8 +929,10 @@ class XYView(QWidget):
     def _clear_pick(self) -> None:
         had = self._picked is not None
         self._picked, self._spans, self._span_index = None, [], -1
-        self.picked_item.setOpts(x=[], height=[], width=1.0)
-        self.cells.set_picked(None)
+        if self.picked_item is not None:
+            self.picked_item.setOpts(x=[], height=[], width=1.0)
+        if self.cells is not None:
+            self.cells.set_picked(None)
         if had:
             self.spansChosen.emit([])
 
@@ -874,7 +978,7 @@ class XYView(QWidget):
         samples as the Show box asks."""
         if grid.mean is not None:
             return grid.mean
-        show = self.show_box.currentData()
+        show = self._options['show']
         if show == PERCENT:
             total = grid.total
             return grid.weights * (100.0 / total) if total > 0 else grid.weights * 0.0
@@ -896,14 +1000,14 @@ class XYView(QWidget):
             return
         problems = []
         bins = []
-        for name, edit in (('X bins', self.bins_edit), ('Y bins', self.y_bins_edit)):
+        for name, option in (('X bins', 'bins'), ('Y bins', 'y_bins')):
             try:
-                bins.append(hist.parse_bins(edit.text()))
+                bins.append(hist.parse_bins(self._options[option]))
             except ValueError:
                 bins.append(None)
                 problems.append(name)
         gap = self._gap()
-        show = self.show_box.currentData()
+        show = self._options['show']
         self.grid = grid = res.residency(
             x, y, self._histogram_range(), bins[0], bins[1],
             hist.SAMPLES if show == SAMPLES else hist.TIME, gap, gap, z)
@@ -917,8 +1021,7 @@ class XYView(QWidget):
         shown = values[filled]
         low = float(shown.min()) if shown.size else 0.0
         high = float(shown.max()) if shown.size else 1.0
-        use_log = self.log_box.isChecked()      # for time and samples, not a mean
-        self.log_box.setEnabled(grid.mean is None)
+        use_log = self._options['log_color']   # for time and samples, not a mean
         for i in range(values.shape[0]):
             column_colors, column_texts = [], []
             for j in range(values.shape[1]):
@@ -969,7 +1072,7 @@ class XYView(QWidget):
 
     def _residency_summary(self, grid: res.Residency) -> str:
         if not grid.weights.size:
-            return ('No time with both signals.' if self.whole_box.isChecked()
+            return ('No time with both signals.' if self._options['whole_measurement']
                     else 'No time with both signals in the time shown.')
         used = int(np.count_nonzero((grid.times > 0) | (grid.counts > 0)))
         text = (f'{duration_text(grid.counted)} of {duration_text(grid.covered)} counted '

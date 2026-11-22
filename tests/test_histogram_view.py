@@ -5,9 +5,9 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-The Histogram view of the XY pane: how long one plotted signal spent at each
-value. A click on a bar shades the times it covers on the plot and sends
-Cursor 1 to the first of them, then the next.
+The histogram, a view of its own beside the time plot: how long one plotted
+signal spent at each value. A click on a bar shades the times it covers on
+the plot and sends Cursor 1 to the first of them, then the next.
 
 Requires a Qt platform plugin; skipped (not failed) if none is available.
 """
@@ -43,11 +43,11 @@ def _signals():
 @pytest.fixture()
 def view(qapp):
     from gui.xy_view import HISTOGRAM, XYView
-    v = XYView()
+    v = XYView(HISTOGRAM)
     v.resize(500, 400)
     v.set_signals(_signals())
     v.bins_edit.setText('10')
-    v.set_view(HISTOGRAM)
+    v.apply_settings()
     yield v
     v.close()
 
@@ -59,26 +59,24 @@ def _heights(view):
 # ── The view on its own ──────────────────────────────────────────────────
 
 
-def test_it_opens_in_scatter_and_the_switch_shows_the_histogram(qapp):
-    from gui.xy_view import HISTOGRAM, SCATTER, XYView
-    v = XYView()
+def test_the_histogram_is_a_view_of_its_own_with_its_own_settings(qapp):
+    from gui.xy_view import HISTOGRAM, XYView
+    v = XYView(HISTOGRAM)
     v.set_signals(_signals())
     v.show()
     qapp.processEvents()
-    assert v.view() == SCATTER and v.scatter_button.isChecked()
-    assert v.plots.currentWidget() is v.plot and not v.histogram_options.isVisible()
-    v.histogram_button.click()
+    assert v.view() == HISTOGRAM and v.hist_plot.isVisible() and v.readout.isVisible()
+    assert v.plot is None and v.res_plot is None          # only its own plot is made
+    assert not v.copy_button.isVisible() and not v.export_button.isVisible()
+    assert not v.bins_edit.isVisible()                    # behind the gear
+    v.open_settings()
     qapp.processEvents()
-    assert v.view() == HISTOGRAM and v.histogram_button.isChecked()
-    assert v.plots.currentWidget() is v.hist_plot
-    assert v.histogram_options.isVisible() and v.readout.isVisible()
-    # One signal only: Y, Colour and Equal scale go, X is the Signal.
+    # One signal only: Y, Colour and Equal scale are not offered, X is the Signal.
+    assert v.x_box.isVisible() and v._role_labels['x'].text() == 'Signal'
     assert not v.y_box.isVisible() and not v.color_box.isVisible()
-    assert not v.equal_box.isVisible() and v.whole_box.isVisible()
-    assert v._role_labels['x'].text() == 'Signal'
-    v.scatter_button.click()
-    qapp.processEvents()
-    assert v.view() == SCATTER and v.y_box.isVisible() and v._role_labels['x'].text() == 'X'
+    assert not v.equal_box.isVisible() and not v.log_box.isVisible()
+    assert all(w.isVisible() for w in (v.bins_edit, v.show_box, v.gap_edit, v.whole_box))
+    v.settings_box.hide()
     v.close()
 
 
@@ -95,23 +93,27 @@ def test_the_bars_are_the_share_of_time_at_each_value(view):
 def test_the_show_box_gives_seconds_or_samples(view):
     from gui.xy_view import SAMPLES, SECONDS
     view.show_box.setCurrentIndex(view.show_box.findData(SECONDS))
-    view._redraw()
+    view.apply_settings()
     assert _heights(view) == [1.0, 1.0, 1.0, 1.0, 0.0]
     assert view.hist_plot.getPlotItem().getAxis('left').labelText == 'Time [s]'
     view.show_box.setCurrentIndex(view.show_box.findData(SAMPLES))
-    view._redraw()
+    view.apply_settings()
     assert _heights(view) == [1.0, 1.0, 1.0, 1.0, 1.0]
 
 
 def test_bins_typed_as_edges_and_a_mistake_is_said(view):
     view.bins_edit.setText('0, 25, 35')
-    view._redraw()
+    view.apply_settings()
     assert list(view.bars.edges) == [0, 25, 35]          # 40 held a second above them
     assert '25.0 % above the edges' in view.summary.text()
     view.bins_edit.setText('ten')
-    view._redraw()
+    view.apply_settings()
     assert view.summary.text().startswith('Bins not understood')
     assert view.bars.edges[1] - view.bars.edges[0] == 2.0       # automatic
+    # Typed but not applied: drawn again, it is still as applied.
+    view.bins_edit.setText('0, 25, 35')
+    view._redraw()
+    assert view.bars.edges[1] - view.bars.edges[0] == 2.0
 
 
 def test_a_typed_gap_limit_is_used(view):
@@ -121,7 +123,7 @@ def test_a_typed_gap_limit_is_used(view):
     assert 'gap limit 10 s' in view.summary.text()
     assert view.bars.counted == 2.0                             # 19 s silence left out
     view.gap_edit.setText('30')
-    view._redraw()
+    view.apply_settings()
     assert view.bars.counted == 21.0 and 'gap limit 30 s' in view.summary.text()
 
 
@@ -132,6 +134,7 @@ def test_it_follows_the_time_shown_unless_the_whole_is_asked_for(view):
     assert view.bars.edges[0] == 20.0
     assert _heights(view) == [50.0, 50.0, 0.0]
     view.whole_box.setChecked(True)
+    view.apply_settings()
     assert _heights(view)[:4] == [25.0, 25.0, 25.0, 25.0]
 
 
@@ -142,11 +145,11 @@ def test_pointing_at_a_bar_reads_it(view):
 
 def test_clicking_a_bar_shades_its_times_and_steps_cursor_1_through_them(qapp):
     from gui.xy_view import HISTOGRAM, XYView
-    v = XYView()
+    v = XYView(HISTOGRAM)
     series = _series('Speed', [0, 1, 2, 3, 4, 5], [12, 30, 15, 33, 18, 18])
     v.set_signals([('S', 'Speed', series, '#ff0000')])
     v.bins_edit.setText('10')
-    v.set_view(HISTOGRAM)
+    v.apply_settings()
     shaded, asked = [], []
     v.spansChosen.connect(shaded.append)
     v.timeClicked.connect(asked.append)
@@ -172,8 +175,7 @@ def test_a_bar_with_no_time_shades_nothing(view):
     assert view.picked_spans() == [] and asked == []
 
 
-def test_choosing_another_signal_or_scatter_clears_the_shading(view):
-    from gui.xy_view import SCATTER
+def test_choosing_another_signal_clears_the_shading(view):
     shaded = []
     view.spansChosen.connect(shaded.append)
     view.pick_bar(1)
@@ -181,7 +183,10 @@ def test_choosing_another_signal_or_scatter_clears_the_shading(view):
     assert shaded[-1] == []
     view.choose('x', 'S')
     view.pick_bar(1)
-    view.set_view(SCATTER)
+    view.open_settings()
+    view.x_box.setCurrentIndex(view.x_box.findData('T'))
+    assert view.picked_spans()                           # not until Update
+    view.apply_settings()
     assert shaded[-1] == [] and view.picked_spans() == []
 
 
@@ -196,10 +201,9 @@ def test_the_cursors_are_lines_at_the_values_held_then(view):
 
 def test_a_signal_with_labels_has_a_named_bar_per_state(qapp):
     from gui.xy_view import HISTOGRAM, XYView
-    v = XYView()
+    v = XYView(HISTOGRAM)
     series = _series('Mode', [0, 1, 3, 4], [0, 2, 0, 0], labels=['Off', 'Drive', 'Off', 'Off'])
     v.set_signals([('M', 'Mode', series, '#ff0000')])
-    v.set_view(HISTOGRAM)
     assert v.bars.labels == ('Off', 'Drive')
     ticks = v.hist_plot.getPlotItem().getAxis('bottom')._tickLevels
     assert ticks == [[(0, 'Off'), (1, 'Drive')]]
@@ -216,8 +220,7 @@ def test_a_signal_with_labels_has_a_named_bar_per_state(qapp):
 
 def test_without_a_signal_it_says_what_to_do(qapp):
     from gui.xy_view import HISTOGRAM, XYView
-    v = XYView()
-    v.set_view(HISTOGRAM)
+    v = XYView(HISTOGRAM)
     assert 'Plot a signal' in v.summary.text()
     v.pick_bar(0)                                        # nothing to pick: no error
     v.close()
@@ -227,13 +230,14 @@ def test_the_histogram_choices_are_kept_and_taken_back(view):
     from gui.xy_view import HISTOGRAM, SECONDS, XYView
     view.show_box.setCurrentIndex(view.show_box.findData(SECONDS))
     view.gap_edit.setText('5')
+    view.apply_settings()
     state = view.state()
     assert (state['view'], state['bins'], state['show'], state['gap']) == (
         'histogram', '10', 'seconds', '5')
-    other = XYView()
+    other = XYView(HISTOGRAM)
     other.restore(state)
     other.set_signals(_signals())
-    assert other.view() == HISTOGRAM and other.histogram_button.isChecked()
+    assert other.view() == HISTOGRAM
     assert other.bins_edit.text() == '10' and other.gap_edit.text() == '5'
     assert other.show_box.currentData() == SECONDS
     assert [float(h) for h in other.bar_item.opts['height']] == [1.0, 1.0, 1.0, 1.0, 0.0]
@@ -266,14 +270,18 @@ def window(qapp, monkeypatch, tmp_path):
     panel.add_series('Torque', _series('Torque', _TIMES, [1, 2, 3, 4, 5]))
     panel._rebuild_curves(preserve_selection=True)
     w._set_plot_type('normal')                   # one plot; stacked has its own test
-    w.btn_xy.setChecked(True)
-    view = panel.xy_view
+    key = panel.add_xy_view('histogram')
+    view = panel.xy_views()[key]
     view.bins_edit.setText('10')
     view.whole_box.setChecked(True)
-    view.histogram_button.click()
+    view.apply_settings()
     yield w
     w.close()
     qapp.processEvents()
+
+
+def _histogram(panel):
+    return panel.xy_views()['histogram']
 
 
 def _span_items(panel):
@@ -282,14 +290,14 @@ def _span_items(panel):
 
 def test_a_clicked_bar_is_shaded_on_the_plot_and_cursor_1_goes_there(window, qapp):
     panel = window.plot_panel
-    panel.xy_view.pick_bar(2)                            # 30 to 40: held from 2 s to 3 s
+    _histogram(panel).pick_bar(2)                            # 30 to 40: held from 2 s to 3 s
     assert panel.time_spans() == [(2.0, 3.0)]
     items = _span_items(panel)
     assert len(items) == 1 and items[0].spans() == [(2.0, 3.0)]
     assert items[0].scene() is panel.plot.plotItem.scene()
     assert window.btn_cursor1.isChecked() and panel.v_line.value() == pytest.approx(2.0)
-    assert panel.xy_view.cursor_line_value(1) == 30.0
-    panel.xy_view.pick_bar(None)
+    assert _histogram(panel).cursor_line_value(1) == 30.0
+    _histogram(panel).pick_bar(None)
     assert panel.time_spans() == [] and _span_items(panel) == []
 
 
@@ -302,7 +310,7 @@ def test_the_shading_is_drawn_under_the_curves_across_the_plot(window, qapp):
     qapp.processEvents()
     plot_item = panel.plot.plotItem
     before = panel.plot.grab().toImage()
-    panel.xy_view.pick_bar(2)
+    _histogram(panel).pick_bar(2)
     qapp.processEvents()
     after = panel.plot.grab().toImage()
     (item,) = _span_items(panel)
@@ -354,15 +362,15 @@ def test_stretches_apart_are_shaded_apart_and_thousands_draw(window, qapp):
 
 def test_hiding_the_xy_pane_takes_the_shading_away(window):
     panel = window.plot_panel
-    panel.xy_view.pick_bar(1)
+    _histogram(panel).pick_bar(1)
     assert panel.time_spans()
-    window.btn_xy.setChecked(False)
+    panel.panels.close_panel('histogram')
     assert panel.time_spans() == [] and _span_items(panel) == []
 
 
 def test_the_shading_is_on_every_row_of_a_stacked_plot(window, qapp):
     panel = window.plot_panel
-    panel.xy_view.pick_bar(1)
+    _histogram(panel).pick_bar(1)
     assert len(panel._span_items) == 1
     window._set_plot_type('stacked')
     qapp.processEvents()
@@ -376,8 +384,19 @@ def test_a_tab_keeps_its_histogram(window):
     from gui.plot_tabs import describe_tab
     panel = window.plot_panel
     saved = describe_tab(panel, 'Plot 1')
-    assert saved['xy']['view'] == 'histogram' and saved['xy']['bins'] == '10'
+    (entry,) = saved['xy_views']
+    assert (entry['key'], entry['name'], entry['view'], entry['bins']) == (
+        'histogram', 'Histogram', 'histogram', '10')
     window.plot_tabs.add_tab()
     other = window.plot_panel
     window._apply_tab_settings(saved)
-    assert other.xy_view_active() and other.xy_view.view() == 'histogram'
+    assert other.xy_view_active() and _histogram(other).view() == 'histogram'
+    assert other.panels.is_open('histogram') and _histogram(other).option('bins') == '10'
+    # A configuration from before views of their own: its one view, a histogram.
+    window.plot_tabs.add_tab()
+    older = window.plot_panel
+    window._apply_tab_settings({'xy': {'shown': True, 'view': 'histogram', 'x': 'Speed',
+                                       'bins': '10'}})
+    assert list(older.xy_views()) == ['xy'] and older.panels.is_open('xy')
+    assert older.xy_views()['xy'].view() == 'histogram'
+    assert older.panels.title('xy') == 'Histogram'

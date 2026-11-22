@@ -41,12 +41,12 @@ def _signals():
 @pytest.fixture()
 def view(qapp):
     from gui.xy_view import RESIDENCY, XYView
-    v = XYView()
+    v = XYView(RESIDENCY)
     v.resize(600, 500)
     v.set_signals(_signals())
     v.bins_edit.setText('20')
     v.y_bins_edit.setText('4')
-    v.set_view(RESIDENCY)
+    v.apply_settings()
     yield v
     v.close()
 
@@ -64,25 +64,34 @@ def _texts(view):
 # ── The view on its own ──────────────────────────────────────────────────
 
 
-def test_the_switch_shows_the_residency_map_with_its_choices(qapp):
+def test_the_residency_map_is_a_view_of_its_own_with_its_own_settings(qapp):
+    from PySide6.QtWidgets import QLabel
     from gui.xy_view import RESIDENCY, XYView
-    v = XYView()
+    v = XYView(RESIDENCY)
     v.set_signals(_signals())
     v.show()
     qapp.processEvents()
-    v.residency_button.click()
+    assert v.view() == RESIDENCY and v.res_plot.isVisible() and v.readout.isVisible()
+    assert v.plot is None and v.hist_plot is None
+    # Copy and CSV are on its top row, beside the gear; the settings behind it.
+    assert v.copy_button.isVisible() and v.export_button.isVisible()
+    # As wide as their words, not a push button's least width, so what the
+    # map shows keeps its room beside them.
+    for button in (v.copy_button, v.export_button):
+        text, wide = button.text(), button.sizeHint().width()
+        button.setText(text[:1])
+        assert button.sizeHint().width() < wide
+        button.setText(text)
+    assert not v.y_box.isVisible()
+    v.open_settings()
     qapp.processEvents()
-    assert v.view() == RESIDENCY and v.residency_button.isChecked()
-    assert v.plots.currentWidget() is v.res_plot
-    assert v.y_box.isVisible() and v.color_box.isVisible()
+    assert v.y_box.isVisible() and v.color_box.isVisible() and v.log_box.isVisible()
     assert v._role_labels['color'].text() == 'Mean of' and v._role_labels['x'].text() == 'X'
-    assert v._bins_label.text() == 'X bins'
-    assert v.histogram_options.isVisible() and v.residency_options.isVisible()
-    assert not v.equal_box.isVisible() and v.readout.isVisible()
-    v.histogram_button.click()
-    qapp.processEvents()
-    assert not v.residency_options.isVisible() and v._bins_label.text() == 'Bins'
-    assert v._role_labels['color'].text() == 'Colour'
+    labels = {label.text() for label in v.settings_box.findChildren(QLabel)
+              if label.isVisible()}
+    assert {'X bins', 'Y bins', 'Show', 'Gap s'} <= labels
+    assert not v.equal_box.isVisible()
+    v.settings_box.hide()
     v.close()
 
 
@@ -102,6 +111,7 @@ def test_seconds_samples_and_a_log_colour(view):
     from gui.xy_view import SAMPLES, SECONDS, scale_color
     view.show_box.setCurrentIndex(view.show_box.findData(SECONDS))
     view.bins_edit.setText('10')                   # 10 for 2 s; 30 for 2 s
+    view.apply_settings()
     view.set_signals([('S', 'Speed', _series('Speed', [0, 3, 4], [10, 30, 30]), '#f00'),
                       _signals()[1]])
     view.choose('x', 'S')
@@ -111,10 +121,11 @@ def test_seconds_samples_and_a_log_colour(view):
     linear = _colors(view)[(0, 1)]
     assert linear == scale_color(0.5).name()
     view.log_box.setChecked(True)
+    view.apply_settings()
     assert _colors(view)[(0, 1)] == scale_color(np.log10(1 + 999 * 0.5) / 3).name()
     assert 'log colour' in view.scale.text()
     view.show_box.setCurrentIndex(view.show_box.findData(SAMPLES))
-    view._redraw()
+    view.apply_settings()
     # Each of the three pieces starts at a sample of one or the other.
     assert _texts(view) == {(0, 0): '1', (0, 1): '1', (2, 1): '1'}
 
@@ -122,6 +133,7 @@ def test_seconds_samples_and_a_log_colour(view):
 def test_a_third_signal_shows_its_mean_in_each_cell(view):
     from gui.xy_view import scale_color
     view.log_box.setChecked(True)
+    view.apply_settings()
     view.choose('color', 'F')
     assert _texts(view) == {(0, 0): '150', (1, 1): '350'}
     assert _colors(view) == {(0, 0): scale_color(0.0).name(), (1, 1): scale_color(1.0).name()}
@@ -139,7 +151,7 @@ def test_numbers_are_written_only_where_they_fit(view, qapp):
     assert sorted(cell[:3] for cell in view.cells.written()) == [(0, 0, '50'), (1, 1, '50')]
     view.resize(260, 200)
     view.bins_edit.setText('0.5')                               # 80 narrow columns
-    view._redraw()
+    view.apply_settings()
     qapp.processEvents()
     view.res_plot.grab()
     assert view.cells.written() == []
@@ -149,6 +161,7 @@ def test_numbers_are_dark_on_light_cells_and_light_on_dark(view, qapp):
     from gui.xy_view import SECONDS
     view.show_box.setCurrentIndex(view.show_box.findData(SECONDS))
     view.bins_edit.setText('10')
+    view.apply_settings()
     view.set_signals([('S', 'Speed', _series('Speed', [0, 3, 4], [10, 30, 30]), '#f00'),
                       _signals()[1]])
     view.choose('x', 'S')
@@ -165,6 +178,7 @@ def test_in_samples_a_cell_with_time_but_no_sample_is_left_empty(view):
     view.show_box.setCurrentIndex(view.show_box.findData(SAMPLES))
     view.bins_edit.setText('0, 20, 40')
     view.y_bins_edit.setText('0, 4, 8')
+    view.apply_settings()
     view.set_time_range((1.5, 4.0))          # (10, 1) is held into it, not sampled
     view._redraw()
     assert view.grid.times[0, 0] == 0.5 and view.grid.counts[0, 0] == 0
@@ -174,12 +188,12 @@ def test_in_samples_a_cell_with_time_but_no_sample_is_left_empty(view):
 
 def test_a_value_on_the_last_typed_edge_is_in_the_last_cell(qapp):
     from gui.xy_view import RESIDENCY, XYView
-    v = XYView()
+    v = XYView(RESIDENCY)
     v.set_signals([('S', 'Speed', _series('Speed', [0, 1, 2], [10, 30, 30]), '#f00'),
                    ('T', 'Torque', _series('Torque', [0, 2], [1, 1]), '#0f0')])
     v.bins_edit.setText('0, 20, 30')
     v.y_bins_edit.setText('0, 4')
-    v.set_view(RESIDENCY)
+    v.apply_settings()
     shaded = []
     v.spansChosen.connect(shaded.append)
     v.pick_cell((1, 0))
@@ -191,17 +205,17 @@ def test_the_outline_goes_when_the_picked_cell_is_no_longer_drawn(view):
     view.pick_cell((1, 1))
     assert view.cells.picked == (1, 1)
     view.bins_edit.setText('5')
-    view._redraw()
+    view.apply_settings()
     assert view.cells.picked is None
     view.bins_edit.setText('20')
-    view._redraw()
+    view.apply_settings()
     assert view.cells.picked == (1, 1)       # the same cell again
 
 
 def test_typed_edges_and_a_mistake_is_said(view):
     view.bins_edit.setText('0, 20')
     view.y_bins_edit.setText('nonsense')
-    view._redraw()
+    view.apply_settings()
     assert list(view.grid.x_edges) == [0, 20]
     assert view.summary.text().startswith('Y bins not understood, shown automatic')
     assert '50.0 % outside the grid' in view.summary.text()
@@ -215,13 +229,13 @@ def test_pointing_at_a_cell_reads_it(view):
 
 def test_clicking_a_cell_shades_its_times_and_steps_cursor_1_through_them(qapp):
     from gui.xy_view import RESIDENCY, XYView
-    v = XYView()
+    v = XYView(RESIDENCY)
     v.set_signals([('S', 'Speed', _series('Speed', [0, 1, 2, 3, 4, 5], [10, 30, 10, 30, 10, 10]),
                     '#f00'),
                    ('T', 'Torque', _series('Torque', [0, 5], [1, 1]), '#0f0')])
     v.bins_edit.setText('20')
     v.y_bins_edit.setText('4')
-    v.set_view(RESIDENCY)
+    v.apply_settings()
     shaded, asked = [], []
     v.spansChosen.connect(shaded.append)
     v.timeClicked.connect(asked.append)
@@ -284,9 +298,8 @@ def test_export_asks_where_and_says_where_it_saved(view, monkeypatch, tmp_path):
 
 def test_with_one_signal_it_says_what_to_do(qapp):
     from gui.xy_view import RESIDENCY, XYView
-    v = XYView()
+    v = XYView(RESIDENCY)
     v.set_signals(_signals()[:1])
-    v.set_view(RESIDENCY)
     assert 'Plot two signals' in v.summary.text() and v.scale.isHidden()
     assert v.table() == ''
     v.pick_cell((0, 0))                                         # nothing to pick: no error
@@ -296,13 +309,14 @@ def test_with_one_signal_it_says_what_to_do(qapp):
 def test_the_residency_choices_are_kept_and_taken_back(view):
     from gui.xy_view import RESIDENCY, XYView
     view.log_box.setChecked(True)
+    view.apply_settings()
     state = view.state()
     assert (state['view'], state['bins'], state['y_bins'], state['log_color']) == (
         'residency', '20', '4', True)
-    other = XYView()
+    other = XYView(RESIDENCY)
     other.restore(state)
     other.set_signals(_signals())
-    assert other.view() == RESIDENCY and other.residency_button.isChecked()
+    assert other.view() == RESIDENCY
     assert other.y_bins_edit.text() == '4' and other.log_box.isChecked()
     assert _texts(other) == {(0, 0): '50', (1, 1): '50'}
 
@@ -330,33 +344,54 @@ def window(qapp, monkeypatch, tmp_path):
         panel.add_series(key, series)
     panel._rebuild_curves(preserve_selection=True)
     w._set_plot_type('normal')
-    w.btn_xy.setChecked(True)
-    view = panel.xy_view
+    key = panel.add_xy_view('residency')
+    view = panel.xy_views()[key]
     view.bins_edit.setText('20')
     view.y_bins_edit.setText('4')
     view.whole_box.setChecked(True)
-    view.residency_button.click()
+    view.apply_settings()
     yield w
     w.close()
     qapp.processEvents()
 
 
+def _residency(panel):
+    return panel.xy_views()['residency']
+
+
 def test_a_clicked_cell_is_shaded_on_the_plot_and_cursor_1_goes_there(window):
     panel = window.plot_panel
-    assert panel.xy_view.cell_text((1, 1)).startswith('20 to 40')
-    panel.xy_view.pick_cell((1, 1))
+    assert _residency(panel).cell_text((1, 1)).startswith('20 to 40')
+    _residency(panel).pick_cell((1, 1))
     assert panel.time_spans() == [(2.0, 4.0)]
     assert window.btn_cursor1.isChecked() and panel.v_line.value() == pytest.approx(2.0)
-    assert panel.xy_view.res_mark_position(1) == (30.0, 5.0)
-    window.btn_xy.setChecked(False)
+    assert _residency(panel).res_mark_position(1) == (30.0, 5.0)
+    panel.panels.close_panel('residency')
     assert panel.time_spans() == []
 
 
 def test_a_tab_keeps_its_residency_map(window):
     from gui.plot_tabs import describe_tab
     saved = describe_tab(window.plot_panel, 'Plot 1')
-    assert saved['xy']['view'] == 'residency' and saved['xy']['y_bins'] == '4'
+    (entry,) = saved['xy_views']
+    assert (entry['key'], entry['name'], entry['view'], entry['y_bins']) == (
+        'residency', 'Residency map', 'residency', '4')
     window.plot_tabs.add_tab()
     other = window.plot_panel
     window._apply_tab_settings(saved)
-    assert other.xy_view_active() and other.xy_view.view() == 'residency'
+    assert other.xy_view_active() and _residency(other).view() == 'residency'
+    assert other.panels.is_open('residency')
+
+def test_the_hint_and_a_reading_take_one_line(view, qapp):
+    view.resize(300, 400)
+    view.show()
+    qapp.processEvents()
+    hint = view.readout.text()
+    assert hint.startswith('Point at a cell') and view.readout.toolTip() == hint
+    assert view.readout.shown_text().endswith('…')
+    assert view.readout.height() < 2 * view.readout.fontMetrics().height()
+    view.pick_cell((1, 1))
+    reading = view.readout.text()
+    assert reading.startswith('20 to 40') and view.readout.toolTip() == reading
+    assert view.readout.height() < 2 * view.readout.fontMetrics().height()
+
