@@ -21,6 +21,8 @@ bus-log-analyzer/
 │   ├── xy_data.py                # The points of an XY plot: Y and a colour signal held onto the X signal's sample times, cut to a time range, thinned evenly
 │   ├── histogram.py              # How long a signal spent at each value: time-weighted bars, gap limit, automatic/width/typed bins, the stretches a bar covers
 │   ├── residency.py              # How long two signals spent together in each grid cell (load collective): time cut at both signals' samples, gap limits, a third signal's mean per cell, cell stretches, table text
+│   ├── gps_track.py              # GPS track: the latitude and longitude found among the decoded signals by name, unit and values; fixes cleaned (missing, out of range, "not available", 0/0); breaks at a lost fix or a jump; laid flat in metres north up; distance with standing wander left out; the passes near a point, the times inside a box
+│   ├── map_tiles.py              # Map files for the GPS track: a raster MBTiles file kept on the PC, opened read only (never fetched over the network); Web Mercator tile arithmetic, the zoom whose tile pixels match the screen's, the tiles over an area, rows turned round from MBTiles' south-up count; vector tiles and other files refused with the reason; the credit to show
 │   ├── debug_inspector.py        # Read-only forensic probes of a measurement that failed to load; the readers stay untouched
 │   ├── signal_properties.py      # Right-click ▸ Properties: a signal's definition, looked up again in its channel's database; file-decoded and calculated signals; why none was found; the raw value on the bus for the signal table's Hex column
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
@@ -52,6 +54,8 @@ bus-log-analyzer/
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
 │   ├── plot_toolbar.py           # Plot toolbar parts: a button that opens a menu, the plot layouts by name
 │   ├── xy_view.py                # XY views, each a panel of one kind, as many per tab as wanted: XY plot (one signal against another, coloured by a third; a click places Cursor 1), histogram (one signal's time at each value), residency map (two signals' time per grid cell); follow the time shown, mark the cursors, a clicked bar or cell is shaded on the plot; settings behind a gear, applied by Update
+│   ├── gps_view.py               # GPS track view, a panel like the XY views (Views ▸ Add GPS track): the route on an equal-scale grid with scale bar and north arrow, coloured by a chosen signal, dimmed outside the time shown, dashed where there was no fix; cursor marks; a click places Cursor 1 (again for the next pass), Shift+drag shades the times inside a box; settings behind a gear
+│   ├── map_background.py         # The map under the GPS track: the tiles the view shows, at the zoom that suits it, each placed by its corners' latitude and longitude so the streets lie under the route; a missing tile cut from a coarser one; decoded tiles kept up to a limit; none when zoomed out far beyond what the file holds
 │   ├── measurement_info.py       # File ▸ Measurement info dialog
 │   ├── load_debug_window.py      # Session-only plain-text window for measurement load forensics (Debug mode)
 │   ├── signal_properties_dialog.py # Right-click a signal ▸ Properties window: Signal and Value table tabs, Copy

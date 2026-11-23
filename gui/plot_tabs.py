@@ -187,7 +187,7 @@ class SavedTabs:
             views = [tab.get('xy'), *(tab.get('xy_views') or [])]
             for view in views:
                 if isinstance(view, dict):
-                    for role in ('x', 'y', 'color'):
+                    for role in ('x', 'y', 'color', 'lat', 'lon'):
                         if view.get(role) == old_key:
                             view[role] = new_key
 

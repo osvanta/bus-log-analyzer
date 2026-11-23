@@ -148,6 +148,8 @@ bus-log-analyzer/
 │   ├── xy_data.py            # The points of an XY plot of two signals
 │   ├── histogram.py          # How long a signal spent at each value
 │   ├── residency.py          # How long two signals spent together in each grid cell
+│   ├── gps_track.py          # A GPS track: latitude and longitude found, cleaned, measured
+│   ├── map_tiles.py          # A map file for the GPS track: its tiles, read only
 │   ├── converter.py          # Tools ▸ Convert files
 │   ├── mf4_writer.py         # MF4 export
 │   └── export.py             # CSV and Excel export

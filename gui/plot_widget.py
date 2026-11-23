@@ -53,6 +53,7 @@ from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
 from core.export import _column_headers
 from gui.tabular_view import TabularView
+from gui.gps_view import TRACK, TRACK_NAME, GPSView
 from gui.xy_view import KIND_NAMES, KINDS, SCATTER, XYView
 from gui.edge_tab import _mix
 from gui.bin_menu import BinMenu
@@ -3463,7 +3464,11 @@ class PlotPanel(QWidget):
     #: The first XY view's share of the width.
     _XY_VIEW_SHARE = 0.4
     #: Each kind's panel key, and the start of the keys of its later views.
-    _XY_KEYS = {'scatter': 'xy', 'histogram': 'histogram', 'residency': 'residency'}
+    _XY_KEYS = {'scatter': 'xy', 'histogram': 'histogram', 'residency': 'residency',
+                'track': 'gps'}
+    #: Every kind of view beside the time plot, and its name.
+    VIEW_KINDS = (*KINDS, TRACK)
+    VIEW_NAMES = {**KIND_NAMES, TRACK: TRACK_NAME}
 
     def xy_views(self) -> dict[str, XYView]:
         """The tab's XY views by panel key, open or closed, in the order made."""
@@ -3500,8 +3505,8 @@ class PlotPanel(QWidget):
             self.panels.open_panel(key)
 
     def add_xy_view(self, kind: str) -> str:
-        """Open a new view of kind (SCATTER, HISTOGRAM or RESIDENCY) beside
-        the others; its key."""
+        """Open a new view of kind (SCATTER, HISTOGRAM, RESIDENCY or TRACK)
+        beside the others; its key."""
         prefix = self._XY_KEYS.get(kind, 'xy')
         key, number = prefix, 2
         while key in self._xy_views or self.panels.panel(key) is not None:
@@ -3512,7 +3517,7 @@ class PlotPanel(QWidget):
 
     def _new_xy_name(self, kind: str) -> str:
         """XY plot, then XY plot 2, ...: the first free."""
-        base = KIND_NAMES.get(kind, KIND_NAMES[SCATTER])
+        base = self.VIEW_NAMES.get(kind, KIND_NAMES[SCATTER])
         names = {self.panels.title(key) for key in self._xy_views}
         name, number = base, 2
         while name in names:
@@ -3520,7 +3525,7 @@ class PlotPanel(QWidget):
         return name
 
     def _make_xy_view(self, key: str, kind: str, name: str | None = None) -> XYView:
-        view = XYView(kind)
+        view = GPSView() if kind == TRACK else XYView(kind)
         view.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         view.timeClicked.connect(self.plotAreaClicked.emit)
         view.spansChosen.connect(lambda spans, key=key: self._on_xy_spans(key, spans))
@@ -3636,8 +3641,38 @@ class PlotPanel(QWidget):
         names = _column_headers([p.series for _key, p in plotted])
         view.set_signals([(key, name, p.series, p.color)
                           for (key, p), name in zip(plotted, names)])
+        if isinstance(view, GPSView):
+            view.set_decoded(self._decoded_signals())
         view.set_time_range(self.time_range())
         self._show_xy_cursors([view])
+
+    def set_decoded_source(self, source) -> None:
+        """How the tab finds every decoded signal: *source()* gives the
+        measurement's SignalStore, or None while there is none. A GPS track
+        finds its latitude and longitude there."""
+        self._decoded_source = source
+
+    def _decoded_signals(self) -> list[tuple[str, SignalSeries]]:
+        source = getattr(self, '_decoded_source', None)
+        store = source() if source is not None else None
+        if store is None:
+            return []
+        found = ((key, store.get_series(key)) for key in store.all_keys())
+        return [(key, series) for key, series in found if series is not None]
+
+    def refresh_decoded(self) -> None:
+        """The decoded measurement changed: GPS tracks open take its signals,
+        those closed let go of the last one's until they open again."""
+        signals = None
+        for key, view in self._xy_views.items():
+            if not isinstance(view, GPSView):
+                continue
+            if key in self._xy_live:
+                if signals is None:
+                    signals = self._decoded_signals()
+                view.set_decoded(signals)
+            else:
+                view.set_decoded([])
 
     def _show_xy_cursors(self, views: list[XYView] | None = None) -> None:
         cursor1 = float(self.v_line.value()) if self._cursor1_enabled else None
@@ -3662,7 +3697,7 @@ class PlotPanel(QWidget):
                 continue
             key, kind = entry.get('key'), entry.get('view')
             if (not isinstance(key, str) or not key or key in named
-                    or key in ('plot', 'table', 'trace') or kind not in KINDS):
+                    or key in ('plot', 'table', 'trace') or kind not in self.VIEW_KINDS):
                 continue
             view = self._xy_views.get(key)
             if view is not None and view.kind() != kind:

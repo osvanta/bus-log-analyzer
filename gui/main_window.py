@@ -422,6 +422,7 @@ class MainWindow(QMainWindow):
         columns = read_setting(self._user_settings_path, 'signal_table_columns', {})
         panel.set_column_choices(columns if isinstance(columns, dict) else {})
         panel.set_raw_format_lookup(self._raw_format_of)
+        panel.set_decoded_source(lambda: self.store)
         if self.plot_tabs.count():
             shown = self.plot_panel
             panel.set_background_color(shown.background_color())
@@ -1685,6 +1686,8 @@ class MainWindow(QMainWindow):
         CAN Trace."""
         self._close_trace_window()
         store, self.store = self.store, None
+        for panel in self.plot_tabs.panels():
+            panel.refresh_decoded()     # GPS tracks let go of its signals
         close = getattr(store, 'close', None)
         if close is not None:
             close()
@@ -1995,6 +1998,8 @@ class MainWindow(QMainWindow):
         ('histogram', 'Add histogram', 'How long one signal spent at each value'),
         ('residency', 'Add residency map', 'How long two signals spent together in each '
                                            'cell of a grid: a load collective'),
+        ('track', 'Add GPS track', 'Where the vehicle was: the route from the GPS '
+                                   'latitude and longitude, linked to the cursors'),
     )
 
     def _fill_views_menu(self, menu: QMenu) -> None:
@@ -3673,6 +3678,8 @@ class MainWindow(QMainWindow):
         self._update_action_states()
         # Expose store immediately so pending plots and post-decode plots work
         self.signal_tree.set_payload(store.build_tree_payload())
+        for panel in self.plot_tabs.panels():
+            panel.refresh_decoded()     # a GPS track finds its position here
         self._refresh_generated_signal_tree()
         self.diagnostics_box.setPlainText(store.diagnostics_text)
         self._update_measurement_tab(

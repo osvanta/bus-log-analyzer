@@ -245,7 +245,7 @@ def test_the_views_are_in_a_menu_not_on_the_row(window):
 def test_views_offers_the_table_new_xy_views_and_the_trace(window):
     entries = _entries(window.btn_views)
     assert list(entries) == ['Table', 'Add XY plot', 'Add histogram', 'Add residency map',
-                             'CAN Trace', 'Reopen closed panel']
+                             'Add GPS track', 'CAN Trace', 'Reopen closed panel']
     assert not any(action.isChecked() for action in entries.values())
     assert not entries['CAN Trace'].isEnabled()           # nothing decoded
     assert not entries['Reopen closed panel'].isEnabled()  # nothing closed
