@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
@@ -61,6 +61,12 @@ _DEFAULT_OPTIONS = {'whole_measurement': False, 'equal_scale': False, 'bins': ''
                     'show': PERCENT, 'gap': '', 'y_bins': '', 'log_color': False}
 #: The bar a click picked.
 _PICKED_COLOR = '#faba39'
+#: What is drawn over a plot (its colour scale, its reading) lies this far
+#: inside the plotted area, on the plot's background at this opacity.
+_OVERLAY_INSET = 4
+_BACKDROP_ALPHA = 200
+#: How long a message over the plot (the table copied, a file saved) stays.
+_MESSAGE_MS = 4000
 
 
 def scale_color(fraction: float) -> QColor:
@@ -87,35 +93,83 @@ def duration_text(seconds: float) -> str:
     return f'{hours}:{minutes:02d}:{secs:02d}' if hours else f'{minutes}:{secs:02d}'
 
 
+def _backdrop(background: str) -> QColor:
+    color = QColor(background)
+    color.setAlpha(_BACKDROP_ALPHA)
+    return color
+
+
 class _ColorScale(QWidget):
-    """The colour scale as a strip, with the values at its two ends."""
+    """The colour scale as a thin bar inside the plot's right edge, drawn
+    over the plot so that it takes no row: high at its top, low at its foot,
+    the values at its two ends and, along it, what the colours show."""
+
+    #: The bar's width, and the room between it and its words.
+    BAR = 8
+    GAP = 4
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._low = self._high = 0.0
         self._name = ''
-        self.setFixedHeight(self.fontMetrics().height() + 14)
+        self._ink = QColor('#000000')
+        self._backdrop = _backdrop('#ffffff')
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
     def set_range(self, name: str, low: float, high: float) -> None:
         self._name, self._low, self._high = name, low, high
         self.update()
 
+    def set_colors(self, background: str, foreground: str) -> None:
+        self._ink, self._backdrop = QColor(foreground), _backdrop(background)
+        self.update()
+
     def text(self) -> str:
         return f'{self._low:.6g} … {self._high:.6g}  {self._name}'
 
+    def ends(self) -> tuple[str, str]:
+        """The values written at its top and at its foot."""
+        return f'{self._high:.6g}', f'{self._low:.6g}'
+
+    def needed_width(self) -> int:
+        metrics = self.fontMetrics()
+        words = max(max(metrics.horizontalAdvance(text) for text in self.ends()) + 4,
+                    metrics.height())
+        return words + self.GAP + self.BAR
+
+    def bar_rect(self) -> QRectF:
+        return QRectF(self.width() - self.BAR, 0, self.BAR, self.height())
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        strip = QRectF(6, 2, max(self.width() - 12, 1), 8)
-        gradient = QLinearGradient(strip.left(), 0, strip.right(), 0)
+        bar = self.bar_rect()
+        gradient = QLinearGradient(0, bar.bottom(), 0, bar.top())
         last = len(_SCALE_COLORS) - 1
         for index, color in enumerate(_SCALE_COLORS):
             gradient.setColorAt(index / last, QColor(color))
-        painter.fillRect(strip, gradient)
-        painter.setPen(self.palette().text().color())
-        text = QRectF(6, 11, strip.width(), self.height() - 11)
-        painter.drawText(text, Qt.AlignmentFlag.AlignLeft, f'{self._low:.6g}')
-        painter.drawText(text, Qt.AlignmentFlag.AlignRight, f'{self._high:.6g}')
-        painter.drawText(text, Qt.AlignmentFlag.AlignHCenter, self._name)
+        painter.fillRect(bar, gradient)
+        metrics = self.fontMetrics()
+        line = metrics.height()
+        right = bar.left() - self.GAP
+        high, low = self.ends()
+        painter.setPen(self._ink)
+        for text, top in ((high, 0.0), (low, self.height() - line)):
+            width = metrics.horizontalAdvance(text) + 4
+            box = QRectF(right - width, top, width, line)
+            painter.fillRect(box, self._backdrop)
+            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+        # What the colours show, upright along the bar between its values.
+        room = self.height() - 2 * line - 2 * self.GAP
+        if room > 3 * line:
+            name = metrics.elidedText(self._name, Qt.TextElideMode.ElideRight, int(room))
+            width = metrics.horizontalAdvance(name) + 4
+            painter.save()
+            painter.translate(right - line, self.height() / 2 + width / 2)
+            painter.rotate(-90)
+            box = QRectF(0, 0, width, line)
+            painter.fillRect(box, self._backdrop)
+            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, name)
+            painter.restore()
         painter.end()
 
 
@@ -202,6 +256,8 @@ class _ElidedLabel(QLabel):
         super().__init__(parent)
         self.setMinimumWidth(1)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        #: Drawn behind the text where the label lies over a plot.
+        self.backdrop: QColor | None = None
 
     def setText(self, text: str) -> None:
         super().setText(text)
@@ -217,10 +273,14 @@ class _ElidedLabel(QLabel):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        text = self.shown_text()
+        if self.backdrop is not None and text:
+            margins = self.contentsMargins()
+            width = self.fontMetrics().horizontalAdvance(text) + margins.left() + margins.right()
+            painter.fillRect(QRect(0, 0, min(width, self.width()), self.height()), self.backdrop)
         painter.setPen(self.palette().color(self.foregroundRole()))
         painter.drawText(self.contentsRect(),
-                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                         self.shown_text())
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
         painter.end()
 
 
@@ -290,7 +350,9 @@ class XYView(QWidget):
             {SCATTER: 'Settings: the X, Y and colour signals, and the time shown',
              HISTOGRAM: 'Settings: the signal, its bars, and the time shown',
              RESIDENCY: 'Settings: the X and Y signals, the grid, and the time shown'}[kind])
-        self.settings_button.clicked.connect(self.open_settings)
+        # Through a lambda: clicked passes its checked state, which would
+        # land in open_settings' anchor.
+        self.settings_button.clicked.connect(lambda: self.open_settings())
         # Its header band (gui.panel_area): name, reading, gear.
         self.header = HeaderBand()
         top = QHBoxLayout(self.header)
@@ -454,24 +516,38 @@ class XYView(QWidget):
                 self.res_marks.append(mark)
             self.res_plot.scene().sigMouseMoved.connect(self._on_cell_hover)
             self.res_plot.scene().sigMouseClicked.connect(self._on_cell_click)
-        # One line, as the point count is: cut short where the room ends,
-        # the whole of it in its tooltip.
-        self.readout = _ElidedLabel()
-        self.readout.setText(
-            'Point at a cell to read it. Click it to shade its times on the plot.' if cells
-            else 'Point at a bar to read it. Click it to shade its times on the plot.')
-        self.readout.setContentsMargins(4, 2, 4, 2)
-        self.readout.setVisible(bars or cells)
-        self.scale = _ColorScale()
+        # The plot fills the card under the header: what else it shows is
+        # drawn over it. In its top-left corner, while the pointer is on the
+        # plot, what the bar or cell under it holds, or how to read one: one
+        # line, cut short where the room ends, the whole of it in its tooltip.
+        self._shown = shown
+        self._hint = ('Point at a cell to read it. Click it to shade its times on the plot.'
+                      if cells else
+                      'Point at a bar to read it. Click it to shade its times on the plot.')
+        self._picked_text = ''
+        self._pointer_on = False
+        self.readout = _ElidedLabel(shown)
+        self.readout.setText(self._hint)
+        self.readout.setContentsMargins(4, 1, 4, 1)
+        self.readout.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.readout.hide()
+        # A message there (the table copied, a file saved) stays a while.
+        self._message_timer = QTimer(self)
+        self._message_timer.setSingleShot(True)
+        self._message_timer.setInterval(_MESSAGE_MS)
+        self._message_timer.timeout.connect(self._message_done)
+        # The colour scale, as a thin bar inside the plot's right edge.
+        self.scale = _ColorScale(shown)
         self.scale.hide()
+        shown.viewport().installEventFilter(self)
+        shown.installEventFilter(self)
+        shown.getPlotItem().vb.sigResized.connect(self._place_overlays)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.header)
         layout.addWidget(shown, 1)
-        layout.addWidget(self.readout)
-        layout.addWidget(self.scale)
         # Its own, not the widest row's: the pane may be dragged narrow.
         self.setMinimumWidth(240)
 
@@ -533,6 +609,11 @@ class XYView(QWidget):
                 axis = plot.getAxis(name)
                 axis.setPen(foreground)
                 axis.setTextPen(foreground)
+        self.scale.set_colors(background, foreground)
+        self.readout.backdrop = _backdrop(background)
+        palette = self.readout.palette()
+        palette.setColor(self.readout.foregroundRole(), QColor(foreground))
+        self.readout.setPalette(palette)
         pen = pg.mkPen(foreground, width=2)
         for mark in (self.mark1, self.mark2, *self.res_marks):
             if mark is not None:
@@ -687,10 +768,70 @@ class XYView(QWidget):
         self._timer.stop()
         if self._view == HISTOGRAM:
             self._redraw_histogram()
-            return
-        if self._view == RESIDENCY:
+        elif self._view == RESIDENCY:
             self._redraw_residency()
+        else:
+            self._redraw_points()
+        self._place_overlays()
+
+    # ── Drawn over the plot ───────────────────────────────────────────────
+
+    def _place_overlays(self) -> None:
+        """The colour scale inside the plotted area's right edge, and the
+        reading in its top-left corner, left of the scale."""
+        shown = getattr(self, '_shown', None)
+        if shown is None:
             return
+        area = shown.mapFromScene(shown.getPlotItem().vb.sceneBoundingRect()).boundingRect()
+        inner = area.adjusted(_OVERLAY_INSET, _OVERLAY_INSET, -_OVERLAY_INSET, -_OVERLAY_INSET)
+        if inner.width() < 2 or inner.height() < 2:
+            return
+        scale = self.scale
+        width = scale.needed_width()
+        scale.setGeometry(inner.right() + 1 - width, inner.top(), width, inner.height())
+        right = inner.right() + 1 - (0 if scale.isHidden() else width + _OVERLAY_INSET)
+        self.readout.setGeometry(inner.left(), inner.top(), max(right - inner.left(), 1),
+                                 self.readout.sizeHint().height())
+        scale.raise_()
+        self.readout.raise_()
+
+    def _show_readout(self) -> None:
+        # While the pointer is on the plot, or a message is up.
+        on = self._kind != SCATTER and (self._pointer_on or self._message_timer.isActive())
+        if on:
+            self._place_overlays()
+        self.readout.setVisible(on)
+
+    def _read(self, text: str) -> None:
+        """Show what the pointer is on, or how to read the view."""
+        self._message_timer.stop()
+        self.readout.setText(text)
+        self._show_readout()
+
+    def _tell(self, text: str) -> None:
+        """A message over the plot for a while: the table copied, a file saved."""
+        self.readout.setText(text)
+        self._message_timer.start()
+        self._show_readout()
+
+    def _message_done(self) -> None:
+        self.readout.setText(self._picked_text or self._hint)
+        self._show_readout()
+
+    def eventFilter(self, watched, event) -> bool:
+        shown = getattr(self, '_shown', None)
+        if shown is not None:
+            if watched is shown.viewport() and event.type() in (QEvent.Type.Enter,
+                                                                QEvent.Type.Leave):
+                self._pointer_on = event.type() == QEvent.Type.Enter
+                if not self._message_timer.isActive():
+                    self.readout.setText(self._picked_text or self._hint)
+                self._show_readout()
+            elif watched is shown and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+                self._place_overlays()
+        return super().eventFilter(watched, event)
+
+    def _redraw_points(self) -> None:
         x, y, color = self._series('x'), self._series('y'), self._series('color')
         if x is None or y is None:
             self.points = EMPTY
@@ -880,8 +1021,10 @@ class XYView(QWidget):
         if self._view != HISTOGRAM:
             return
         index = self._bar_at(scene_pos)
-        if index is not None:
-            self.readout.setText(self.bar_text(index) + self._stretch_text(
+        if index is None:
+            self._read(self._picked_text or self._hint)
+        else:
+            self._read(self.bar_text(index) + self._stretch_text(
                 (float(self.bars.edges[index]), float(self.bars.edges[index + 1]))))
 
     def _on_bar_click(self, event) -> None:
@@ -913,7 +1056,8 @@ class XYView(QWidget):
             self._span_index = 0
             self.spansChosen.emit(list(self._spans))
         self._draw_picked()
-        self.readout.setText(self.bar_text(index) + self._stretch_text(edges))
+        self._picked_text = self.bar_text(index) + self._stretch_text(edges)
+        self._read(self._picked_text)
         if self._spans:
             self.timeClicked.emit(float(self._spans[self._span_index][0]))
 
@@ -929,6 +1073,7 @@ class XYView(QWidget):
     def _clear_pick(self) -> None:
         had = self._picked is not None
         self._picked, self._spans, self._span_index = None, [], -1
+        self._picked_text = ''
         if self.picked_item is not None:
             self.picked_item.setOpts(x=[], height=[], width=1.0)
         if self.cells is not None:
@@ -1121,8 +1266,10 @@ class XYView(QWidget):
         if self._view != RESIDENCY:
             return
         cell = self._cell_at(scene_pos)
-        if cell is not None:
-            self.readout.setText(self.cell_text(cell) + self._stretch_text(self._cell_key(cell)))
+        if cell is None:
+            self._read(self._picked_text or self._hint)
+        else:
+            self._read(self.cell_text(cell) + self._stretch_text(self._cell_key(cell)))
 
     def _on_cell_click(self, event) -> None:
         if self._view != RESIDENCY or event.button() != Qt.MouseButton.LeftButton:
@@ -1150,7 +1297,8 @@ class XYView(QWidget):
             self._span_index = 0
             self.spansChosen.emit(list(self._spans))
         self._draw_picked_cell()
-        self.readout.setText(self.cell_text(cell) + self._stretch_text(key))
+        self._picked_text = self.cell_text(cell) + self._stretch_text(key)
+        self._read(self._picked_text)
         if self._spans:
             self.timeClicked.emit(float(self._spans[self._span_index][0]))
 
@@ -1190,7 +1338,7 @@ class XYView(QWidget):
         text = self.table('\t')
         if text:
             QApplication.clipboard().setText(text)
-            self.readout.setText('Table copied: paste it into a spreadsheet.')
+            self._tell('Table copied: paste it into a spreadsheet.')
 
     def export_csv(self, path: str) -> None:
         with open(path, 'w', encoding='utf-8', newline='') as file:
@@ -1205,6 +1353,6 @@ class XYView(QWidget):
             try:
                 self.export_csv(path)
             except OSError as error:
-                self.readout.setText(f'Not saved: {error.strerror or error}.')
+                self._tell(f'Not saved: {error.strerror or error}.')
                 return
-            self.readout.setText(f'Saved {path}.')
+            self._tell(f'Saved {path}.')

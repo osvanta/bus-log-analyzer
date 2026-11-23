@@ -17,7 +17,8 @@ own, on a second monitor say, and dock back where it came from.
 Each place is drawn as a card: a thin rounded outline in the plot tabs'
 colour, a little room inside it, and an even gap between one card and the
 next, where the splitters are dragged. A panel's own header row is a
-HeaderBand across the top of its card.
+HeaderBand across the top of its card. Card draws the same card round a
+widget beside the panels: the signal table, level with the time plot's card.
 
 A panel's title is drawn as the plot tabs are (gui.tab_drawing). A title row
 costs room, as a window's caption would, so a panel alone in its place shows
@@ -153,6 +154,13 @@ def _new_splitter(orientation: Qt.Orientation) -> QSplitter:
     splitter.setChildrenCollapsible(False)
     splitter.setHandleWidth(GUTTER)
     return splitter
+
+
+def gutter_splitter(orientation: Qt.Orientation) -> QSplitter:
+    """A splitter whose handle is the gap between two cards, as between the
+    panels: GUTTER wide, drawn as nothing, dragged to resize them. The
+    signal table and the plots beside it are split by one."""
+    return _new_splitter(orientation)
 
 
 class HeaderBand(QWidget):
@@ -328,6 +336,42 @@ class _Grip(QWidget):
                                 GRIP_HEIGHT / 2, GRIP_HEIGHT / 2)
 
 
+def card_outline_color(widget: QWidget) -> QColor:
+    """A card's outline colour in *widget*'s palette: the plot tabs' colour."""
+    palette = widget.palette()
+    return _mix(palette.color(QPalette.ColorRole.Window),
+                palette.color(QPalette.ColorRole.WindowText), _OUTLINE)
+
+
+def paint_card(widget: QWidget) -> None:
+    """Draw *widget* as a card: a thin rounded outline along its edge."""
+    painter = QPainter(widget)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(card_outline_color(widget), 1)
+    pen.setCosmetic(True)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(QRectF(widget.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                            CARD_RADIUS, CARD_RADIUS)
+    painter.end()
+
+
+class Card(QWidget):
+    """A card as the panels' places are drawn, for a widget beside them: the
+    same outline, and its content as far inside it. Its layout, content,
+    takes the widgets."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.content = QVBoxLayout(self)
+        self.content.setContentsMargins(CARD_INSET, CARD_INSET, CARD_INSET, CARD_INSET)
+        self.content.setSpacing(0)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        paint_card(self)
+
+
 class PanelGroup(QWidget):
     """One place in the tab: one panel, or several shown one at a time
     under their tabs, drawn as a card."""
@@ -479,21 +523,11 @@ class PanelGroup(QWidget):
         self._place_overlay()
 
     def outline_color(self) -> QColor:
-        palette = self.palette()
-        return _mix(palette.color(QPalette.ColorRole.Window),
-                    palette.color(QPalette.ColorRole.WindowText), _OUTLINE)
+        return card_outline_color(self)
 
     def paintEvent(self, event) -> None:
         # The card: a thin rounded outline in the plot tabs' colour.
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(self.outline_color(), 1)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
-                                CARD_RADIUS, CARD_RADIUS)
-        painter.end()
+        paint_card(self)
 
     def update_buttons(self) -> None:
         key = self.current()
@@ -1196,6 +1230,11 @@ class PanelArea(QWidget):
                     walk(widget.widget(index))
         walk(self._root)
         return found
+
+    def card_of(self, key: str) -> PanelGroup | None:
+        """The card (place) a panel is in here; None while it is closed or
+        in a window of its own."""
+        return self._group_of(key)
 
     def _group_of(self, key: str | None) -> PanelGroup | None:
         if key is None:

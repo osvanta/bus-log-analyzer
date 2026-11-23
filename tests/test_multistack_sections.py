@@ -668,3 +668,37 @@ def test_the_main_window_puts_the_first_section_level_with_the_first_stack(
     finally:
         window.close()
         qapp.processEvents()
+
+
+def test_a_header_asking_for_more_room_still_ends_where_the_plot_starts(
+        qapp, monkeypatch, tmp_path):
+    # The table's header is as tall as the time plot's band (gui.plot_widget),
+    # even when its text asks for more; the sections start under it, each
+    # level with its stack.
+    from PySide6.QtWidgets import QMessageBox
+    from gui.main_window import MainWindow
+    for name in ('warning', 'critical', 'information'):
+        monkeypatch.setattr(QMessageBox, name, Mock(return_value=QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(MainWindow, '_settings_folder', staticmethod(lambda: tmp_path))
+    window = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
+    try:
+        window.resize(1400, 900)
+        window.show()
+        panel = window.plot_panel
+        header = panel.table.horizontalHeader()
+        font = header.font()
+        font.setPointSizeF(font.pointSizeF() * 3)
+        header.setFont(font)
+        for name in ('A', 'B', 'C'):
+            panel.add_series(name, _series(name))
+        window.btn_multistack.click()
+        _settle(qapp, 8)
+        assert panel._multistack_mode
+        assert header.sizeHint().height() > header.height() == panel.plot_header.height()
+        assert panel.table.height() == header.height() + 2 * panel.table.frameWidth()
+        area = panel.stack_sections()
+        assert area.geometry().top() == panel.table.geometry().bottom() + 1
+        _assert_level(panel)
+    finally:
+        window.close()
+        qapp.processEvents()

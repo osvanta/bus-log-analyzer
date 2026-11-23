@@ -166,17 +166,41 @@ def test_markers_adds_one_at_cursor_1_once_the_cursor_is_on(window):
     assert [marker.time for marker in panel.markers()] == [pytest.approx(1.25)]
 
 
-def test_markers_deletes_one_or_all(window):
+def test_markers_deletes_one_with_its_bin_or_all(window):
+    # Each marker's row has a waste bin, as Views ▾ and Go to marker have
+    # (feedback item 13): the bin deletes it, the menu stays open on the rest.
     panel = window.plot_panel
     first = panel.add_marker(0.5)
-    panel.add_marker(1.5)
-    entries = _entries(window.btn_markers)
+    second = panel.add_marker(1.5)
+    menu = window.btn_markers.menu()
+    entries = {action.text().split('\t')[0]: action
+               for action in menu.actions() if not action.isSeparator()}
     assert 'Delete all markers (2)' in entries
-    next(action for name, action in entries.items()
-         if name.startswith(first.name)).trigger()
+    rows = [action for name, action in entries.items()
+            if name.startswith((first.name, second.name))]
+    assert menu.bin_rows() == rows
+    menu.delete_row(rows[0])
     assert [marker.time for marker in panel.markers()] == [1.5]
+    assert entries['Delete all markers (2)'].text() == 'Delete all markers (1)'
+    assert rows[0] not in menu.actions() and menu.bin_rows() == [rows[1]]
+    menu.delete_row(rows[1])
+    assert panel.markers() == []
+    assert not entries['Delete all markers (2)'].isEnabled()
+    panel.add_marker(2.5)
     _entries(window.btn_markers)['Delete all markers (1)'].trigger()
     assert panel.markers() == []
+
+
+def test_a_marker_row_goes_to_the_marker(window, monkeypatch):
+    panel = window.plot_panel
+    marker = panel.add_marker(0.5)
+    went = []
+    monkeypatch.setattr(panel, 'go_to_marker', went.append)
+    row = next(action for name, action in _entries(window.btn_markers).items()
+               if name.startswith(marker.name))
+    assert row.toolTip() == f'Go to {marker.name}'
+    row.trigger()
+    assert went == [marker] and panel.markers() == [marker]
 
 
 # ── More ─────────────────────────────────────────────────────────────────

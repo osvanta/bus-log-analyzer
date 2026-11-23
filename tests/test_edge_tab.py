@@ -13,6 +13,10 @@ and covers neither the plot area's cursor line and table nor the panel. Its
 chevron points the way the panel moves on a click. They were fixed navy
 buttons laid over the window, on top of the cursor line. They are the only
 way to hide and show the panels: the panels' title rows have no button.
+
+The log panel's handle folds the panel to its title line, one line across the
+foot of the window, and opens it again. It starts folded, and opens as the
+user last left it.
 """
 from __future__ import annotations
 
@@ -175,25 +179,24 @@ def test_handles_are_not_navy_buttons_laid_over_the_window(window):
         assert tab.styleSheet() == ''
 
 
-@pytest.mark.parametrize('log_shown', [True, False], ids=['log-shown', 'log-hidden'])
-def test_log_handle_lies_between_the_cursor_line_and_the_panel(qapp, window, log_shown):
+@pytest.mark.parametrize('log_open', [True, False], ids=['log-open', 'log-folded'])
+def test_log_handle_lies_between_the_plot_and_the_panel(qapp, window, log_open):
     from PySide6.QtCore import Qt
 
-    if not log_shown:
+    if log_open:
         _click(qapp, window.bottom_edge_btn)
     tab = _in_window(window, window.bottom_edge_btn)
-    cursor_line = _in_window(window, window.plot_panel.cursor_label)
-    edge = (window.bottom_dock.geometry().top() if log_shown
-            else _in_window(window, window.statusBar()).top())
+    plot = _in_window(window, window.plot_panel.panels._group_of('plot'))
 
-    assert window.bottom_dock.isVisible() == log_shown
-    assert tab.top() > cursor_line.bottom()
-    assert tab.bottom() + 1 == edge
+    assert window.log_panel_open() == log_open
+    assert window.bottom_dock.isVisible()          # folded, its title line
+    assert tab.top() > plot.bottom()
+    assert tab.bottom() + 1 == window.bottom_dock.geometry().top()
     assert abs(tab.center().x() - window.rect().center().x()) <= 1
     assert window.bottom_edge_btn.arrow() == (
-        Qt.ArrowType.DownArrow if log_shown else Qt.ArrowType.UpArrow)
+        Qt.ArrowType.DownArrow if log_open else Qt.ArrowType.UpArrow)
     assert window.bottom_edge_btn.toolTip() == (
-        'Hide the log panel' if log_shown else 'Show the log panel')
+        'Hide the log panel' if log_open else 'Show the log panel')
 
 
 @pytest.mark.parametrize('signals_shown', [True, False], ids=['signals-shown', 'signals-hidden'])
@@ -218,11 +221,63 @@ def test_signal_panel_handle_lies_between_the_panel_and_the_table(qapp, window, 
 def test_handles_bring_their_panels_back(qapp, window):
     _click(qapp, window.bottom_edge_btn)
     _click(qapp, window.left_edge_btn)
-    assert not window.bottom_dock.isVisible() and not window.left_dock.isVisible()
+    assert window.log_panel_open() and not window.left_dock.isVisible()
 
     _click(qapp, window.bottom_edge_btn)
     _click(qapp, window.left_edge_btn)
-    assert window.bottom_dock.isVisible() and window.left_dock.isVisible()
+    assert not window.log_panel_open() and window.left_dock.isVisible()
+
+
+def test_the_log_panel_starts_folded_to_one_line_across_the_foot(qapp, window):
+    from PySide6.QtCore import Qt
+
+    dock, tabs, title = window.bottom_dock, window.bottom_tabs, window.bottom_dock.titleBarWidget()
+    assert dock.isVisible() and not window.log_panel_open()
+    assert dock.height() == title.height() and tabs.height() == 0
+    # Across the window's foot, not only as wide as its title.
+    foot = dock.geometry()
+    assert foot.left() == 0 and foot.right() == window.width() - 1
+    assert foot.bottom() + 1 == _in_window(window, window.statusBar()).top()
+    # Opened, it has room again; folded and opened, the height it was left at.
+    _click(qapp, window.bottom_edge_btn)
+    assert window.log_panel_open() and tabs.height() > 100
+    window.resizeDocks([dock], [240], Qt.Orientation.Vertical)
+    _settle(qapp)
+    left_at = dock.height()
+    _click(qapp, window.bottom_edge_btn)
+    assert dock.height() == title.height()
+    _click(qapp, window.bottom_edge_btn)
+    assert dock.height() == left_at
+
+
+def test_the_log_panel_opens_as_it_was_left(qapp, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    from gui.main_window import MainWindow
+    from gui.user_settings import read_setting
+
+    monkeypatch.setattr(QMessageBox, 'warning', Mock(return_value=QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(MainWindow, '_settings_folder', staticmethod(lambda: tmp_path))
+
+    def started():
+        w = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
+        w.resize(1400, 800)
+        w.show()
+        _settle(qapp)
+        return w
+
+    first = started()
+    assert not first.log_panel_open()
+    _click(qapp, first.bottom_edge_btn)
+    first.close()
+    assert read_setting(tmp_path / 'osvanta_user_settings.json', 'log_panel_open') is True
+    second = started()
+    assert second.log_panel_open() and second.bottom_tabs.height() > 100
+    _click(qapp, second.bottom_edge_btn)
+    second.close()
+    third = started()
+    assert not third.log_panel_open()
+    third.close()
+    qapp.processEvents()
 
 
 def test_panel_title_rows_carry_only_the_panel_name(window):

@@ -6,8 +6,8 @@
 
 """
 The user's tag under the signal table: their text, their user name and the
-date, in any combination, on the cursor line's level so a screenshot of the
-analysis carries it.
+date, in any combination, on the level of the file name's line under the
+plots, so a screenshot of the analysis carries it.
 
 A double-click on the strip under the table, or its right-click menu, edits
 the tag; it is saved in the user settings beside the application, never in a
@@ -176,7 +176,7 @@ def test_a_hint_says_how_to_add_a_tag_while_there_is_none(qapp, window):
     from PySide6.QtGui import QColor
 
     panel = window.plot_panel
-    hint, readout = panel.tag_hint, panel.cursor_label
+    hint, readout, line = panel.tag_hint, panel.cursor_label, panel._file_line
     assert not hint.isVisible()                     # nothing plotted
 
     _plot(qapp, window)
@@ -185,7 +185,7 @@ def test_a_hint_says_how_to_add_a_tag_while_there_is_none(qapp, window):
     # Shortened, like the tag, when the table is too narrow for it.
     assert hint.full_text() == '<double click here to add custom tag>'
     assert hint.text().startswith('<double click')
-    assert hint.mapTo(splitter, QPoint(0, 0)).y() == readout.mapTo(splitter, QPoint(0, 0)).y()
+    assert hint.mapTo(splitter, QPoint(0, 0)).y() == line.mapTo(splitter, QPoint(0, 0)).y()
     assert hint.font() == readout.font()
     # Dimmer than a tag: between the strip's colour and its text colour.
     background, text, _border = (QColor(c) for c in panel._header_colors())
@@ -283,7 +283,7 @@ def test_tag_comes_back_at_the_next_start(qapp, monkeypatch, settings_dir):
         qapp.processEvents()
 
 
-def test_tag_sits_on_the_cursor_line_and_only_while_signals_are_plotted(qapp, window):
+def test_tag_sits_on_the_file_name_line_and_only_while_signals_are_plotted(qapp, window):
     from PySide6.QtCore import QPoint
 
     window.plot_panel.set_tag(PlotTag(text='Powertrain'))
@@ -292,18 +292,21 @@ def test_tag_sits_on_the_cursor_line_and_only_while_signals_are_plotted(qapp, wi
 
     _plot(qapp, window)
     splitter = window.center_splitter
-    tag, readout = window.plot_panel.tag_label, window.plot_panel.cursor_label
+    panel = window.plot_panel
+    tag, line, name = panel.tag_label, panel._file_line, panel.file_name_label
 
     def top(widget):
         return widget.mapTo(splitter, QPoint(0, 0)).y()
 
     assert tag.isVisible()
-    assert top(tag) == top(readout)
-    assert tag.height() == readout.height()
-    assert tag.font() == readout.font()
-    # In the cursor line's colour, not the plot background's text colour.
-    assert tag.palette().color(tag.foregroundRole()) == readout.palette().color(
-        readout.foregroundRole())
+    # Under the table, level with the file name's line under the plots.
+    assert top(tag) == top(line)
+    assert tag.height() == line.height()
+    assert top(tag) >= top(panel.table_card) + panel.table_card.height()
+    assert tag.font() == name.font() == panel.cursor_label.font()
+    # In the file name's colour, not the plot background's text colour.
+    assert tag.palette().color(tag.foregroundRole()) == name.palette().color(
+        name.foregroundRole())
 
     window.plot_panel.clear_all()
     qapp.processEvents()

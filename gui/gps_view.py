@@ -31,7 +31,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetrics, QGuiApplication, QLinearGradient, QPainter, QPen, QPolygonF,
+    QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QPen, QPolygonF,
 )
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGraphicsRectItem, QHBoxLayout,
@@ -45,7 +45,7 @@ from core.xy_data import color_steps
 from gui.map_background import MapBackground
 from gui.panel_area import STRIP_BUTTON_SIZE, TITLE_BUTTONS_ROOM, HeaderBand
 from gui.plot_icons import plot_icon
-from gui.xy_view import _SCALE_COLORS, _ElidedLabel, duration_text, scale_color
+from gui.xy_view import _ColorScale, _ElidedLabel, _backdrop, duration_text, scale_color
 
 TRACK = 'track'
 TRACK_NAME = 'GPS track'
@@ -77,104 +77,6 @@ _DARK_MAP_OPACITY = 0.6
 _ZOOM_IN = 'Zoom in to see the map'
 #: Where the last map file was chosen, for the next choice.
 _last_map_folder = ''
-
-
-#: What is drawn over the map lies on the map's background at this opacity.
-_BACKDROP_ALPHA = 200
-
-
-def _backdrop(background: str) -> QColor:
-    color = QColor(background)
-    color.setAlpha(_BACKDROP_ALPHA)
-    return color
-
-
-class _Readout(_ElidedLabel):
-    """The reading over the map's top-left corner: one line on a backdrop."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.backdrop = QColor(255, 255, 255, _BACKDROP_ALPHA)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        text = self.shown_text()
-        if text:
-            margins = self.contentsMargins()
-            width = self.fontMetrics().horizontalAdvance(text) + margins.left() + margins.right()
-            painter.fillRect(QRect(0, 0, min(width, self.width()), self.height()), self.backdrop)
-        painter.setPen(self.palette().color(self.foregroundRole()))
-        painter.drawText(self.contentsRect(),
-                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
-        painter.end()
-
-
-class _ColorScale(QWidget):
-    """The colour scale as a thin bar inside the map's right edge: high at
-    its top, low at its foot, the values at its ends and, along it, the
-    signal the colours show."""
-
-    BAR = 8
-    GAP = 4
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._low = self._high = 0.0
-        self._name = ''
-        self._ink = QColor('#000000')
-        self._backdrop = _backdrop('#ffffff')
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-    def set_range(self, name: str, low: float, high: float) -> None:
-        self._name, self._low, self._high = name, low, high
-        self.update()
-
-    def set_colors(self, background: str, foreground: str) -> None:
-        self._ink, self._backdrop = QColor(foreground), _backdrop(background)
-        self.update()
-
-    def text(self) -> str:
-        return f'{self._low:.6g} … {self._high:.6g}  {self._name}'
-
-    def ends(self) -> tuple[str, str]:
-        return f'{self._high:.6g}', f'{self._low:.6g}'
-
-    def needed_width(self) -> int:
-        metrics = self.fontMetrics()
-        words = max(max(metrics.horizontalAdvance(text) for text in self.ends()) + 4,
-                    metrics.height())
-        return words + self.GAP + self.BAR
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        bar = QRectF(self.width() - self.BAR, 0, self.BAR, self.height())
-        gradient = QLinearGradient(0, bar.bottom(), 0, bar.top())
-        last = len(_SCALE_COLORS) - 1
-        for index, color in enumerate(_SCALE_COLORS):
-            gradient.setColorAt(index / last, QColor(color))
-        painter.fillRect(bar, gradient)
-        metrics = self.fontMetrics()
-        line = metrics.height()
-        right = bar.left() - self.GAP
-        high, low = self.ends()
-        painter.setPen(self._ink)
-        for text, top in ((high, 0.0), (low, self.height() - line)):
-            width = metrics.horizontalAdvance(text) + 4
-            box = QRectF(right - width, top, width, line)
-            painter.fillRect(box, self._backdrop)
-            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
-        room = self.height() - 2 * line - 2 * self.GAP
-        if room > 3 * line:
-            name = metrics.elidedText(self._name, Qt.TextElideMode.ElideRight, int(room))
-            width = metrics.horizontalAdvance(name) + 4
-            painter.save()
-            painter.translate(right - line, self.height() / 2 + width / 2)
-            painter.rotate(-90)
-            box = QRectF(0, 0, width, line)
-            painter.fillRect(box, self._backdrop)
-            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, name)
-            painter.restore()
-        painter.end()
 
 
 def _signal_label(series: SignalSeries) -> str:
@@ -505,7 +407,7 @@ class GPSView(QWidget):
         # Drawn over the map: the reading in its top-left corner while the
         # pointer is on it, the colour scale inside its right edge, north
         # and the scale in its bottom-left corner.
-        self.readout = _Readout(self.plot)
+        self.readout = _ElidedLabel(self.plot)
         self.readout.setText(_HINT)
         self.readout.setContentsMargins(4, 1, 4, 1)
         self.readout.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -514,7 +416,7 @@ class GPSView(QWidget):
         self.scale.hide()
         self.key = _MapKey(self.plot)
         # The map file's credit, in its bottom-right corner.
-        self.credit = _Readout(self.plot)
+        self.credit = _ElidedLabel(self.plot)
         credit_font = QFont(self.credit.font())
         credit_font.setPixelSize(10)
         self.credit.setFont(credit_font)

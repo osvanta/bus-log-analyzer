@@ -115,8 +115,10 @@ def test_the_plot_background_does_not_change_the_header(qapp, theme, panel):
 
 def test_no_plot_background_rings_the_header(qapp, theme, panel):
     # Light theme on a black plot: nothing black above, left or right of
-    # the header, in the panel's top row.
+    # the header. It sits in the table's card (gui.panel_area), whose room
+    # inside its outline is the window's colour, as the plot's card is.
     from PySide6.QtCore import QPoint
+    from gui.panel_area import CARD_INSET
 
     theme(LIGHT)
     panel.set_background_color('#000000')
@@ -125,11 +127,15 @@ def test_no_plot_background_rings_the_header(qapp, theme, panel):
     header = panel.table.horizontalHeader()
 
     assert panel.table.frameWidth() == 0
-    assert header.mapTo(panel.table_panel, QPoint(0, 0)) == QPoint(0, 0)
-    image = panel.table_panel.grab().toImage()
+    assert header.mapTo(panel.table_card, QPoint(0, 0)) == QPoint(CARD_INSET, CARD_INSET)
+    image = panel.table_card.grab().toImage()
     ratio = image.devicePixelRatio()
-    row = round(header.height() / 2 * ratio)
-    beyond_the_columns = round((header.length() + 10) * ratio)
-    for x in (0, beyond_the_columns, image.width() - 1):
+    row = round((CARD_INSET + header.height() / 2) * ratio)
+    inside = round((CARD_INSET - 1) * ratio)        # past the outline
+    beyond_the_columns = round((CARD_INSET + header.length() + 10) * ratio)
+    for x in (inside, beyond_the_columns, image.width() - 1 - inside):
         assert image.pixelColor(x, row).name() == LIGHT['window']
-    assert image.pixelColor(round(4 * ratio), 0).name() == LIGHT['window']
+    assert image.pixelColor(round(10 * ratio), inside).name() == LIGHT['window']
+    # The card's outline at its edge, as round the time plot's card.
+    edge = image.pixelColor(0, row).name()
+    assert edge not in (LIGHT['window'], '#000000')

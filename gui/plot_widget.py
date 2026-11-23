@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import (
-    Qt, QTimer, Signal, QRect, QRectF, QPointF, QSize, QByteArray, QMimeData,
+    Qt, QTimer, Signal, QPoint, QRect, QRectF, QPointF, QSize, QByteArray, QMimeData,
     QItemSelectionModel, QEvent,
 )
 from PySide6.QtGui import (
@@ -57,8 +57,8 @@ from gui.gps_view import TRACK, TRACK_NAME, GPSView
 from gui.xy_view import KIND_NAMES, KINDS, SCATTER, XYView
 from gui.edge_tab import _mix
 from gui.bin_menu import BinMenu
-from gui.panel_area import PanelArea
-from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
+from gui.panel_area import CARD_INSET, Card, HeaderBand, PanelArea
+from gui.plot_tag import TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
 from gui.stack_sections import StackSectionArea
 from gui.tab_drawing import _NameEditor
@@ -242,15 +242,15 @@ class _MarkerLine(pg.InfiniteLine):
 
 class _MarkerListMenu(BinMenu):
     """Go to marker: a row per marker, "name · time s", that goes to it, with
-    a waste bin right after the name that deletes it (gui.bin_menu). The menu
+    a waste bin at its right that deletes it (gui.bin_menu). The menu
     stays open on the markers left, so several go in a row of clicks; Delete
     deletes the highlighted one."""
 
     _TEXT_LEFT = 12            # the text's indent, as the plot menus' style has it
     TEXT_LEFT = _TEXT_LEFT
-    # The text's indent, and room past the longest text for its bin.
+    # The text's indent, and room past the longest text for the bins' column.
     _BIN_ROOM = (f'QMenu::item {{ padding-left: {_TEXT_LEFT}px; '
-                 f'padding-right: {BinMenu.BIN_GAP + BinMenu.BIN_AREA + 6}px; }}')
+                 f'padding-right: {BinMenu.BIN_GAP + BinMenu.BIN_AREA + BinMenu.BIN_RIGHT}px; }}')
 
     def __init__(self, panel: 'PlotPanel', parent: QMenu) -> None:
         super().__init__('Go to marker', parent)
@@ -1240,10 +1240,14 @@ class PlotPanel(QWidget):
         # under the plot repeats it.
         self.cursor_label = QLabel(self._cursor_label_base)
         self.cursor_label.setFont(_cursor_line_font(self.font()))
+        # In the time plot's header band, in its own card: it gives way, cut
+        # at its end, rather than hold the plot wider than the panels beside
+        # it leave it.
+        self.cursor_label.setMinimumWidth(1)
         self.cursor_label.hide()
-        # On the cursor line, after the readout: which file the plotted
-        # signals come from. A long name keeps its start and its extension.
-        self.file_name_label = _ElidedLabel(SEPARATOR, Qt.TextElideMode.ElideMiddle)
+        # On the line under the plots: which file the plotted signals come
+        # from. A long name keeps its start and its extension.
+        self.file_name_label = _ElidedLabel('', Qt.TextElideMode.ElideMiddle)
         self.file_name_label.setFont(self.cursor_label.font())
         self.file_name_label.hide()
 
@@ -1316,9 +1320,25 @@ class PlotPanel(QWidget):
             "The time plot's name. Double-click to rename it.")
 
         self.table_panel = QWidget()
-        _tbl_layout = QVBoxLayout(self.table_panel)
-        _tbl_layout.setContentsMargins(0, 0, 0, 0)
-        _tbl_layout.setSpacing(0)
+        _panel_layout = QVBoxLayout(self.table_panel)
+        _panel_layout.setContentsMargins(0, 0, 0, 0)
+        _panel_layout.setSpacing(0)
+        # The table is drawn as a card, as the time plot beside it is
+        # (gui.panel_area), and lines up with the plot's card: the two cards
+        # start on one line, the table's header is as tall as what heads the
+        # plot, so its first row starts level with the plot, and they end on
+        # one line (_match_table_to_plot). Above the card, the room beside
+        # the plot buttons.
+        self._table_top_gap = QWidget()
+        self._table_top_gap.setObjectName('tableTopGap')
+        self._table_top_gap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self._table_top_gap.setFixedHeight(0)
+        _panel_layout.addWidget(self._table_top_gap)
+        self.table_card = Card()
+        self.table_card.setObjectName('tableCard')
+        self.table_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        _panel_layout.addWidget(self.table_card, stretch=1)
+        _tbl_layout = self.table_card.content
         _tbl_layout.addWidget(self.table, stretch=1)
         # MultiStack: the table shrinks to its header, and under it each
         # stack gets a section of it, level with the stack.
@@ -1332,14 +1352,14 @@ class PlotPanel(QWidget):
         self._sections_timer.setInterval(0)
         self._sections_timer.timeout.connect(self._place_stack_sections)
         self.table_panel.installEventFilter(self)
-        # As tall as what lies under the plot, its margin and the cursor
-        # line, so the table ends level with the plot.
+        # As tall as what lies under the plots, the panel's margin and the
+        # file name's line, so the table ends level with the plots.
         self._table_bottom_gap = QWidget()
         self._table_bottom_gap.setObjectName('tableBottomGap')
         self._table_bottom_gap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self._table_bottom_gap.setFixedHeight(0)
-        _tbl_layout.addWidget(self._table_bottom_gap)
-        # The user's tag, on the cursor line's level. A double-click on the
+        _panel_layout.addWidget(self._table_bottom_gap)
+        # The user's tag, on the file name's line. A double-click on the
         # strip, or its right-click menu, edits it.
         self._tag = PlotTag()
         self.tag_label = _ElidedLabel()
@@ -1395,7 +1415,9 @@ class PlotPanel(QWidget):
 
         # ── Root layout ───────────────────────────────────────────────────
         _root = QVBoxLayout(self)
-        _root.setContentsMargins(4, 4, 4, 4)
+        # None on the left: the gap between the signal table's card and
+        # the plot's is the splitter's gutter alone (gui.main_window).
+        _root.setContentsMargins(0, 4, 4, 4)
         # The tab's panels (gui.panel_area): the plots, and beside them the
         # views opened from Views: the plotted signals as a table
         # (set_table_view), XY plots, histograms and residency maps, as many
@@ -1413,9 +1435,24 @@ class PlotPanel(QWidget):
         # Those open and given the plotted signals.
         self._xy_live: set[str] = set()
         self._plot_name = PLOT_NAME
+        # The time plot's card: its header band, then the plots. The band
+        # holds the cursor readout. It keeps its height under the empty plot,
+        # so plotting the first signals resizes neither the plot nor the
+        # table beside it, which would draw every stacked row once more.
+        self.plot_header = HeaderBand()
+        _header = QHBoxLayout(self.plot_header)
+        _header.setContentsMargins(6, 0, 6, 0)
+        _header.setSpacing(0)
+        _header.addWidget(self.cursor_label, stretch=1)
+        self.plot_card = QWidget()
+        _card = QVBoxLayout(self.plot_card)
+        _card.setContentsMargins(0, 0, 0, 0)
+        _card.setSpacing(0)
+        _card.addWidget(self.plot_header)
+        _card.addWidget(self.view_stack, stretch=1)
         self.panels = PanelArea()
         # The time plot stays: a tab keeps one.
-        self.panels.add('plot', self.view_stack, self._plot_name,
+        self.panels.add('plot', self.plot_card, self._plot_name,
                         closable=False, floatable=False, home={'edge': 'left'},
                         rename=self.rename_plot)
         # Where the table opens the first time: right of the plots. XY views
@@ -1425,17 +1462,16 @@ class PlotPanel(QWidget):
         self.panels.panelClosed.connect(self._on_panel_closed)
         self.panels.panelsChanged.connect(self._sync_xy_views)
         _root.addWidget(self.panels, stretch=1)
-        # The cursor line keeps a line's height under the empty plot, but no
-        # width. Plotting the first signals then resizes neither the plot nor
-        # the table beside it, which would draw every stacked row once more.
-        self._cursor_line = QWidget()
-        self._cursor_line.setMinimumHeight(self.cursor_label.sizeHint().height())
-        _cursor_line = QHBoxLayout(self._cursor_line)
-        _cursor_line.setContentsMargins(0, 0, 0, 0)
-        _cursor_line.setSpacing(0)
-        _cursor_line.addWidget(self.cursor_label)
-        _cursor_line.addWidget(self.file_name_label, stretch=1)
-        _root.addWidget(self._cursor_line)
+        # The file name's line, under the plots, level with the tag under
+        # the table. It keeps a line's height without a file name, but no
+        # width, for the same reason as the band.
+        self._file_line = QWidget()
+        self._file_line.setMinimumHeight(self.file_name_label.sizeHint().height())
+        _file_line = QHBoxLayout(self._file_line)
+        _file_line.setContentsMargins(0, 0, 0, 0)
+        _file_line.setSpacing(0)
+        _file_line.addWidget(self.file_name_label, stretch=1)
+        _root.addWidget(self._file_line)
         self.view_stack.installEventFilter(self)
 
         self._setup_mouse_proxy()
@@ -4380,8 +4416,9 @@ class PlotPanel(QWidget):
         self.overlay_label.setVisible(bool(text))
 
     def set_measurement_file(self, path: str | None) -> None:
-        """Name, after the cursor readout, the file the plotted signals come
-        from; None or '' names none. The full path is the label's tooltip."""
+        """Name, on the line under the plots, the file the plotted signals
+        come from; None or '' names none. The full path is the label's
+        tooltip."""
         self.file_name_label.set_full_text(Path(path).name if path else '')
         self.file_name_label.setToolTip(path or '')
         self.file_name_label.setVisible(bool(self._items) and bool(path))
@@ -4607,8 +4644,9 @@ class PlotPanel(QWidget):
 
     def _table_header_height(self) -> int:
         header = self.table.horizontalHeader()
-        return (max(header.height(), header.minimumHeight(), header.sizeHint().height())
-                + 2 * self.table.frameWidth())
+        # As tall as it is made to be (_match_table_to_plot), else as it asks.
+        height = max(header.height(), header.minimumHeight(), header.sizeHint().height())
+        return min(height, header.maximumHeight()) + 2 * self.table.frameWidth()
 
     def _update_table_mode(self) -> None:
         """MultiStack shows the table as its header over one section per
@@ -5952,7 +5990,7 @@ class PlotPanel(QWidget):
             return False
         if watched is self.view_stack and event.type() in (QEvent.Type.Resize,
                                                            QEvent.Type.Move):
-            self._match_table_bottom_to_plot()
+            self._match_table_to_plot()
             self._schedule_stack_sections()
         elif watched is self.table_panel and event.type() in (QEvent.Type.Resize,
                                                               QEvent.Type.Show):
@@ -5967,18 +6005,36 @@ class PlotPanel(QWidget):
                 return True
         return super().eventFilter(watched, event)
 
-    def _match_table_bottom_to_plot(self) -> None:
+    def _match_table_to_plot(self) -> None:
         # The table and this panel both reach the bottom of the main
-        # window's splitter, so the space under the plot here is the space
+        # window's splitter, so the space under the plots here is the space
         # to leave under the table.
         plot = self.panels.geometry()   # the plots, and the panels beside them
         self._table_bottom_gap.setFixedHeight(max(0, self.height() - plot.y() - plot.height()))
-        # The tag lies as far under the table as the cursor line under the
-        # plot, and as tall, so the two read as one line.
+        # The tag lies as far under the table as the file name's line under
+        # the plots, and as tall, so the two read as one line.
         root = self.layout()
         margins = root.contentsMargins()
         self._tag_layout.setContentsMargins(
             margins.left(), root.spacing(), margins.right(), margins.bottom())
+        # The table's card starts level with the time plot's card, and its
+        # header is as tall as the plot's band (and its title, while titles
+        # are shown), so the first row starts level with the plot. Only
+        # while both are on screen in one window: the plot hides while
+        # another panel fills the tab.
+        card = self.panels.card_of('plot')
+        if (card is None or not card.isVisible() or not self.table_panel.isVisible()
+                or self.table_panel.window() is not card.window()):
+            return
+        top = self.table_panel.mapFromGlobal(card.mapToGlobal(QPoint(0, 0))).y()
+        self._table_top_gap.setFixedHeight(max(0, top))
+        heading = self.view_stack.mapTo(card, QPoint(0, 0)).y() - CARD_INSET
+        header = self.table.horizontalHeader()
+        if heading > 0 and (header.minimumHeight(), header.maximumHeight()) != (heading, heading):
+            header.setFixedHeight(heading)
+            # The rows move down under it now, not on the next pass.
+            self.table.updateGeometries()
+            self._schedule_stack_sections()
 
     # ── Tag ───────────────────────────────────────────────────────────────
 
@@ -6059,7 +6115,7 @@ class PlotPanel(QWidget):
                 selection-background-color: #2d4f7c;
                 border: none;
             }}
-            QHeaderView, QWidget#tableBottomGap {{
+            QHeaderView, QWidget#tableTopGap, QWidget#tableCard, QWidget#tableBottomGap {{
                 background-color: {header_bg};
                 border: none;
             }}

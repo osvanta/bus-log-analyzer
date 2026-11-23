@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QMimeData, Qt, Signal
-from PySide6.QtGui import QAction, QDrag, QKeySequence, QShortcut, QStandardItemModel
+from PySide6.QtCore import QMimeData, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QDrag, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QHeaderView,
+    QFrame,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMenu,
+    QSizePolicy,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -24,6 +26,11 @@ from PySide6.QtWidgets import (
 )
 
 from core.bus_types import channel_label, sort_key, store_key_prefix
+from gui.panel_area import GUTTER, Card, HeaderBand
+from gui.tab_drawing import TAB_HEIGHT
+
+#: Room round the two cards where nothing lines them up: the window's margin.
+MARGIN = 6
 
 
 def search_pattern(text: str) -> re.Pattern[str] | None:
@@ -62,7 +69,38 @@ class SignalTree(QTreeWidget):
         drag.exec(Qt.DropAction.CopyAction)
 
 
+class _Heading(QLabel):
+    """A heading in a band: one line, cut short with "…" where the room ends,
+    the whole of it in its tooltip. It never holds the panel wider."""
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.setToolTip(text)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(1, super().minimumSizeHint().height())
+
+    def shown_text(self) -> str:
+        """The text as it fits."""
+        return self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight,
+                                             max(self.contentsRect().width(), 1))
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(self.contentsRect(), int(self.alignment()), self.shown_text())
+        painter.end()
+
+
 class SignalTreeWidget(QWidget):
+    """The decoded signals in two cards, drawn as the plot tab's panels are
+    (gui.panel_area): the head, the panel's name over the search box; and
+    the tree, headed by a band with its heading, Collapse and Expand. In the
+    window the head is the dock's title row, so the name still drags the
+    panel, and the window lines both cards up with the plot area
+    (place_cards)."""
+
     signalActivated = Signal(list)
     generatedRenameRequested = Signal(str)
     generatedEditRequested = Signal(str)
@@ -78,6 +116,11 @@ class SignalTreeWidget(QWidget):
         self._messages_expanded = True
 
         self.search_edit = QLineEdit()
+        self.search_edit.setFrame(False)
+        # As high as its card leaves it, so the card fits the room the
+        # window gives it.
+        self.search_edit.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                       QSizePolicy.Policy.Preferred)
         self.search_edit.setPlaceholderText("Search signals... (* and ? wildcards)")
         self.search_edit.setToolTip(
             "Finds the text anywhere in a signal name.\n"
@@ -86,6 +129,7 @@ class SignalTreeWidget(QWidget):
         )
 
         self.collapse_messages_button = QToolButton()
+        self.collapse_messages_button.setAutoRaise(True)
         self.collapse_messages_button.setText("Collapse")
         self.collapse_messages_button.setToolTip(
             "Collapse all messages — show message names only"
@@ -95,6 +139,7 @@ class SignalTreeWidget(QWidget):
         self.collapse_messages_button.clicked.connect(self.collapse_messages)
 
         self.expand_messages_button = QToolButton()
+        self.expand_messages_button.setAutoRaise(True)
         self.expand_messages_button.setText("Expand")
         self.expand_messages_button.setToolTip(
             "Expand all messages — show signals"
@@ -104,6 +149,7 @@ class SignalTreeWidget(QWidget):
         self.expand_messages_button.clicked.connect(self.expand_messages)
 
         self.tree = SignalTree()
+        self.tree.setFrameShape(QFrame.Shape.NoFrame)   # its card is its edge
         self.tree.setColumnCount(1)
         self.tree.setHeaderHidden(True)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
@@ -112,35 +158,52 @@ class SignalTreeWidget(QWidget):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
 
-        # Keep the tree heading visually consistent with a native QTreeWidget
-        # header while allowing the message controls to sit directly below it.
-        self._tree_header_model = QStandardItemModel(0, 1, self)
-        self._tree_header_model.setHeaderData(
-            0,
-            Qt.Orientation.Horizontal,
-            "Channels / Messages / Signals",
-        )
-        self.tree_header = QHeaderView(Qt.Orientation.Horizontal)
-        self.tree_header.setModel(self._tree_header_model)
-        self.tree_header.setSectionsClickable(False)
-        self.tree_header.setStretchLastSection(True)
-        self.tree_header.setDefaultAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.tree_header.setFixedHeight(self.tree_header.sizeHint().height())
+        # The head: a card with the panel's name in its band, the search box
+        # under it.
+        self.title_label = QLabel("Decoded Signals")
+        self.title_band = HeaderBand()
+        title_row = QHBoxLayout(self.title_band)
+        title_row.setContentsMargins(6, 0, 6, 0)
+        title_row.addWidget(self.title_label)
+        title_row.addStretch(1)
+        self.search_card = Card()
+        self.search_card.content.addWidget(self.title_band)
+        self.search_card.content.addWidget(self.search_edit, stretch=1)
+        self.head = QWidget()
+        self._head_layout = QVBoxLayout(self.head)
+        self._head_layout.setSpacing(0)
+        self._head_layout.addWidget(self.search_card)
+
+        # The tree: a card headed by a band with its heading, then Collapse
+        # and Expand at the band's right end, as a panel's controls are.
+        self.tree_title = _Heading("Channels / Messages / Signals")
+        self.tree_band = HeaderBand()
+        band_row = QHBoxLayout(self.tree_band)
+        band_row.setContentsMargins(6, 0, 2, 0)
+        band_row.setSpacing(2)
+        band_row.addWidget(self.tree_title, stretch=1)
+        band_row.addWidget(self.collapse_messages_button)
+        band_row.addWidget(self.expand_messages_button)
+        self.tree_card = Card()
+        self.tree_card.content.addWidget(self.tree_band)
+        self.tree_card.content.addWidget(self.tree, stretch=1)
+        # The room above and below the tree's card: the window sets it so the
+        # card lines up with the plot area's cards.
+        self.body = QWidget()
+        self._body_layout = QVBoxLayout(self.body)
+        self._body_layout.setSpacing(0)
+        self._tree_gap = QWidget()
+        self._below = QWidget()
+        self._body_layout.addWidget(self._tree_gap)
+        self._body_layout.addWidget(self.tree_card, stretch=1)
+        self._body_layout.addWidget(self._below)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(3, 3, 3, 3)
-        layout.addWidget(self.search_edit)
-        layout.addWidget(self.tree_header)
-
-        message_controls = QHBoxLayout()
-        message_controls.setContentsMargins(0, 0, 0, 0)
-        message_controls.addStretch(1)
-        message_controls.addWidget(self.collapse_messages_button)
-        message_controls.addWidget(self.expand_messages_button)
-        layout.addLayout(message_controls)
-        layout.addWidget(self.tree)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.head)
+        layout.addWidget(self.body, stretch=1)
+        self.place_cards()
 
         self.search_edit.textChanged.connect(self.apply_filter)
 
@@ -148,6 +211,35 @@ class SignalTreeWidget(QWidget):
         self._collapse_shortcut.activated.connect(self.collapse_messages)
         self._expand_shortcut = QShortcut(QKeySequence("Ctrl+Shift++"), self)
         self._expand_shortcut.activated.connect(self.expand_messages)
+
+    def place_cards(self, left: int = MARGIN, right: int = MARGIN, head_top: int = MARGIN,
+                    head_height: int = 0, tree_gap: int = GUTTER, below: int = MARGIN,
+                    band_height: int = 0) -> None:
+        """Where the two cards lie: the room at either side of them and
+        above the head's card, the head card's height (0: its own), the gap
+        above the tree's card and the room below it, and the height of the
+        tree's band (0: its own). The window lines the cards up with the plot
+        area's through this; on its own the panel has an even margin."""
+        def margins(layout, *values) -> None:
+            now = layout.contentsMargins()
+            if (now.left(), now.top(), now.right(), now.bottom()) != values:
+                layout.setContentsMargins(*values)
+
+        def height(widget, value: int, minimum: int) -> None:
+            if value > 0:
+                if (widget.minimumHeight(), widget.maximumHeight()) != (value, value):
+                    widget.setFixedHeight(value)
+            elif (widget.minimumHeight(), widget.maximumHeight()) != (minimum, 16777215):
+                widget.setMinimumHeight(minimum)
+                widget.setMaximumHeight(16777215)    # QWIDGETSIZE_MAX
+
+        margins(self._head_layout, left, head_top, right, 0)
+        margins(self._body_layout, left, 0, right, 0)
+        height(self.search_card, head_height, 0)
+        for gap, value in ((self._tree_gap, tree_gap), (self._below, below)):
+            if (gap.minimumHeight(), gap.maximumHeight()) != (value, value):
+                gap.setFixedHeight(max(0, value))
+        height(self.tree_band, band_height, TAB_HEIGHT)
 
     def set_payload(self, payload: dict[int | None, dict[str, list[str]]]) -> None:
         self._payload = payload

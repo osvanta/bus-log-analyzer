@@ -436,6 +436,31 @@ def test_the_settings_are_behind_the_gear_and_the_plot_has_the_room(view, qapp):
     view.settings_box.hide()
 
 
+@pytest.mark.parametrize('kind', ['scatter', 'histogram', 'residency'])
+def test_a_click_on_the_gear_opens_the_settings_under_it(qapp, kind):
+    # The gear in the view's own row, clicked as the user does: its click
+    # passes nothing on to where the box opens (gear item 11).
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from gui import xy_view
+    v = xy_view.XYView({'scatter': xy_view.SCATTER, 'histogram': xy_view.HISTOGRAM,
+                        'residency': xy_view.RESIDENCY}[kind])
+    v.set_signals(_signals())
+    v.resize(500, 400)
+    v.show()
+    qapp.processEvents()
+    gear = v.settings_button
+    QTest.mouseClick(gear, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    box = v.settings_box
+    assert box.isVisible()
+    # Under the gear (the screen's edge may nudge it a pixel or two).
+    corner = gear.mapToGlobal(QPoint(gear.width(), gear.height()))
+    assert abs(box.geometry().top() - corner.y()) <= 4
+    v.settings_box.hide()
+    v.close()
+
+
 def test_update_draws_with_the_settings_and_closes_the_box(view, qapp):
     view.show()
     view.open_settings()
@@ -690,7 +715,9 @@ def _click(menu, pos):
             held, Qt.KeyboardModifier.NoModifier))
 
 
-def test_each_view_in_views_has_a_bin_right_after_its_name(window, qapp):
+def test_each_view_in_views_has_a_bin_in_one_column_at_the_right(window, qapp):
+    # One column toward the menu's right end, clear of the longest name
+    # (feedback item 12), not each bin right after its own name.
     from gui.bin_menu import BinMenu
     panel = window.plot_panel
     window.resize(1400, 800)
@@ -721,12 +748,15 @@ def test_each_view_in_views_has_a_bin_right_after_its_name(window, qapp):
                  for y in range(int((geometry.top() + 2) * ratio),
                                 int((geometry.bottom() - 1) * ratio))
                  if plain.pixelColor(x, y) != background]
-        # Just after the name as the style draws it, clear of it.
-        assert drawn and 0 < area.left() * ratio - max(drawn) <= (menu.BIN_GAP + 6) * ratio
-    # After the name, so a short name's bin is further left.
-    assert menu.bin_area(rows[0]).left() < menu.bin_area(rows[2]).left()
-    # Room for the longest name's bin, whatever else is in the menu.
+        # Clear of the name as the style draws it, a whole gap past it.
+        assert drawn and area.left() * ratio - max(drawn) >= menu.BIN_GAP * ratio
+        # At the row's right end, inside the row and its highlight.
+        assert area.right() == geometry.right() - menu.BIN_RIGHT
+    # One column: a short name's bin lies where the longest name's does.
+    assert len({menu.bin_area(row).left() for row in rows}) == 1
+    # Room for the longest name's gap and bin, whatever else is in the menu.
     assert menu.sizeHint().width() >= (menu.text_left() + menu.BIN_GAP + menu.BIN_AREA
+                                       + menu.BIN_RIGHT
                                        + menu.fontMetrics().horizontalAdvance(long_name))
     # Its tooltip names what it deletes.
     from PySide6.QtCore import QEvent
@@ -813,4 +843,51 @@ def test_its_header_is_a_band_the_title_covers_exactly(window, qapp):
     gear, title_gear = view.settings_button, place.settings_button
     assert on_screen(title_gear).center().y() == on_screen(gear).center().y()
     area.peek(None)
+
+
+def _plotted_area(plot):
+    """Where the plot draws its data, in the plot widget."""
+    return plot.mapFromScene(plot.getPlotItem().vb.sceneBoundingRect()).boundingRect()
+
+
+def _point_at(plot, inside: bool) -> None:
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QEnterEvent
+    from PySide6.QtWidgets import QApplication
+    where = QPointF(20, 20)
+    QApplication.sendEvent(plot.viewport(), QEnterEvent(where, where, where) if inside
+                           else QEvent(QEvent.Type.Leave))
+
+
+def test_the_colour_scale_is_a_thin_bar_inside_the_plot(view, qapp):
+    # It takes no row: the plot reaches the foot of the view, and the bar
+    # lies along the plotted area's right edge, high at its top.
+    from gui.xy_view import _SCALE_COLORS
+    view.resize(600, 400)
+    view.show()
+    view.choose('color', 'C')
+    qapp.processEvents()
+    plot, scale = view.plot, view.scale
+    assert scale.parentWidget() is plot and scale.isVisible()
+    assert plot.geometry().bottom() == view.height() - 1
+    area, bar = _plotted_area(plot), scale.geometry()
+    assert area.contains(bar)
+    assert area.right() - bar.right() <= 8 and bar.top() - area.top() <= 8
+    assert bar.height() >= area.height() - 16 and bar.width() < area.width() / 4
+    assert scale.ends() == ('100', '60')
+
+    def distance(one, other):
+        return sum(abs(a - b) for a, b in zip(one.getRgb()[:3], other.getRgb()[:3]))
+
+    from PySide6.QtGui import QColor
+    image = scale.grab().toImage()
+    ratio = image.devicePixelRatio()
+    middle = int(scale.bar_rect().center().x() * ratio)
+    top = image.pixelColor(middle, 1)
+    foot = image.pixelColor(middle, int(scale.height() * ratio) - 2)
+    assert distance(top, QColor(_SCALE_COLORS[-1])) <= 30
+    assert distance(foot, QColor(_SCALE_COLORS[0])) <= 30
+    # The points under it are still clicked: it lets the pointer through.
+    from PySide6.QtCore import Qt
+    assert scale.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 

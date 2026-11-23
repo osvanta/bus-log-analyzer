@@ -44,7 +44,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QDockWidget,
-    QSplitter,
     QHeaderView,
     QAbstractItemView,
 )
@@ -96,9 +95,9 @@ from gui.plot_tabs import (
     signal_entries,
 )
 from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
-from gui.panel_area import layout_keys
+from gui.panel_area import GUTTER, gutter_splitter, layout_keys
 from gui.plot_widget import PlotPanel
-from gui.signal_tree import SignalTreeWidget
+from gui.signal_tree import MARGIN as SIGNAL_PANEL_MARGIN, SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
 from gui.raw_frame_dialog import RawFrameDialog
 from gui.load_debug_window import LoadDebugWindow, LoadDebugWorker
@@ -418,6 +417,8 @@ class MainWindow(QMainWindow):
         signal table's columns, the line mode and Rectangle Zoom.
         """
         panel = PlotPanel()
+        # The signal panel's tree band is as high as this tab's time plot band.
+        panel.plot_header.installEventFilter(self)
         panel.set_tag(self._plot_tag)
         columns = read_setting(self._user_settings_path, 'signal_table_columns', {})
         panel.set_column_choices(columns if isinstance(columns, dict) else {})
@@ -429,7 +430,6 @@ class MainWindow(QMainWindow):
             panel._name_show_channel = shown._name_show_channel
             panel._name_show_message = shown._name_show_message
             panel.set_table_column_widths(shown.table_column_widths())
-            panel.table.horizontalHeader().setMinimumHeight(self._table_header_height)
             panel.set_measurement_file(self._plotted_file)
             panel.set_status_overlay(*self._status_overlay)
             panel.set_stacked(True)
@@ -589,11 +589,11 @@ class MainWindow(QMainWindow):
         self.btn_layout = MenuButton(self._fill_layout_menu)
         self.btn_layout.setToolTip('Plot layout: one plot, one plot with an axis per signal,\n'
                                    'a row per signal, or rows you group')
-        self.btn_markers = MenuButton(self._fill_markers_menu)
+        self.btn_markers = MenuButton(self._fill_markers_menu, menu_type=BinMenu)
         self.btn_markers.setIcon(plot_icon('markers'))
         self.btn_markers.setIconSize(self.btn_fit.iconSize())
         self.btn_markers.setAccessibleName('Markers')
-        self.btn_markers.setToolTip('Markers: add one at Cursor 1 (M), or delete markers')
+        self.btn_markers.setToolTip('Markers: add one at Cursor 1 (M), go to one, or delete them')
         self.btn_display = MenuButton(self._fill_display_menu)
         self.btn_display.setText('Display' + MENU_MARK)
         self.btn_display.setToolTip('Display: step or straight lines, data points, hide the lines')
@@ -671,16 +671,18 @@ class MainWindow(QMainWindow):
         self.plot_tabs.signalsMoved.connect(self._move_signals_to_tab)
         self.plot_tabs.tabClosing.connect(self._on_tab_closing)
 
-        # The plot buttons sit above the plot only, level with the signal
-        # table's header, so the table runs the full height of the panel.
-        # Buttons that do not fit the plot's width move into a "»" menu.
+        # The plot buttons sit above the plot only. The signal table beside
+        # them starts lower, level with the time plot's card, and its header
+        # is as tall as the plot's band, so its first row starts level with
+        # the plot (gui.plot_widget). Buttons that do not fit the plot's
+        # width move into a "»" menu.
         plot_column = QWidget()
         plot_column_layout = QVBoxLayout(plot_column)
         plot_column_layout.setContentsMargins(0, 0, 0, 0)
         plot_column_layout.setSpacing(0)
         plot_column_layout.addWidget(self.plot_button_row)
         plot_column_layout.addWidget(self.plot_tabs.plots, stretch=1)
-        self._level_plot_buttons_with_table_header()
+        self.plot_button_row.setFixedHeight(self.plot_button_row.sizeHint().height())
 
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
@@ -689,7 +691,9 @@ class MainWindow(QMainWindow):
         # The tabs, over the signal table and the plot they switch.
         center_layout.addWidget(self.plot_tabs.strip)
 
-        self.center_splitter = QSplitter(Qt.Orientation.Horizontal)
+        # The gap between the table's card and the plot's is the panels'
+        # gutter, as between the panels themselves.
+        self.center_splitter = gutter_splitter(Qt.Orientation.Horizontal)
         self.center_splitter.setChildrenCollapsible(False)
         self.center_splitter.addWidget(self.plot_tabs.tables)
         self.center_splitter.addWidget(plot_column)
@@ -706,6 +710,11 @@ class MainWindow(QMainWindow):
         self.left_dock.setWidget(self.signal_tree)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.left_dock)
 
+        # The log panel folds to its title line, one line at the foot of the
+        # window, and opens as the user last left it: folded at first. Its
+        # height while open is kept for the next time it opens.
+        self._log_open = bool(read_setting(self._user_settings_path, 'log_panel_open', False))
+        self._log_height = self._LOG_HEIGHT
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.addTab(self.log_box, 'Log')
         self.bottom_tabs.addTab(self.diagnostics_box, 'Diagnostics')
@@ -717,16 +726,13 @@ class MainWindow(QMainWindow):
         self.bottom_dock.setWidget(self.bottom_tabs)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.bottom_dock)
 
-        self.resizeDocks([self.bottom_dock], [180], Qt.Orientation.Vertical)
+        self.resizeDocks([self.bottom_dock], [self._LOG_HEIGHT], Qt.Orientation.Vertical)
 
         # Each panel's title row carries its name only: the handle on the
-        # panel's edge (below) shows and hides it.
-        left_title = QWidget()
-        left_title_layout = QHBoxLayout(left_title)
-        left_title_layout.setContentsMargins(4, 2, 4, 2)
-        left_title_layout.addWidget(QLabel('Decoded Signals'))
-        left_title_layout.addStretch(1)
-        self.left_dock.setTitleBarWidget(left_title)
+        # panel's edge (below) shows and hides it. The signal panel's is its
+        # head, a card with its name over the search box, so the name still
+        # drags the panel (gui.signal_tree).
+        self.left_dock.setTitleBarWidget(self.signal_tree.head)
 
         bottom_title = QWidget()
         bottom_title_layout = QHBoxLayout(bottom_title)
@@ -734,6 +740,7 @@ class MainWindow(QMainWindow):
         bottom_title_layout.addWidget(QLabel('Log / Diagnostics / Measurement'))
         bottom_title_layout.addStretch(1)
         self.bottom_dock.setTitleBarWidget(bottom_title)
+        self._set_log_open(self._log_open, save=False)
 
         self.left_dock.visibilityChanged.connect(self._sync_panel_toggle_buttons)
         self.bottom_dock.visibilityChanged.connect(self._sync_panel_toggle_buttons)
@@ -750,6 +757,13 @@ class MainWindow(QMainWindow):
         # The handles follow the plot area whenever a panel is shown, hidden,
         # moved or resized.
         center_panel.installEventFilter(self)
+        # The signal panel's cards follow the plot area's cards, and each
+        # tab's time plot band (_new_plot_panel): a tab coming into view shows
+        # its band.
+        for watched in (self.plot_tabs.plots, self.plot_tabs.strip, self.left_dock):
+            watched.installEventFilter(self)
+        self.left_dock.topLevelChanged.connect(lambda *_: self._line_up_signal_panel())
+        self.left_dock.dockLocationChanged.connect(lambda *_: self._line_up_signal_panel())
 
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
@@ -774,25 +788,6 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.brand_logo)
         leave_logo_unframed(self.statusBar())
         self._sync_panel_toggle_buttons()
-
-    def _level_plot_buttons_with_table_header(self) -> None:
-        """Give the plot buttons and the signal table's header one height,
-        so the plot starts level with the table's first row."""
-        table = self.plot_panel.table
-        header = table.horizontalHeader()
-        # Polish first so the sizes include the table's style sheet.
-        table.ensurePolished()
-        self.plot_button_row.ensurePolished()
-        frame = table.frameWidth()
-        # The plot panel's margin lies between the buttons and the plot, so
-        # the header is that much taller than the buttons' row.
-        gap = self.plot_panel.layout().contentsMargins().top()
-        height = max(self.plot_button_row.sizeHint().height(),
-                     header.sizeHint().height() + frame - gap)
-        self.plot_button_row.setFixedHeight(height)
-        # Every tab's table header, as its tab is added.
-        self._table_header_height = height + gap - frame
-        header.setMinimumHeight(self._table_header_height)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar('Main')
@@ -1947,15 +1942,28 @@ class MainWindow(QMainWindow):
         add.setEnabled(self.btn_cursor1.isChecked())
         add.setToolTip('' if add.isEnabled() else 'Switch Cursor 1 on first')
         menu.addSeparator()
-        if not self.plot_panel.markers():
+        panel = self.plot_panel
+        if not panel.markers():
             menu.addAction('Delete markers').setEnabled(False)
             return
-        # Delete all, then each marker to delete it alone.
-        delete = self.plot_panel.delete_markers_menu()
-        delete.setParent(menu)
-        delete.hide()
-        for action in delete.actions():
-            menu.addAction(action)
+        delete_all = menu.addAction(f'Delete all markers ({len(panel.markers())})',
+                                    lambda *_: panel.remove_all_markers())
+        menu.addSeparator()
+
+        def delete(marker) -> None:
+            panel.remove_marker(marker)
+            left = len(panel.markers())
+            delete_all.setText(f'Delete all markers ({left})' if left else 'Delete markers')
+            delete_all.setEnabled(bool(left))
+
+        # A row per marker goes to it, as Go to marker does; its bin deletes
+        # it, and the menu stays open on the rest (gui.bin_menu).
+        for marker in panel.markers():
+            row = menu.addAction(f'{marker.name}  ·  {marker.time:.3f} s',
+                                 lambda *_, m=marker: panel.go_to_marker(m))
+            row.setToolTip(f'Go to {marker.name}')
+            if isinstance(menu, BinMenu):
+                menu.add_bin(row, lambda m=marker: delete(m), f'Delete {marker.name}')
 
     def _fill_display_menu(self, menu: QMenu) -> None:
         step = self.plot_panel.step_lines()
@@ -3923,13 +3931,50 @@ class MainWindow(QMainWindow):
         self.left_dock.setVisible(not self.left_dock.isVisible())
         self._sync_panel_toggle_buttons()
 
+    #: The log panel's height when it first opens, and the least it keeps.
+    _LOG_HEIGHT = 180
+    _LOG_LEAST_HEIGHT = 80
+
     def _toggle_bottom_panel(self) -> None:
-        self.bottom_dock.setVisible(not self.bottom_dock.isVisible())
+        """The log panel's handle: open the panel, or fold it to its title line."""
+        if not self.bottom_dock.isVisible():
+            self.bottom_dock.show()
+            self._set_log_open(True)
+        else:
+            self._set_log_open(not self._log_open)
         self._sync_panel_toggle_buttons()
+
+    def log_panel_open(self) -> bool:
+        """The log panel is open, not folded to its title line."""
+        return self._log_open and self.bottom_dock.isVisible()
+
+    def _set_log_open(self, open_: bool, save: bool = True) -> None:
+        """Open the log panel, or fold it to its title line; remembered for
+        the next start."""
+        dock = self.bottom_dock
+        if self._log_open and not open_ and dock.isVisible() and not dock.isFloating():
+            self._log_height = max(dock.height(), self._LOG_LEAST_HEIGHT)
+        self._log_open = bool(open_)
+        # Folded, its tabs keep their place with no height: hidden, they
+        # would leave the panel only as wide as its title.
+        self.bottom_tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Preferred if self._log_open else QSizePolicy.Policy.Ignored)
+        if self._log_open:
+            dock.setMinimumHeight(0)
+            dock.setMaximumHeight(16777215)    # QWIDGETSIZE_MAX
+            self.resizeDocks([dock], [self._log_height], Qt.Orientation.Vertical)
+        else:
+            dock.setFixedHeight(dock.titleBarWidget().sizeHint().height())
+        if save:
+            try:
+                write_setting(self._user_settings_path, 'log_panel_open', self._log_open)
+            except OSError:
+                pass
 
     def _sync_panel_toggle_buttons(self) -> None:
         left_visible = self.left_dock.isVisible()
-        bottom_visible = self.bottom_dock.isVisible()
+        bottom_visible = self.log_panel_open()
         self.left_edge_btn.setToolTip(
             'Hide the signal panel' if left_visible else 'Show the signal panel')
         self.bottom_edge_btn.setToolTip(
@@ -3982,14 +4027,53 @@ class MainWindow(QMainWindow):
             middle = self.rect().center().x()
         bottom.move(middle - bottom.width() // 2, y)
         hide, show = (Arrow.UpArrow, Arrow.DownArrow) if on_top else (Arrow.DownArrow, Arrow.UpArrow)
-        bottom.set_arrow(hide if self.bottom_dock.isVisible() else show)
+        bottom.set_arrow(hide if self.log_panel_open() else show)
         bottom.raise_()
 
     def eventFilter(self, watched, event) -> bool:
         if (watched is self.centralWidget()
                 and event.type() in (QEvent.Type.Resize, QEvent.Type.Move)):
             self._position_panel_toggle_buttons()
+        if (event.type() in (QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show,
+                             QEvent.Type.Hide)
+                and hasattr(self, 'left_dock')      # not while the window is built
+                and (watched in (self.plot_tabs.plots, self.plot_tabs.strip, self.left_dock)
+                     or watched is getattr(self.plot_tabs.current(), 'plot_header', None))):
+            self._line_up_signal_panel()
         return super().eventFilter(watched, event)
+
+    def _line_up_signal_panel(self) -> None:
+        """Line the signal panel's two cards up with the plot area's
+        (gui.signal_tree). The head's card starts level with the plot tabs
+        and ends a gutter above the table's and plot's cards; the tree's card
+        is level with those cards, top and bottom, and its band is as high as
+        the time plot's. Floating, the panel keeps its own even margin."""
+        tree, dock = self.signal_tree, self.left_dock
+        panel = self.plot_tabs.current()
+        cards = panel.panels if panel is not None else None
+        if (not self.isVisible() or not dock.isVisible() or dock.isFloating()
+                or cards is None or not cards.isVisible()):
+            tree.place_cards()
+            return
+
+        def top(widget) -> int:
+            return widget.mapTo(self, QPoint(0, 0)).y()
+
+        # Its outer side keeps the window's margin; the side toward the plot
+        # area has none, as the gap there holds the panel's handle.
+        on_right = self.dockWidgetArea(dock) == Qt.DockWidgetArea.RightDockWidgetArea
+        left, right = (0, SIGNAL_PANEL_MARGIN) if on_right else (SIGNAL_PANEL_MARGIN, 0)
+        strip_top, cards_top = top(self.plot_tabs.strip), top(cards)
+        # Too little room for its name and the search box: the head's card
+        # starts higher, still a gutter above the tree's.
+        head_height = max(cards_top - GUTTER - strip_top,
+                          tree.search_card.minimumSizeHint().height())
+        body = tree.body
+        tree.place_cards(left, right,
+                         head_top=max(0, cards_top - GUTTER - head_height - top(dock)),
+                         head_height=head_height,
+                         below=max(0, top(body) + body.height() - cards_top - cards.height()),
+                         band_height=panel.plot_header.height())
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
