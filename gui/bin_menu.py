@@ -5,11 +5,12 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-A menu whose rows can carry a waste bin right after their text: a click on the
-bin deletes what the row stands for, a marker or a view, and takes the row
-out. The menu stays open on the rest, so several go in a row of clicks;
-Delete deletes the highlighted row's. The bin turns red under the pointer,
-and its tooltip names what it deletes.
+A menu whose rows can carry a waste bin, in one column toward the menu's right
+side, clear of the longest text: a click on the bin deletes what the row
+stands for, a marker or a view, and takes the row out. The menu stays open on
+the rest, so several go in a row of clicks; Delete deletes the highlighted
+row's. The bin turns red under the pointer, and its tooltip names what it
+deletes.
 """
 from __future__ import annotations
 
@@ -23,11 +24,13 @@ from gui.plot_icons import drawing_pixmap
 
 
 class BinMenu(QMenu):
-    """A menu with a waste bin after the text of the rows given add_bin()."""
+    """A menu with a waste bin, in a column at its right, on the rows given
+    add_bin()."""
 
     BIN = 16                  # the bin's side, in pixels
     BIN_AREA = 24             # its click target's width; the row's height high
-    BIN_GAP = 6               # from the end of the text to the click target
+    BIN_GAP = 24              # at least, from the longest text to the bins' column
+    BIN_RIGHT = 6             # from the bins' column to the row's right end
     BIN_HOT = '#c62828'       # behind the bin under the pointer, drawn white
     #: Where a row's text starts, from the row's left; None: as the style
     #: draws it, measured once.
@@ -46,6 +49,26 @@ class BinMenu(QMenu):
     def add_bin(self, action: QAction, delete: Callable[[], None], tip: str) -> None:
         """Give action's row a bin that calls delete; tip names what it deletes."""
         self._bins[action] = (delete, tip)
+        if self.testAttribute(Qt.WidgetAttribute.WA_WState_Polished):
+            self._make_room()
+
+    def _make_room(self) -> None:
+        # A menu's rows are as wide as their texts, or as its least width
+        # allows: that width keeps room past the longest text for the gap and
+        # the bins' column, so each bin lies inside its row, under its
+        # highlight. Set before the rows are laid out: at Polish, as the menu
+        # first opens, or as a bin is added.
+        if not self._bins:
+            return
+        style = self.style()
+        frame = 2 * (style.pixelMetric(QStyle.PixelMetric.PM_MenuPanelWidth, None, self)
+                     + style.pixelMetric(QStyle.PixelMetric.PM_MenuHMargin, None, self))
+        margins = self.contentsMargins()
+        need = (max(self._text_end(action) for action in self._bins)
+                + self.BIN_GAP + self.BIN_AREA + self.BIN_RIGHT)
+        least = need + frame + margins.left() + margins.right() + 2
+        if self.minimumWidth() < least:
+            self.setMinimumWidth(least)
 
     def bin_rows(self) -> list[QAction]:
         return list(self._bins)
@@ -86,18 +109,19 @@ class BinMenu(QMenu):
         return self.text_left() + self.fontMetrics().horizontalAdvance(action.text())
 
     def bin_area(self, action: QAction) -> QRect:
-        """Just after the text of action's row: the bin, and its click target."""
+        """Action's bin and its click target: in the bins' column at the
+        row's right end, so every row's bin lies at the same place."""
         row = self.actionGeometry(action)
-        return QRect(row.left() + self._text_end(action) + self.BIN_GAP, row.top(),
+        return QRect(row.right() + 1 - self.BIN_RIGHT - self.BIN_AREA, row.top(),
                      self.BIN_AREA, row.height())
 
     def sizeHint(self) -> QSize:
         hint = super().sizeHint()
         if not self._bins:
             return hint
-        # Room past the longest text for its bin.
+        # Room past the longest text for the gap and the bins' column.
         need = max(self._text_end(action) for action in self._bins) \
-            + self.BIN_GAP + self.BIN_AREA + 6
+            + self.BIN_GAP + self.BIN_AREA + self.BIN_RIGHT
         return QSize(max(hint.width(), need), hint.height())
 
     def delete_row(self, action: QAction) -> None:
@@ -185,6 +209,12 @@ class BinMenu(QMenu):
         super().keyPressEvent(event)
 
     def event(self, event) -> bool:
+        if event.type() == QEvent.Type.Polish:
+            # Its font and style are final now: measure again.
+            handled = super().event(event)
+            self._text_left = self.TEXT_LEFT
+            self._make_room()
+            return handled
         if event.type() == QEvent.Type.ToolTip:
             action = self._bin_row_at(event.pos())
             if action is not None:

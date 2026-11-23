@@ -71,7 +71,8 @@ def test_the_residency_map_is_a_view_of_its_own_with_its_own_settings(qapp):
     v.set_signals(_signals())
     v.show()
     qapp.processEvents()
-    assert v.view() == RESIDENCY and v.res_plot.isVisible() and v.readout.isVisible()
+    assert v.view() == RESIDENCY and v.res_plot.isVisible()
+    assert not v.readout.isVisible()                      # drawn over the plot while pointed at
     assert v.plot is None and v.hist_plot is None
     # Copy and CSV are on its top row, beside the gear; the settings behind it.
     assert v.copy_button.isVisible() and v.export_button.isVisible()
@@ -394,4 +395,47 @@ def test_the_hint_and_a_reading_take_one_line(view, qapp):
     reading = view.readout.text()
     assert reading.startswith('20 to 40') and view.readout.toolTip() == reading
     assert view.readout.height() < 2 * view.readout.fontMetrics().height()
+
+
+def _plotted_area(plot):
+    """Where the plot draws its data, in the plot widget."""
+    return plot.mapFromScene(plot.getPlotItem().vb.sceneBoundingRect()).boundingRect()
+
+
+def _point_at(plot, inside: bool) -> None:
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QEnterEvent
+    from PySide6.QtWidgets import QApplication
+    where = QPointF(20, 20)
+    QApplication.sendEvent(plot.viewport(), QEnterEvent(where, where, where) if inside
+                           else QEvent(QEvent.Type.Leave))
+
+
+def test_the_scale_and_the_reading_share_the_plot_without_overlapping(view, qapp):
+    view.show()
+    qapp.processEvents()
+    plot = view.res_plot
+    assert plot.geometry().bottom() == view.height() - 1     # no rows under the map
+    _point_at(plot, True)
+    reading, scale = view.readout.geometry(), view.scale.geometry()
+    assert view.readout.isVisible() and view.scale.isVisible()
+    assert reading.right() < scale.left()
+    area = _plotted_area(plot)
+    assert area.contains(reading) and area.contains(scale)
+    _point_at(plot, False)
+
+
+def test_a_message_over_the_map_stays_a_while(view, qapp):
+    from PySide6.QtTest import QTest
+    view.show()
+    qapp.processEvents()
+    assert view._message_timer.interval() >= 3000
+    view.copy_table()
+    # Shown though the pointer is on the Copy button, not on the map.
+    assert view.readout.isVisible() and view.readout.text().startswith('Table copied')
+    view._message_timer.setInterval(20)
+    view.copy_table()
+    QTest.qWait(80)
+    assert not view.readout.isVisible()
+    assert view.readout.text().startswith('Point at a cell')
 

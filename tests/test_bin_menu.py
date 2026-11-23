@@ -24,13 +24,36 @@ def test_the_menu_makes_room_for_a_bin_after_the_longest_text(qapp):
     longest = menu.addAction('A rather longer name')
     menu.add_bin(longest, lambda: None, 'Delete it')
     need = (menu.text_left() + menu.fontMetrics().horizontalAdvance(longest.text())
-            + menu.BIN_GAP + menu.BIN_AREA)
+            + menu.BIN_GAP + menu.BIN_AREA + menu.BIN_RIGHT)
     assert menu.sizeHint().width() >= need
     plain = BinMenu()
     plain.setStyleSheet(_TIGHT)
     plain.addAction('Short')
     plain.addAction('A rather longer name')
     assert plain.sizeHint().width() < need                 # the style left none
+
+
+def test_the_bins_line_up_in_a_column_at_the_right_clear_of_the_names(qapp):
+    # Not each right after its own name (feedback item 12): one column,
+    # toward the menu's right end, a clear gap past the longest name.
+    from gui.bin_menu import BinMenu
+    menu = BinMenu()
+    rows = [menu.addAction(name) for name in ('XY plot', 'Histogram', 'XY plot 3')]
+    for row in rows:
+        menu.add_bin(row, lambda: None, f'Delete {row.text()}')
+    menu.addAction('Add XY plot')
+    menu.ensurePolished()
+    menu.adjustSize()
+    menu.show()
+    qapp.processEvents()
+    areas = [menu.bin_area(row) for row in rows]
+    assert len({area.left() for area in areas}) == 1                    # one column
+    first = menu.actionGeometry(rows[0])
+    assert areas[0].right() == first.right() - menu.BIN_RIGHT            # at the right
+    longest = max(menu.text_left() + menu.fontMetrics().horizontalAdvance(row.text())
+                  for row in rows)
+    assert areas[0].left() - (first.left() + longest) >= menu.BIN_GAP    # clear gap
+    menu.hide()
 
 
 def test_delete_deletes_the_highlighted_rows_thing(qapp):

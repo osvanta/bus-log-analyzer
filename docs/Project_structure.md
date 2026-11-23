@@ -43,15 +43,15 @@ bus-log-analyzer/
 ├── gui/
 │   ├── main_window.py            # MainWindow, top row, config save/load, plot_finding()
 │   ├── load_worker.py            # LoadWorker (QThread): native MDF arrays + batched CAN-raw vectorized decode paths
-│   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Hex, Δ C2−C1, statistics) and headed by the time plot's name, Table view, measurement events; its tab's panels in a PanelArea
+│   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Hex, Δ C2−C1, statistics) and headed by the time plot's name, Table view, measurement events; its tab's panels in a PanelArea, the time plot's card headed by a band with the cursor readout, the signal table a card level with it
 │   ├── plot_tabs.py              # PlotTabs: tabs of plots, each with its own PlotPanel; drop and move signals between tabs, synchronized time and cursors, tabs (and their panels) in configurations
-│   ├── panel_area.py             # PanelArea: a tab's panels (time plot, Table, XY views, CAN Trace) tiled by splitters or tabbed together, each drawn as a card with even gaps between, a panel's header row a HeaderBand; titles drawn as plot tabs, shown at a panel's top edge on hover or always; maximise, close and reopen where it was, undock to an own window and dock back (✕ closes), rename in place; layouts in configurations
+│   ├── panel_area.py             # PanelArea: a tab's panels (time plot, Table, XY views, CAN Trace) tiled by splitters or tabbed together, each drawn as a card with even gaps between (Card draws one for a widget beside them, gutter_splitter splits two cards with the same gap), a panel's header row a HeaderBand; titles drawn as plot tabs, shown at a panel's top edge on hover or always; maximise, close and reopen where it was, undock to an own window and dock back (✕ closes), rename in place; layouts in configurations
 │   ├── tab_drawing.py            # The plot tabs' drawing (outlined tab, curving feet, small raised "x"), shared by the plot tabs and the panels' titles
 │   ├── stack_sections.py         # MultiStack: the signal table split into one section per stack, level with it (filtered views of the table's model), a line between stacks
 │   ├── plot_tag.py               # The user's tag under the signal table: their text, user name and date, kept beside the application
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
 │   ├── plot_toolbar.py           # Plot toolbar parts: a button that opens a menu, the plot layouts by name
-│   ├── xy_view.py                # XY views, each a panel of one kind, as many per tab as wanted: XY plot (one signal against another, coloured by a third; a click places Cursor 1), histogram (one signal's time at each value), residency map (two signals' time per grid cell); follow the time shown, mark the cursors, a clicked bar or cell is shaded on the plot; settings behind a gear, applied by Update
+│   ├── xy_view.py                # XY views, each a panel of one kind, as many per tab as wanted: XY plot (one signal against another, coloured by a third; a click places Cursor 1), histogram (one signal's time at each value), residency map (two signals' time per grid cell); follow the time shown, mark the cursors, a clicked bar or cell is shaded on the plot; settings behind a gear, applied by Update; colour scale and pointed-at reading drawn over the plot
 │   ├── measurement_info.py       # File ▸ Measurement info dialog
 │   ├── load_debug_window.py      # Session-only plain-text window for measurement load forensics (Debug mode)
 │   ├── signal_properties_dialog.py # Right-click a signal ▸ Properties window: Signal and Value table tabs, Copy
@@ -60,9 +60,9 @@ bus-log-analyzer/
 │   ├── overflow_row.py           # OverflowButtonRow: plot buttons that do not fit move into a "»" menu
 │   ├── edge_tab.py               # EdgeTab: the small flat handle on a panel edge that shows or hides it
 │   ├── plot_icons.py             # Monochrome plot button icons, drawn from SVG in the palette's text colour
-│   ├── bin_menu.py               # BinMenu: a menu whose rows carry a waste bin right after their text that deletes what the row stands for (Go to marker, the views in Views ▾); stays open on the rest, Delete deletes the highlighted row
+│   ├── bin_menu.py               # BinMenu: a menu whose rows carry a waste bin, in one column at its right clear of the longest text, that deletes what the row stands for (Go to marker, the markers button's menu, the views in Views ▾); stays open on the rest, Delete deletes the highlighted row
 │   ├── brand_logo.py             # BrandLogo: the Osvanta logo at the status bar's right end, in the light or dark theme's colours
-│   ├── signal_tree.py            # SignalTreeWidget with live search
+│   ├── signal_tree.py            # SignalTreeWidget with live search, in two cards drawn as the panels are: its name over the search box (the dock's title row), and the tree under a band with Collapse and Expand; the window lines them up with the plot area (place_cards)
 │   ├── raw_frame_dialog.py       # Sliding-window CAN/LIN Trace (RawFrameStore, no cap), a panel of a plot tab; Δt, changed-byte highlight, follows plot Cursor 1
 │   ├── dbc_manager.py            # Database Manager dialog: per-bus-channel DBC/ARXML/LDF, match quality bars
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen

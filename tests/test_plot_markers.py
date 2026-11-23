@@ -277,7 +277,10 @@ def test_the_bins_are_drawn_where_they_are_clicked_and_light_up_under_the_pointe
     go_to.hide()
 
 
-def test_each_bin_sits_just_after_its_rows_text(panel):
+def test_the_bins_sit_in_one_column_clear_of_the_longest_text(panel):
+    # One column toward the right, not each bin right after its own name
+    # (feedback item 12).
+    from gui.bin_menu import BinMenu
     panel.add_marker(1.0)                                     # short: M1
     panel.add_marker(123456.789, 'A rather long marker name')
     menu, go_to = _open_go_to(panel)
@@ -291,12 +294,12 @@ def test_each_bin_sits_just_after_its_rows_text(panel):
         geometry, area = go_to.actionGeometry(row), go_to.bin_area(row)
         top, bottom = geometry.top() + 1, geometry.bottom()
         text_end = max(x for x in range(geometry.left(), area.left()) if lit(x, top, bottom))
-        assert 0 < area.left() - text_end <= 12            # beside the text ...
+        assert area.left() - text_end >= BinMenu.BIN_GAP // 2   # well clear of the text ...
         assert not any(lit(x, top, bottom) for x in range(area.left(), area.left() + 4))
-        assert any(lit(x, top, bottom) for x in range(area.left(), area.right()))   # ... not over it
-        assert area.right() <= geometry.right()            # and inside the row
+        assert any(lit(x, top, bottom) for x in range(area.left(), area.right()))   # ... drawn
+        assert area.right() == geometry.right() - BinMenu.BIN_RIGHT  # at the row's right
     short, long_ = go_to.actions()
-    assert go_to.bin_area(short).left() < go_to.bin_area(long_).left()
+    assert go_to.bin_area(short).left() == go_to.bin_area(long_).left()   # one column
     go_to.hide()
 
 

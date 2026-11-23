@@ -65,7 +65,8 @@ def test_the_histogram_is_a_view_of_its_own_with_its_own_settings(qapp):
     v.set_signals(_signals())
     v.show()
     qapp.processEvents()
-    assert v.view() == HISTOGRAM and v.hist_plot.isVisible() and v.readout.isVisible()
+    assert v.view() == HISTOGRAM and v.hist_plot.isVisible()
+    assert not v.readout.isVisible()                      # drawn over the plot while pointed at
     assert v.plot is None and v.res_plot is None          # only its own plot is made
     assert not v.copy_button.isVisible() and not v.export_button.isVisible()
     assert not v.bins_edit.isVisible()                    # behind the gear
@@ -400,3 +401,58 @@ def test_a_tab_keeps_its_histogram(window):
     assert list(older.xy_views()) == ['xy'] and older.panels.is_open('xy')
     assert older.xy_views()['xy'].view() == 'histogram'
     assert older.panels.title('xy') == 'Histogram'
+
+
+def _plotted_area(plot):
+    """Where the plot draws its data, in the plot widget."""
+    return plot.mapFromScene(plot.getPlotItem().vb.sceneBoundingRect()).boundingRect()
+
+
+def _point_at(plot, inside: bool) -> None:
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QEnterEvent
+    from PySide6.QtWidgets import QApplication
+    where = QPointF(20, 20)
+    QApplication.sendEvent(plot.viewport(), QEnterEvent(where, where, where) if inside
+                           else QEvent(QEvent.Type.Leave))
+
+
+def test_the_reading_is_drawn_over_the_plot_while_the_pointer_is_on_it(view, qapp):
+    from PySide6.QtCore import QPointF, Qt
+    view.show()
+    qapp.processEvents()
+    plot, reading = view.hist_plot, view.readout
+    # No row of its own: the plot reaches the foot of the view.
+    assert reading.parentWidget() is plot
+    assert plot.geometry().bottom() == view.height() - 1
+    assert reading.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    assert not reading.isVisible()
+
+    _point_at(plot, True)
+    assert reading.isVisible() and reading.text().startswith('Point at a bar')
+    # In the plotted area's top-left corner, one line high.
+    area, box = _plotted_area(plot), reading.geometry()
+    assert area.contains(box.topLeft())
+    assert box.left() - area.left() <= 8 and box.top() - area.top() <= 8
+    assert box.height() < 2 * reading.fontMetrics().height()
+    # On a bar, what it holds; off the bars, how to read one.
+    vb = plot.getPlotItem().vb
+    outside = vb.mapViewToScene(QPointF(10_000, 0))
+    view._on_bar_hover(vb.mapViewToScene(QPointF(15, 0.1)))
+    assert reading.text().startswith('10 to 20 km/h')
+    view._on_bar_hover(outside)
+    assert reading.text().startswith('Point at a bar')
+    # After a click on a bar, off the bars shows the picked bar's reading.
+    view.pick_bar(1)
+    picked = reading.text()
+    assert picked.startswith('20 to 30 km/h')
+    view._on_bar_hover(vb.mapViewToScene(QPointF(15, 0.1)))
+    view._on_bar_hover(outside)
+    assert reading.text() == picked
+
+    _point_at(plot, False)
+    assert not reading.isVisible()
+    view.pick_bar(None)
+    _point_at(plot, True)
+    assert reading.text().startswith('Point at a bar')
+
