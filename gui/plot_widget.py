@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 from core.signal_properties import hex_text
 from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
+from core.state_lane import AUTO, LANE, LINE, build_lane, shown_as_lane
 from core.export import _column_headers
 from gui.tabular_view import TabularView
 from gui.gps_view import TRACK, TRACK_NAME, GPSView
@@ -62,6 +63,7 @@ from gui.plot_tag import TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
 from gui.stack_sections import StackSectionArea
 from gui.tab_drawing import _NameEditor
+from gui.state_lane import LANE_HEIGHT, LaneAxis, LaneItem, set_lane_view
 
 
 # A cursor is black on a light plot background and white on a dark one.
@@ -445,6 +447,8 @@ class PlottedSignal:
     multistack_id: int = -1     # MultiStack row; -1 means not assigned yet
     line_style: str = DEFAULT_LINE_STYLE   # key into LINE_STYLES
     raw_format: Any = _UNRESOLVED   # core RawFormat or None, once the Hex column asks
+    show_as: str = AUTO         # '' the signal decides, 'lane' or 'line' the user's choice
+    lane: Any = None            # its LaneItem while drawn as a state lane
 
 
 
@@ -1119,6 +1123,16 @@ class PlotPanel(QWidget):
         # (one InfiniteLine per row — they cannot be shared across scenes)
         self._stacked_c1_lines: list[pg.InfiniteLine] = []
         self._stacked_c2_lines: list[pg.InfiniteLine] = []
+        # Stacked rows that are state lanes: the lane's key, None for curves.
+        self._stacked_lane_rows: list[str | None] = []
+        # key -> (series id, show_as, Lane or None): a signal's lane, worked
+        # out once per series.
+        self._lane_cache: dict[str, tuple[int, str, Any]] = {}
+        # The state whose stretches a lane click shaded, and which of them
+        # Cursor 1 is on; the next click on that state goes to the next one.
+        self._lane_pick: tuple[str, float] | None = None
+        self._lane_pick_index = 0
+        self._lane_click_claimed = False
         self._proxy = None          # legacy name kept; now stores the connected scene
         # Whether these hooks are connected now. They are connected only in
         # some plot modes, and disconnecting one that is not makes PySide6 warn.
@@ -1201,6 +1215,18 @@ class PlotPanel(QWidget):
             'background-color: rgba(0,0,0,110); padding: 18px; border-radius: 8px; }'
         )
         _host_layout.addWidget(self.overlay_label, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
+        # State lanes under the Multi-Axis plot, above its time axis.
+        _host_layout.setVerticalSpacing(0)
+        self.lane_strip = pg.GraphicsLayoutWidget()
+        self.lane_strip.setBackground(self._background_color)
+        self.lane_strip.ci.setContentsMargins(0, 0, 0, 0)
+        self.lane_strip.ci.setSpacing(0)
+        self.lane_strip.hide()
+        self.lane_strip.scene().sigMouseClicked.connect(self._on_strip_click)
+        _host_layout.addWidget(self.lane_strip, 1, 0)
+        self._strip_plots: list[pg.PlotItem] = []
+        self._strip_lines: list[tuple[pg.InfiniteLine, pg.InfiniteLine]] = []
+        self.plot.getAxis('left').geometryChanged.connect(self._fit_strip_axes)
 
         # ── Stacked plot (GraphicsLayoutWidget) ──────────────────────────
         self.glw = pg.GraphicsLayoutWidget()
@@ -1570,6 +1596,8 @@ class PlotPanel(QWidget):
         for index in range(1, len(rows)):
             previous_rect = rows[index - 1][0]
             next_rect, next_stack = rows[index]
+            if next_stack == rows[index - 1][1]:
+                continue   # a stack's lane under its curves, not between stacks
             boundaries.append((
                 (previous_rect.bottom() + next_rect.top()) / 2.0,
                 next_stack,
@@ -2156,6 +2184,7 @@ class PlotPanel(QWidget):
                 plotted.axis_visible = moved.axis_visible
                 plotted.own_axis = moved.own_axis
                 plotted.line_style = moved.line_style
+                plotted.show_as = moved.show_as
                 if moved.multistack_id >= 0:
                     if moved.multistack_id not in rows:
                         rows[moved.multistack_id] = (
@@ -2289,6 +2318,8 @@ class PlotPanel(QWidget):
             plotted.scatter = None
             plotted.axis = None
             plotted.view_box = None
+            plotted.lane = None
+        self._clear_lane_strip()
 
         for axis, vb in self._extra_axes:
             try:
@@ -2344,6 +2375,7 @@ class PlotPanel(QWidget):
         self._stacked_plots.clear()
         self._stacked_row_keys.clear()
         self._stacked_stack_ids.clear()
+        self._stacked_lane_rows.clear()
         try:
             self.glw.clear()
         except Exception:
@@ -2374,7 +2406,7 @@ class PlotPanel(QWidget):
                     pass
             if preserve_y_range:
                 for i, row_keys in enumerate(self._stacked_row_keys):
-                    if i >= len(self._stacked_plots) or not row_keys:
+                    if i >= len(self._stacked_plots) or not row_keys or self._is_lane_row(i):
                         continue
                     row_key = (
                         self._stacked_stack_ids[i]
@@ -2397,7 +2429,7 @@ class PlotPanel(QWidget):
                 # Multiple signals sharing a ViewBox get the same range entry.
                 _seen_ukeys: set[str] = set()
                 for key, plotted in self._items.items():
-                    if not plotted.visible:
+                    if not plotted.visible or plotted.lane is not None:
                         continue
                     ukey = self._unit_key(plotted.series.unit, key, plotted.own_axis)
                     if ukey in _seen_ukeys:
@@ -2446,7 +2478,7 @@ class PlotPanel(QWidget):
                         pass
                 if _saved_yr_by_key and self._stacked_plots:
                     for i, row_keys in enumerate(self._stacked_row_keys):
-                        if i >= len(self._stacked_plots) or not row_keys:
+                        if i >= len(self._stacked_plots) or not row_keys or self._is_lane_row(i):
                             continue
                         row_key = (
                             self._stacked_stack_ids[i]
@@ -2494,7 +2526,7 @@ class PlotPanel(QWidget):
                     # in the group gives us the right ViewBox reference).
                     _restored_groups: set[str] = set()
                     for key, plotted in self._items.items():
-                        if not plotted.visible:
+                        if not plotted.visible or plotted.lane is not None:
                             continue
                         ukey = plotted.unit_group
                         if ukey in _restored_groups or ukey not in _saved_yr_by_unit:
@@ -2518,7 +2550,7 @@ class PlotPanel(QWidget):
                     _new_vb_ranges: dict[int, list[float]] = {}
                     _new_vb_objs:   dict[int, Any]         = {}
                     for key, plotted in self._items.items():
-                        if not plotted.visible:
+                        if not plotted.visible or plotted.lane is not None:
                             continue
                         if plotted.unit_group in _saved_yr_by_unit:
                             continue
@@ -2596,11 +2628,14 @@ class PlotPanel(QWidget):
     def _rebuild_overlay(self) -> None:
         """Normal or multi-axis: all signals on one PlotWidget, extra axes to the left."""
         main_axis = self.plot.getAxis('left')
+        lanes = [key for key, plotted in self._items.items()
+                 if plotted.visible and self.lane_of(key) is not None]
+        self._build_lane_strip(lanes)
 
         if not self._multi_axis:
             # ── Single-axis mode ─────────────────────────────────────────────
             for key, plotted in self._items.items():
-                if not plotted.visible:
+                if not plotted.visible or plotted.lane is not None:
                     plotted.curve      = None
                     plotted.unit_group = ''
                     continue
@@ -2626,7 +2661,7 @@ class PlotPanel(QWidget):
         # Build ordered unit groups (insertion-order of first visible signal per unit)
         unit_groups: dict[str, list[str]] = {}
         for key, plotted in self._items.items():
-            if not plotted.visible:
+            if not plotted.visible or plotted.lane is not None:
                 continue
             ukey = self._unit_key(plotted.series.unit, key, plotted.own_axis)
             if ukey not in unit_groups:
@@ -2725,51 +2760,65 @@ class PlotPanel(QWidget):
         ``multistack_id`` and overlays every member of a row on one Y scale.
         """
         visible_keys = [key for key, item in self._items.items() if item.visible]
+        lanes = {key for key in visible_keys if self.lane_of(key) is not None}
+        # (stack, keys, the lane's key or None for a row of curves)
+        rows: list[tuple[int, list[str], str | None]] = []
         if self._multistack_mode:
             self._ensure_multistack_assignments()
             grouped: dict[int, list[str]] = {}
             for key in visible_keys:
                 stack_id = self._items[key].multistack_id
                 grouped.setdefault(stack_id, []).append(key)
-            rows = [(stack_id, grouped[stack_id]) for stack_id in sorted(grouped)]
+            for stack_id in sorted(grouped):
+                keys = grouped[stack_id]
+                curves = [key for key in keys if key not in lanes]
+                if curves:
+                    rows.append((stack_id, curves, None))
+                # A stack's lanes sit under its curves.
+                rows.extend((stack_id, [key], key) for key in keys if key in lanes)
         else:
-            rows = [(idx, [key]) for idx, key in enumerate(visible_keys)]
+            rows = [(idx, [key], key if key in lanes else None)
+                    for idx, key in enumerate(visible_keys)]
 
-        self._stacked_stack_ids = [stack_id for stack_id, _ in rows]
-        self._stacked_row_keys = [list(keys) for _, keys in rows]
+        self._stacked_stack_ids = [stack_id for stack_id, _, _ in rows]
+        self._stacked_row_keys = [list(keys) for _, keys, _ in rows]
+        self._stacked_lane_rows = [lane_key for _, _, lane_key in rows]
         n = len(rows)
         ref_plot: pg.PlotItem | None = None
 
-        for idx, (_stack_id, row_keys) in enumerate(rows):
+        for idx, (_stack_id, row_keys, lane_key) in enumerate(rows):
             first = self._items[row_keys[0]]
-            # Use custom axis: bottom-anchored, row-clipped label
-            _left_ax = _StackedLeftAxis('left')
-            p: pg.PlotItem = self.glw.addPlot(
-                row=idx, col=0,
-                axisItems={'left': _left_ax},
-                viewBox=_ZoomViewBox(self),
-            )
-            p.showGrid(x=True, y=True, alpha=0.25)
-            p.setMenuEnabled(False)
-
-            names = ', '.join(self._items[key].series.signal_name for key in row_keys)
-            units = []
-            for key in row_keys:
-                unit = (self._items[key].series.unit or '').strip()
-                if unit and unit not in units:
-                    units.append(unit)
-            if units:
-                ylabel = (
-                    f'{names}<br><span style="font-size:80%">'
-                    f'({" / ".join(units)})</span>'
-                )
+            if lane_key is not None:
+                p = self._add_lane_row(self.glw, idx, lane_key, 85)
             else:
-                ylabel = names
-            p.setLabel('left', ylabel, color=first.color)
-            p.getAxis('left').setTextPen(pg.mkPen(first.color))
-            p.getAxis('left').setWidth(85)
-            p.showAxis('right', False)
-            p.showAxis('top',   False)
+                # Use custom axis: bottom-anchored, row-clipped label
+                _left_ax = _StackedLeftAxis('left')
+                p: pg.PlotItem = self.glw.addPlot(
+                    row=idx, col=0,
+                    axisItems={'left': _left_ax},
+                    viewBox=_ZoomViewBox(self),
+                )
+                p.showGrid(x=True, y=True, alpha=0.25)
+                p.setMenuEnabled(False)
+
+                names = ', '.join(self._items[key].series.signal_name for key in row_keys)
+                units = []
+                for key in row_keys:
+                    unit = (self._items[key].series.unit or '').strip()
+                    if unit and unit not in units:
+                        units.append(unit)
+                if units:
+                    ylabel = (
+                        f'{names}<br><span style="font-size:80%">'
+                        f'({" / ".join(units)})</span>'
+                    )
+                else:
+                    ylabel = names
+                p.setLabel('left', ylabel, color=first.color)
+                p.getAxis('left').setTextPen(pg.mkPen(first.color))
+                p.getAxis('left').setWidth(85)
+                p.showAxis('right', False)
+                p.showAxis('top',   False)
 
             # X axis: tick labels only on the bottom row
             if idx < n - 1:
@@ -2785,7 +2834,7 @@ class PlotPanel(QWidget):
             else:
                 p.setXLink(ref_plot)
 
-            for key in row_keys:
+            for key in row_keys if lane_key is None else ():
                 plotted = self._items[key]
                 curve = pg.PlotDataItem()
                 p.addItem(curve)
@@ -2842,9 +2891,219 @@ class PlotPanel(QWidget):
         Qt otherwise runs only after the rows have been drawn once. Drawn at
         the old size, every row was drawn again.
         """
+        self._fix_lane_heights(self.glw, self._stacked_plots, self._stacked_lane_rows)
         for plot in self._stacked_plots:
             plot.layout.activate()
         self.glw.ci.layout.activate()
+
+    # ── State lanes ──────────────────────────────────────────────────────
+
+    def lane_of(self, key: str):
+        """The signal's lane (core.state_lane.Lane) when it is drawn as one,
+        otherwise None. Worked out once per series and choice."""
+        plotted = self._items.get(key)
+        if plotted is None:
+            return None
+        cached = self._lane_cache.get(key)
+        if cached is not None and cached[0] == id(plotted.series) \
+                and cached[1] == plotted.show_as:
+            return cached[2]
+        kind = shown_as_lane(plotted.series, plotted.show_as)
+        lane = build_lane(plotted.series, kind) if kind is not None else None
+        self._lane_cache[key] = (id(plotted.series), plotted.show_as, lane)
+        return lane
+
+    def lane_keys(self) -> list[str]:
+        """The plotted signals drawn as lanes now."""
+        return [key for key, plotted in self._items.items() if plotted.lane is not None]
+
+    def _is_lane_row(self, row: int) -> bool:
+        return row < len(self._stacked_lane_rows) and self._stacked_lane_rows[row] is not None
+
+    def _add_lane_row(self, layout, row: int, key: str, axis_width: int) -> pg.PlotItem:
+        """A lane's row at *row* of *layout*: its name on the left, the lane
+        filling the plot area."""
+        plotted = self._items[key]
+        lane = self.lane_of(key)
+        p: pg.PlotItem = layout.addPlot(
+            row=row, col=0,
+            axisItems={'left': LaneAxis(plotted.series.signal_name, plotted.color, axis_width)},
+            viewBox=_ZoomViewBox(self),
+        )
+        p.setMenuEnabled(False)
+        p.showGrid(x=True, y=False, alpha=0.25)
+        p.showAxis('right', False)
+        p.showAxis('top', False)
+        set_lane_view(p)
+        item = LaneItem(lane, on_click=lambda i, t, k=key: self._on_lane_clicked(k, i, t))
+        p.addItem(item, ignoreBounds=True)
+        plotted.lane = item
+        plotted.curve = None
+        plotted.axis = p.getAxis('left')
+        plotted.view_box = p.vb
+        plotted.unit_group = ''
+        return p
+
+    @staticmethod
+    def _fix_lane_heights(layout_widget, plots, lane_rows) -> None:
+        """Lane rows as tall as a lane, and the time axis if they carry it.
+        Set on the rows' own plots, which every rebuild makes anew, so the
+        layout itself keeps no trace once the lanes are gone."""
+        if not any(key is not None for key in lane_rows):
+            return
+        for plot, lane_key in zip(plots, lane_rows):
+            if lane_key is None:
+                # Curve rows ask for the same height, so they share what the
+                # lanes leave alike.
+                plot.setPreferredHeight(1000)
+                continue
+            bottom = plot.getAxis('bottom')
+            extra = bottom.maximumHeight() if bottom.style['showValues'] else 0.0
+            height = LANE_HEIGHT + 2 + min(float(extra), 80.0)
+            plot.setMinimumHeight(height)
+            plot.setMaximumHeight(height)
+            plot.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+    def _build_lane_strip(self, keys: list[str]) -> None:
+        """Lanes under the Multi-Axis plot, one row each in table order; the
+        last carries the time axis, so the plot above drops its own."""
+        if not keys:
+            return
+        n = len(keys)
+        main = self.plot.plotItem
+        width = max(int(self.plot.getAxis('left').width()), 55)
+        cursor_color = _cursor_color_on(self._background_color)
+        for row, key in enumerate(keys):
+            p = self._add_lane_row(self.lane_strip, row, key, width)
+            p.setXLink(main)
+            bottom = p.getAxis('bottom')
+            if row < n - 1:
+                bottom.setStyle(showValues=False)
+                bottom.setLabel('')
+                bottom.setHeight(0)
+            else:
+                p.setLabel('bottom', 'Time (seconds)')
+            c1 = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(cursor_color, width=1))
+            c2 = pg.InfiniteLine(angle=90, movable=False,
+                                 pen=pg.mkPen(cursor_color, width=1, style=Qt.PenStyle.DashLine))
+            for line in (c1, c2):
+                p.addItem(line, ignoreBounds=True)
+            self._strip_plots.append(p)
+            self._strip_lines.append((c1, c2))
+        bottom = main.getAxis('bottom')
+        bottom.setStyle(showValues=False)
+        bottom.setLabel('')
+        bottom.setHeight(0)
+        lane_rows = list(keys)
+        self._fix_lane_heights(self.lane_strip, self._strip_plots, lane_rows)
+        for plot in self._strip_plots:
+            plot.layout.activate()
+        self.lane_strip.ci.layout.activate()
+        self.lane_strip.setFixedHeight(
+            int(sum(plot.maximumHeight() for plot in self._strip_plots)) + 2)
+        self.lane_strip.show()
+        self._sync_strip_cursors()
+        QTimer.singleShot(0, self._fit_strip_axes)
+
+    def _clear_lane_strip(self) -> None:
+        if not self._strip_plots and self.lane_strip.isHidden():
+            return
+        self._strip_plots.clear()
+        self._strip_lines.clear()
+        try:
+            self.lane_strip.clear()
+        except Exception:
+            pass
+        self.lane_strip.hide()
+        bottom = self.plot.getAxis('bottom')
+        bottom.setStyle(showValues=True)
+        bottom.setHeight(None)
+        self.plot.setLabel('bottom', 'Time (seconds)')
+
+    def _fit_strip_axes(self, *_args) -> None:
+        """The strip's name column as wide as the plot's axes, so the lanes'
+        time lines up with the plot's."""
+        if not self._strip_plots:
+            return
+        width = int(round(self.plot.getAxis('left').width()))
+        for plot in self._strip_plots:
+            axis = plot.getAxis('left')
+            if int(round(axis.width())) != width:
+                axis.setWidth(width)
+
+    def _sync_strip_cursors(self) -> None:
+        for c1, c2 in self._strip_lines:
+            c1.setPos(self.v_line.value())
+            c1.setVisible(self._cursor1_enabled)
+            c2.setPos(self.v_line2.value())
+            c2.setVisible(self._cursor2_enabled)
+
+    def _on_lane_clicked(self, key: str, index: int, t: float) -> None:
+        """A click on a stretch: shade every stretch with its state and put
+        Cursor 1 at the clicked one's start. Clicking that state again goes
+        to its next stretch."""
+        lane = self.lane_of(key)
+        if lane is None or not 0 <= index < lane.size:
+            return
+        value = float(lane.values[index])
+        spans = lane.spans_of(value)
+        if not spans:
+            return
+        if self._lane_pick == (key, value):
+            position = (self._lane_pick_index + 1) % len(spans)
+        else:
+            start = float(lane.starts[index])
+            position = next((k for k, (s0, _e) in enumerate(spans) if s0 == start), 0)
+        self.set_time_spans(spans)
+        self._lane_pick = (key, value)
+        self._lane_pick_index = position
+        # The scene's own click handling must not move Cursor 1 again.
+        self._lane_click_claimed = True
+        QTimer.singleShot(0, self._release_lane_click)
+        self.plotAreaClicked.emit(float(spans[position][0]))
+
+    def _release_lane_click(self) -> None:
+        self._lane_click_claimed = False
+
+    def lane_pick(self) -> tuple[str, float] | None:
+        """The signal and state a lane click shaded, or None."""
+        return self._lane_pick
+
+    def set_series_show_as(self, keys: list[str], show_as: str) -> None:
+        """Draw these signals as lanes ('lane'), as lines ('line'), or as
+        each signal decides (''); the choice is kept per signal in the tab."""
+        if show_as not in (AUTO, LANE, LINE):
+            return
+        changed = False
+        for key in keys:
+            plotted = self._items.get(key)
+            if plotted is not None and plotted.show_as != show_as:
+                plotted.show_as = show_as
+                changed = True
+        if changed:
+            self._rebuild_curves(preserve_selection=True)
+
+    def _on_strip_click(self, event) -> None:
+        """In the lane strip a right-click opens the lane's signal menu and a
+        left-click elsewhere than a stretch places Cursor 1, as on the plot."""
+        try:
+            button = event.button()
+            pos = event.scenePos()
+        except Exception:
+            return
+        for plot in self._strip_plots:
+            if not plot.sceneBoundingRect().contains(pos):
+                continue
+            keys = [key for key in self.lane_keys()
+                    if self._items[key].view_box is plot.vb]
+            if button == Qt.MouseButton.RightButton and keys:
+                self._restore_selection(keys)
+                self._show_signal_menu(keys, QCursor.pos(),
+                                       time_s=plot.vb.mapSceneToView(pos).x())
+                event.accept()
+            elif button == Qt.MouseButton.LeftButton:
+                self._emit_plot_area_click(event, [plot.vb])
+            return
 
     # ── Curve configuration & style ──────────────────────────────────────
 
@@ -3224,6 +3483,7 @@ class PlotPanel(QWidget):
 
     def _update_cursor_labels(self) -> None:
         self._schedule_statistics()   # between the cursors, they may have moved
+        self._sync_strip_cursors()
         if self.table_view_active() and self._cursor1_enabled:
             self.tabular.select_time(self.v_line.value())
         if self.xy_view_active():
@@ -3286,8 +3546,7 @@ class PlotPanel(QWidget):
         self._event_lines = []
         if not (self.events_action.isChecked() and self._events):
             return
-        targets = (self._stacked_plots if self._stacked_mode and self._stacked_plots
-                   else [self.plot.plotItem])
+        targets = self._row_targets()
         color = _cursor_color_on(self._background_color)
         pen = pg.mkPen(color=color, width=1, style=Qt.PenStyle.DashLine)
         for plot_item in targets:
@@ -3417,8 +3676,7 @@ class PlotPanel(QWidget):
         self._marker_lines = []
         if not self._markers:
             return
-        targets = (self._stacked_plots if self._stacked_mode and self._stacked_plots
-                   else [self.plot.plotItem])
+        targets = self._row_targets()
         for marker in self._markers:
             # Named on the top row only: the name once, the line on each row.
             lines = [_MarkerLine(self, marker, named=row == 0)
@@ -3433,7 +3691,15 @@ class PlotPanel(QWidget):
     def set_time_spans(self, spans: list[tuple[float, float]]) -> None:
         """Shade these stretches of time on the plots; empty clears them."""
         self._time_spans = [(float(start), float(end)) for start, end in spans]
+        self._lane_pick = None
         self._draw_time_spans()
+
+    def _row_targets(self) -> list:
+        """Every plot a time-wide mark is drawn on: the stacked rows, or the
+        plot and the lanes under it."""
+        if self._stacked_mode and self._stacked_plots:
+            return list(self._stacked_plots)
+        return [self.plot.plotItem, *self._strip_plots]
 
     def time_spans(self) -> list[tuple[float, float]]:
         return list(self._time_spans)
@@ -3447,8 +3713,7 @@ class PlotPanel(QWidget):
         self._span_items = []
         if not self._time_spans:
             return
-        targets = (self._stacked_plots if self._stacked_mode and self._stacked_plots
-                   else [self.plot.plotItem])
+        targets = self._row_targets()
         color = QColor(_SPAN_COLOR)
         color.setAlpha(_SPAN_ALPHA)
         for plot_item in targets:
@@ -4097,6 +4362,7 @@ class PlotPanel(QWidget):
             self.plot.setXRange(x_min, x_max, padding=0.02)
             y_span = _union_range(
                 _value_range(it.series.values) for it in self._items.values()
+                if it.lane is None
             )
             if y_span is not None:
                 y_min, y_max = y_span
@@ -4263,7 +4529,7 @@ class PlotPanel(QWidget):
             y_span = _union_range(
                 _window_range(plotted.series.timestamps, plotted.series.values,
                               xr[0], xr[1])
-                for plotted in self._items.values()
+                for plotted in self._items.values() if plotted.lane is None
             )
             if y_span is not None:
                 y_min, y_max = y_span
@@ -4392,8 +4658,12 @@ class PlotPanel(QWidget):
         self._background_color = color
         self.plot.setBackground(color)
         self.glw.setBackground(color)
+        self.lane_strip.setBackground(color)
         self._apply_panel_background()
         cursor_color = _cursor_color_on(color)
+        for c1, c2 in self._strip_lines:
+            c1.setPen(pg.mkPen(cursor_color, width=1))
+            c2.setPen(pg.mkPen(cursor_color, width=1, style=Qt.PenStyle.DashLine))
         for line in (self.v_line, self.v_line2,
                      *self._stacked_c1_lines, *self._stacked_c2_lines):
             line.set_color(cursor_color)
@@ -4455,6 +4725,10 @@ class PlotPanel(QWidget):
     def _set_axis_label(self, key: str | None) -> None:
         if self._stacked_mode:
             return   # each row already has its own label
+        if key in self._items and self._items[key].lane is not None:
+            # A lane has no Y axis: the plot is named after its first curve.
+            key = next((k for k, p in self._items.items()
+                        if p.visible and p.lane is None), None)
         if not key or key not in self._items:
             self.plot.setLabel('left', 'Value')
             return
@@ -4463,7 +4737,7 @@ class PlotPanel(QWidget):
             # can distinguish single- from multi-member groups.
             axis_keys: dict[int, list[str]] = {}
             for k, p in self._items.items():
-                if p.visible and p.axis is not None:
+                if p.visible and p.axis is not None and p.lane is None:
                     axis_keys.setdefault(id(p.axis), []).append(k)
             _seen_axes: set[int] = set()
             for k, p in self._items.items():
@@ -4682,16 +4956,23 @@ class PlotPanel(QWidget):
         if self.table.height() != height:
             self.table.setFixedHeight(height)
         stacks, shown = [], set()
+        # A stack's lanes are rows under its curves; its section spans them all.
+        spans: dict[int, list[float]] = {}
         for stack_id, plot in zip(self._stacked_stack_ids, self._stacked_plots):
             try:
                 rect = self.glw.mapFromScene(plot.vb.sceneBoundingRect()).boundingRect()
             except RuntimeError:          # a row being deleted by a rebuild
                 continue
-            shown.add(stack_id)
             top = area.mapFromGlobal(self.glw.mapToGlobal(rect.topLeft())).y()
+            if stack_id in spans:
+                spans[stack_id][1] = top + rect.height()
+            else:
+                spans[stack_id] = [top, top + rect.height()]
+        for stack_id, (top, bottom) in spans.items():
+            shown.add(stack_id)
             members = [key for key, item in self._items.items()
                        if item.multistack_id == stack_id]
-            stacks.append((stack_id, members, top, rect.height()))
+            stacks.append((stack_id, members, top, bottom - top))
         hidden = [key for key, item in self._items.items() if item.multistack_id not in shown]
         area.set_stacks(stacks, hidden)
 
@@ -5385,7 +5666,8 @@ class PlotPanel(QWidget):
         # Multi-axis mode also always rebuilds: axis colors depend on the first
         # visible signal per unit group, which can change on any visibility toggle.
         needs_rebuild = self._stacked_mode or self._multi_axis or any(
-            p.visible and p.curve is None for p in self._items.values()
+            (p.visible and p.curve is None) or p.lane is not None
+            for p in self._items.values()
         )
         if needs_rebuild:
             self._rebuild_curves(preserve_selection=True)
@@ -5625,6 +5907,7 @@ class PlotPanel(QWidget):
             style_menu.addAction(style_act)
         style_menu.setEnabled(has_one)
         menu.addMenu(style_menu)
+        self._add_show_as_menu(menu, selected_keys)
         menu.addSeparator()
 
         rm_label = ('Remove selected signals' if len(selected_keys) > 1
@@ -5687,6 +5970,27 @@ class PlotPanel(QWidget):
         properties.setEnabled(has_one)
         menu.addAction(properties)
         menu.exec(global_pos)
+
+    def _add_show_as_menu(self, menu: QMenu, selected_keys: list) -> QMenu:
+        """Show as ▸ Automatic / Lane / Line for the selected signals; ticked
+        when they all share the choice. Returned for UI tests."""
+        keys = [str(key) for key in selected_keys if str(key) in self._items]
+        choices = {self._items[key].show_as for key in keys}
+        show_menu = self._make_menu(menu)
+        show_menu.setTitle('Show as')
+        for value, label in ((AUTO, 'Automatic'), (LANE, 'State lane'), (LINE, 'Line')):
+            action = QAction(label, show_menu, checkable=True)
+            action.setChecked(choices == {value})
+            action.triggered.connect(
+                lambda _checked=False, ks=list(keys), v=value: self.set_series_show_as(ks, v))
+            show_menu.addAction(action)
+        show_menu.setEnabled(bool(keys))
+        menu.addMenu(show_menu)
+        if self._time_spans:
+            clear = QAction('Clear shaded time', menu)
+            clear.triggered.connect(lambda _checked=False: self.set_time_spans([]))
+            menu.addAction(clear)
+        return show_menu
 
     def _add_remove_all_action(self, menu: QMenu) -> QAction:
         """Add "Remove all signals", as the Clear Plot button, and return it for UI tests."""
@@ -5811,6 +6115,9 @@ class PlotPanel(QWidget):
         In Rectangle Zoom a double-click fits the whole recording, and a click
         is emitted once it is clear that it was not the first half of one."""
         if not self._items:
+            return
+        if self._lane_click_claimed:
+            self._lane_click_claimed = False
             return
         pos = event.scenePos()
         for vb in view_boxes:

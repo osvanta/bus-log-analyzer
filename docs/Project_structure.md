@@ -23,6 +23,7 @@ bus-log-analyzer/
 │   ├── residency.py              # How long two signals spent together in each grid cell (load collective): time cut at both signals' samples, gap limits, a third signal's mean per cell, cell stretches, table text
 │   ├── gps_track.py              # GPS track: the latitude and longitude found among the decoded signals by name, unit and values; fixes cleaned (missing, out of range, "not available", 0/0); breaks at a lost fix or a jump; laid flat in metres north up; distance with standing wander left out; the passes near a point, the times inside a box
 │   ├── map_tiles.py              # Map files for the GPS track: a raster MBTiles file kept on the PC, opened read only (never fetched over the network); Web Mercator tile arithmetic, the zoom whose tile pixels match the screen's, the tiles over an area, rows turned round from MBTiles' south-up count; vector tiles and other files refused with the reason; the credit to show
+│   ├── state_lane.py             # State lanes: which signals become one (a value table and up to 16 values, or a 0/1 bit), their stretches, colour per value (fault words red), what to draw at a zoom (narrow neighbours as one busy block)
 │   ├── debug_inspector.py        # Read-only forensic probes of a measurement that failed to load; the readers stay untouched
 │   ├── signal_properties.py      # Right-click ▸ Properties: a signal's definition, looked up again in its channel's database; file-decoded and calculated signals; why none was found; the raw value on the bus for the signal table's Hex column
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
@@ -50,6 +51,7 @@ bus-log-analyzer/
 │   ├── panel_area.py             # PanelArea: a tab's panels (time plot, Table, XY views, CAN Trace) tiled by splitters or tabbed together, each drawn as a card with even gaps between (Card draws one for a widget beside them, gutter_splitter splits two cards with the same gap), a panel's header row a HeaderBand; titles drawn as plot tabs, shown at a panel's top edge on hover or always; maximise, close and reopen where it was, undock to an own window and dock back (✕ closes), rename in place; layouts in configurations
 │   ├── tab_drawing.py            # The plot tabs' drawing (outlined tab, curving feet, small raised "x"), shared by the plot tabs and the panels' titles
 │   ├── stack_sections.py         # MultiStack: the signal table split into one section per stack, level with it (filtered views of the table's model), a line between stacks
+│   ├── state_lane.py             # Drawing a state lane: labelled coloured stretches, hatched busy blocks, a click on a stretch; the name axis of a lane row
 │   ├── plot_tag.py               # The user's tag under the signal table: their text, user name and date, kept beside the application
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
 │   ├── plot_toolbar.py           # Plot toolbar parts: a button that opens a menu, the plot layouts by name

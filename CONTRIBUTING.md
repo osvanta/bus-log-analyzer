@@ -150,6 +150,7 @@ bus-log-analyzer/
 │   ├── residency.py          # How long two signals spent together in each grid cell
 │   ├── gps_track.py          # A GPS track: latitude and longitude found, cleaned, measured
 │   ├── map_tiles.py          # A map file for the GPS track: its tiles, read only
+│   ├── state_lane.py         # Gear, mode and status signals as stretches of named states
 │   ├── converter.py          # Tools ▸ Convert files
 │   ├── mf4_writer.py         # MF4 export
 │   └── export.py             # CSV and Excel export
