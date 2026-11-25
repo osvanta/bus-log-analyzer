@@ -121,6 +121,69 @@ def test_in_multistack_a_stacks_lanes_sit_under_its_curves_in_one_section(window
     assert len(sections) == 2               # one per stack, its lanes included
 
 
+def _cursor_names(panel):
+    """Where each cursor's name is written in Stacked: (row, shown whole)."""
+    names = {}
+    for name, lines in (('C1', panel._stacked_c1_lines), ('C2', panel._stacked_c2_lines)):
+        for row, line in enumerate(lines):
+            label = getattr(line, 'label', None)
+            if label is not None and label.toPlainText():
+                view = panel._stacked_plots[row].vb.sceneBoundingRect()
+                names.setdefault(name, []).append(
+                    (row, view.contains(label.sceneBoundingRect())))
+    return names
+
+
+def _ending_with_lanes(window, qapp, mode):
+    panel = _mode(window, qapp, mode)
+    if mode == 'multistack':
+        # One stack: its lanes sit under its curves.
+        for plotted in panel._items.values():
+            plotted.multistack_id = 0
+    else:
+        panel._items = {key: panel._items[key] for key in ('Speed', 'Torque', 'Gear', 'Brake')}
+    panel._rebuild_curves(preserve_selection=False)
+    window.btn_cursor2.setChecked(True)
+    _settle(qapp)
+    return panel
+
+
+@pytest.mark.parametrize('mode', ['stacked', 'multistack'])
+def test_the_cursors_names_go_on_the_lowest_row_of_curves_not_on_a_lane(window, qapp, mode):
+    # A lane is too short for the name: written there, it was cut off.
+    panel = _ending_with_lanes(window, qapp, mode)
+    assert panel._stacked_lane_rows[-2:] == ['Gear', 'Brake']
+    curves = max(row for row, lane in enumerate(panel._stacked_lane_rows) if lane is None)
+    assert _cursor_names(panel) == {'C1': [(curves, True)], 'C2': [(curves, True)]}
+
+
+def test_with_only_lanes_no_row_writes_a_name_it_would_cut_off(window, qapp):
+    panel = _mode(window, qapp, 'stacked')
+    for key in ('Speed', 'Torque'):
+        panel._items[key].visible = False
+    panel._rebuild_curves(preserve_selection=False)
+    window.btn_cursor2.setChecked(True)
+    _settle(qapp)
+    assert panel._stacked_lane_rows == ['Gear', 'Brake']
+    assert _cursor_names(panel) == {}
+    # The lines still run through every lane, and the band above the plot
+    # names both cursors.
+    assert len(panel._stacked_c1_lines) == len(panel._stacked_c2_lines) == 2
+    assert all(line.isVisible() for line in panel._stacked_c1_lines)
+    assert panel.cursor_label.text().startswith('C1')
+    assert 'C2' in panel.cursor_label.text()
+
+
+def test_without_lanes_the_cursors_names_stay_on_the_bottom_row(window, qapp):
+    panel = _mode(window, qapp, 'stacked')
+    panel.set_series_show_as(['Gear', 'Brake'], 'line')
+    window.btn_cursor2.setChecked(True)
+    _settle(qapp)
+    last = len(panel._stacked_plots) - 1
+    assert {name: [row for row, _whole in rows]
+            for name, rows in _cursor_names(panel).items()} == {'C1': [last], 'C2': [last]}
+
+
 def test_a_lanes_row_keeps_no_y_range_for_its_stack(window, qapp):
     panel = _mode(window, qapp, 'multistack')
     for key in ('Speed', 'Gear'):

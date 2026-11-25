@@ -2785,6 +2785,11 @@ class PlotPanel(QWidget):
         self._stacked_lane_rows = [lane_key for _, _, lane_key in rows]
         n = len(rows)
         ref_plot: pg.PlotItem | None = None
+        # The cursors' names go on the lowest row of curves: a lane is too
+        # short to hold one whole. With lanes only, no row names them; the
+        # band above the plot does, as for the lanes under a Multi-Axis plot.
+        named_row = max((idx for idx, (_, _, lane_key) in enumerate(rows) if lane_key is None),
+                        default=None)
 
         for idx, (_stack_id, row_keys, lane_key) in enumerate(rows):
             first = self._items[row_keys[0]]
@@ -2849,8 +2854,8 @@ class PlotPanel(QWidget):
             # Each row gets its own InfiniteLine instance.
             # A QGraphicsItem can only belong to ONE scene — sharing across
             # GLW rows causes crashes. Sync is done in _on_stacked_c1/c2_moved.
-            _c1_label     = 'C1' if idx == n - 1 else ''
-            _c1_labelOpts = {'position': 0.95} if idx == n - 1 else {}
+            _c1_label     = 'C1' if idx == named_row else ''
+            _c1_labelOpts = {'position': 0.95} if idx == named_row else {}
             c1 = _CursorLine(_c1_label, _c1_labelOpts,
                              _cursor_color_on(self._background_color))
             c1.setPos(self.v_line.value())
@@ -2861,8 +2866,8 @@ class PlotPanel(QWidget):
             self._stacked_c1_lines.append(c1)
 
             if self._cursor2_enabled:
-                _c2_label     = 'C2' if idx == n - 1 else ''
-                _c2_labelOpts = {'position': 0.85} if idx == n - 1 else {}
+                _c2_label     = 'C2' if idx == named_row else ''
+                _c2_labelOpts = {'position': 0.85} if idx == named_row else {}
                 c2 = _CursorLine(_c2_label, _c2_labelOpts,
                                  _cursor_color_on(self._background_color), dashed=True)
                 c2.setPos(self.v_line2.value())
