@@ -102,6 +102,11 @@ def large_window(qapp, searched_store, monkeypatch):
     dialog.deleteLater()
 
 
+def _drain(dialog):
+    while dialog._search is not None:
+        dialog._search_step()
+
+
 def test_the_window_shows_a_large_search_when_done(large_window, searched_store):
     dialog = large_window
     assert dialog._matching is None
@@ -116,8 +121,14 @@ def test_the_window_shows_a_large_search_when_done(large_window, searched_store)
         dialog._search_step()
         steps += 1
     assert steps >= 5
-    assert np.array_equal(dialog._matching, _indices(searched_store, "gear box"))
+    # Search finds: every frame stays, the hits are the frames found.
+    assert dialog._matching is None
+    assert np.array_equal(dialog._hits, _indices(searched_store, "gear box"))
     assert "Searching" not in dialog.status_label.text()
+    # The funnel shows only them.
+    dialog.only_hits_button.setChecked(True)
+    _drain(dialog)
+    assert np.array_equal(dialog._matching, _indices(searched_store, "gear box"))
 
 
 def test_a_new_search_replaces_the_one_under_way(large_window, searched_store):
@@ -129,7 +140,7 @@ def test_a_new_search_replaces_the_one_under_way(large_window, searched_store):
     dialog._on_filter_changed()
     while dialog._search is not None:
         dialog._search_step()
-    assert np.array_equal(dialog._matching, _indices(searched_store, "msg"))
+    assert np.array_equal(dialog._hits, _indices(searched_store, "msg"))
 
 
 def test_clearing_the_search_shows_every_frame_at_once(large_window):
@@ -141,6 +152,7 @@ def test_clearing_the_search_shows_every_frame_at_once(large_window):
     dialog.search_edit.setText("")
     dialog._on_filter_changed()
     assert dialog._search is None and dialog._matching is None
+    assert dialog._hits is None
 
 
 def test_the_delta_t_index_waits_for_a_search(qapp, searched_store, monkeypatch):
@@ -185,4 +197,9 @@ def test_a_finished_search_redraws_the_window_once(large_window, monkeypatch):
     dialog._on_filter_changed()
     while dialog._search is not None:
         dialog._search_step()
+    assert len(calls) == 1
+    # With the funnel, too: only the frames found, drawn once.
+    calls.clear()
+    dialog.only_hits_button.setChecked(True)
+    _drain(dialog)
     assert len(calls) == 1

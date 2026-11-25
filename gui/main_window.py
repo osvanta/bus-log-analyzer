@@ -71,7 +71,7 @@ from core.bus_types import (
     sort_key,
 )
 from core.channel_config import ChannelConfig
-from gui import app_data, app_log, session_restore, survey_prompt
+from gui import app_data, app_log, configuration, session_restore, survey_prompt
 from gui.bin_menu import BinMenu
 from gui.brand_logo import BrandLogo, leave_logo_unframed
 from gui.dbc_manager import DBCManagerDialog
@@ -2929,18 +2929,26 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, 'Load configuration', '', 'JSON Files (*.json)')
         if not path:
             return
+        # Refused here, before any of it is applied, when it is no
+        # configuration; a wrong value inside one is left out instead.
         try:
-            data = json.loads(Path(path).read_text(encoding='utf-8'))
+            data = configuration.parse(Path(path).read_text(encoding='utf-8'))
         except Exception as exc:
             QMessageBox.critical(self, 'Load configuration failed', str(exc))
             return
         self._config_path = path
-        self._config_snapshot = data if isinstance(data, dict) else None
+        self._config_snapshot = data
         self._apply_configuration(data, path)
 
     def _apply_configuration(self, data: dict, path: str) -> None:
         """Apply the configuration *data*, read from *path*: reload its
         measurement, or plot from the data already decoded."""
+        # Whoever read it: nothing below meets a value of the wrong kind.
+        try:
+            data = configuration.normalised(data)
+        except configuration.ConfigurationError as exc:
+            QMessageBox.critical(self, 'Load configuration failed', str(exc))
+            return
         # An explicitly loaded configuration takes precedence over the
         # session-only measurement handoff.
         self._temporary_plot_handoff = None

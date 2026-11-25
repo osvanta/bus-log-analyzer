@@ -171,7 +171,12 @@ def _reader(path: Path):
     if suffix == '.trc':
         from core.readers.trc_can_reader import TRCCANReader
         return TRCCANReader(path).iter_messages()
-    return can.BLFReader(str(path)) if suffix == '.blf' else can.ASCReader(str(path))
+    if suffix == '.blf':
+        # As core.readers does: python-can loops for ever on a zero-size object.
+        from core.blf_guard import install
+        install()
+        return can.BLFReader(str(path))
+    return can.ASCReader(str(path))
 
 
 def _writer(path: Path):

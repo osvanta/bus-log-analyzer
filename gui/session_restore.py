@@ -33,7 +33,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QMessageBox, QWidget
 
-from gui import release_test
+from gui import configuration, release_test
 
 FILE_NAME = 'osvanta_last_session.json'
 DISABLE_VARIABLE = 'OSVANTA_SESSION_RESTORE'
@@ -115,17 +115,15 @@ def _tabs_differ(tabs, before) -> bool:
 
 
 def read(path: Path) -> dict | None:
-    """The last session kept at *path*; None when there is none. Raises
+    """The last session kept at *path*, with every value of the kind this
+    version expects (see gui.configuration); None when there is none. Raises
     OSError when it cannot be read and ValueError when it is not a
     configuration."""
     try:
         text = path.read_text(encoding='utf-8')
     except FileNotFoundError:
         return None
-    data = json.loads(text)
-    if not isinstance(data, dict):
-        raise ValueError(f'{path.name} holds no configuration')
-    return data
+    return configuration.parse(text)
 
 
 def write(path: Path, config: dict, saved_to: str | None) -> None:

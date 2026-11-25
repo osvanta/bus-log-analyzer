@@ -202,7 +202,7 @@ def signal_entries(tab: dict) -> list[dict]:
 def _index(value, count: int) -> int:
     try:
         return min(max(int(value), 0), count - 1)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # text, null, infinity
         return 0
 
 

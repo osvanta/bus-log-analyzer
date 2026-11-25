@@ -134,6 +134,223 @@ def test_a_rebuild_keeps_the_markers(panel):
     assert len(_lines(panel)) == 1
 
 
+# ── Names that would write over each other ───────────────────────────────
+
+
+def test_names_apart_share_the_top_row():
+    from gui.plot_widget import marker_name_rows
+    assert marker_name_rows([(0, 100), (200, 300), (400, 500)], rows=5) == [0, 0, 0]
+    assert marker_name_rows([], rows=5) == []
+
+
+def test_names_on_top_of_each_other_get_a_row_each_the_left_one_on_top():
+    from gui.plot_widget import marker_name_rows
+    assert marker_name_rows([(0, 100), (50, 150)], rows=5) == [0, 1]
+    assert marker_name_rows([(0, 100), (20, 120), (40, 140)], rows=5) == [0, 1, 2]
+    # The answer is per name as given, whatever the order they come in.
+    assert marker_name_rows([(40, 140), (0, 100), (20, 120)], rows=5) == [2, 0, 1]
+
+
+def test_a_row_is_used_again_once_it_is_free():
+    from gui.plot_widget import marker_name_rows
+    # The third name is clear of the first, which the second is not.
+    assert marker_name_rows([(0, 100), (50, 150), (120, 220)], rows=5) == [0, 1, 0]
+
+
+def test_two_names_on_one_row_keep_a_gap():
+    from gui.plot_widget import marker_name_rows
+    assert marker_name_rows([(0, 100), (110, 200)], rows=5, gap=10) == [0, 0]
+    assert marker_name_rows([(0, 100), (109, 200)], rows=5, gap=10) == [0, 1]
+
+
+def test_with_every_row_taken_a_name_goes_where_the_least_is_covered():
+    from gui.plot_widget import marker_name_rows
+    # Two rows only: the third name covers the end of the first (20 pixels),
+    # not the middle of the second (60 pixels).
+    assert marker_name_rows([(0, 100), (10, 140), (80, 200)], rows=2) == [0, 1, 0]
+    assert marker_name_rows([(0, 140), (10, 100), (80, 200)], rows=2) == [0, 1, 1]
+    assert max(marker_name_rows([(i, 100 + i) for i in range(9)], rows=3)) == 2
+    assert marker_name_rows([(0, 100), (50, 150)], rows=0) == [0, 0]      # a plot too low for two
+
+
+def _names(panel):
+    """(name, scene rectangle, position along the line) of every marker name."""
+    return [(line.marker.name, line.label.sceneBoundingRect(), line.label.orthoPos)
+            for line in _lines(panel) if getattr(line, 'label', None) is not None]
+
+
+def _letters(panel):
+    """(name, scene rectangle of its letters): a name's rectangle without the
+    empty margin around the letters, which may lie over another name's or
+    over the plot's edge."""
+    edge = _lines(panel)[0].label.textItem.document().documentMargin()
+    return [(name, rect.adjusted(edge, edge, -edge, -edge)) for name, rect, _pos in _names(panel)]
+
+
+def _overlapping(panel):
+    """The pairs of names whose letters share pixels."""
+    names = _letters(panel)
+    return [(a[0], b[0]) for i, a in enumerate(names) for b in names[i + 1:]
+            if a[1].intersects(b[1])]
+
+
+def _top_view(panel):
+    return _lines(panel)[0].getViewBox()
+
+
+def _inside(panel):
+    """Every name is inside the plot it is written in, top to bottom."""
+    frame = _top_view(panel).sceneBoundingRect()
+    return all(frame.top() <= rect.top() and rect.bottom() <= frame.bottom()
+               for _name, rect in _letters(panel))
+
+
+def test_names_of_close_markers_do_not_write_over_each_other(panel, qapp):
+    from gui.plot_widget import _MARKER_NAME_POSITION
+    for i, name in enumerate(('1. Fan request at 100 percent', '2. Coolant above 105 degC',
+                              '3. Derate active')):
+        panel.add_marker(20.0 + i, name)
+    qapp.processEvents()
+    assert _overlapping(panel) == []
+    assert _inside(panel)
+    positions = [pos for _name, _rect, pos in _names(panel)]
+    assert positions[0] == pytest.approx(_MARKER_NAME_POSITION)      # the first where it always was
+    assert positions[0] > positions[1] > positions[2]                # the others under it
+    (_a, first, _p), (_b, second, _q), (_c, third, _r) = _names(panel)
+    # A line of text apart, not a whole rectangle with its margins.
+    assert 0 < second.top() - first.top() < first.height()
+    assert third.top() - second.top() == pytest.approx(second.top() - first.top())
+
+
+def test_names_of_markers_far_apart_stay_on_the_top_row(panel, qapp):
+    from gui.plot_widget import _MARKER_NAME_POSITION
+    for t, name in ((5.0, 'A1'), (50.0, 'A2'), (95.0, 'A3')):
+        panel.add_marker(t, name)
+    qapp.processEvents()
+    assert [pos for _name, _rect, pos in _names(panel)] == [pytest.approx(_MARKER_NAME_POSITION)] * 3
+
+
+def test_names_that_face_each_other_across_the_middle_are_kept_apart(panel, qapp):
+    """Left of the middle a name stands right of its line, right of the
+    middle left of it: these two reach for the same place."""
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)
+    panel.add_marker(40.0, 'A name as long as a name of an event can be')
+    panel.add_marker(60.0, 'Another name as long as the first one is')
+    qapp.processEvents()
+    (_a, first, _p), (_b, second, _q) = _names(panel)
+    assert first.left() < second.right() and second.left() < first.right()   # they share the width
+    assert _overlapping(panel) == []
+
+
+def test_names_one_and_a_half_names_apart_across_the_middle(panel, qapp):
+    """Each name is clear of the other marker's line, and still they meet in
+    the middle: only where each name really stands tells."""
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)
+    probe = panel.add_marker(10.0, 'First event')
+    qapp.processEvents()
+    name_s = 100.0 * _names(panel)[0][1].width() / _top_view(panel).width()
+    panel.remove_marker(probe)
+    panel.add_marker(50.0 - 0.75 * name_s, 'First event')
+    panel.add_marker(50.0 + 0.75 * name_s, 'Other event')
+    qapp.processEvents()
+    (_a, first, _p), (_b, second, _q) = _names(panel)
+    assert first.left() < second.right() and second.left() < first.right()
+    assert _overlapping(panel) == []
+
+
+def test_the_rows_follow_the_zoom(panel, qapp):
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)
+    panel.add_marker(20.0, 'First event')
+    panel.add_marker(21.0, 'Second event')
+    qapp.processEvents()
+    assert len({pos for _name, _rect, pos in _names(panel)}) == 2
+    panel.zoom_to_time(19.9, 23.9, margin=0.0)          # in: room for both on one row
+    qapp.processEvents()
+    assert len({pos for _name, _rect, pos in _names(panel)}) == 1
+    assert _overlapping(panel) == []
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)          # and out again
+    qapp.processEvents()
+    assert len({pos for _name, _rect, pos in _names(panel)}) == 2
+    assert _overlapping(panel) == []
+
+
+def test_a_narrower_plot_takes_another_row(panel, qapp):
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)
+    panel.add_marker(10.0, 'First event')
+    qapp.processEvents()
+    # The second one and a half names further on, whatever the font.
+    name_s = 100.0 * _names(panel)[0][1].width() / _top_view(panel).width()
+    panel.add_marker(10.0 + 1.5 * name_s, 'Second event')
+    qapp.processEvents()
+    assert len({pos for _name, _rect, pos in _names(panel)}) == 1
+    panel.resize(500, 600)                               # the plot about half as wide
+    qapp.processEvents()
+    assert _overlapping(panel) == []
+    assert len({pos for _name, _rect, pos in _names(panel)}) == 2
+
+
+def test_a_marker_dragged_onto_another_makes_room(panel, qapp):
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)
+    panel.add_marker(10.0, 'First event')
+    moved = panel.add_marker(45.0, 'Second event')
+    qapp.processEvents()
+    line = next(line for line in _lines(panel) if line.marker is moved)
+    line.setPos(11.0)
+    line.sigDragged.emit(line)
+    qapp.processEvents()
+    assert _overlapping(panel) == []
+    assert len({pos for _name, _rect, pos in _names(panel)}) == 2
+    line.setPos(45.0)
+    line.sigPositionChangeFinished.emit(line)
+    qapp.processEvents()
+    assert len({pos for _name, _rect, pos in _names(panel)}) == 1
+
+
+def test_a_removed_marker_gives_its_row_back(panel, qapp):
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)
+    first = panel.add_marker(20.0, 'First event')
+    panel.add_marker(21.0, 'Second event')
+    panel.remove_marker(first)
+    qapp.processEvents()
+    from gui.plot_widget import _MARKER_NAME_POSITION
+    assert [pos for _name, _rect, pos in _names(panel)] == [pytest.approx(_MARKER_NAME_POSITION)]
+
+
+def test_in_a_low_plot_the_names_stay_inside_it(panel, qapp):
+    """A stack of many signals leaves the top plot a few names high: a name
+    is not cut off at the plot's upper edge, and two still stand apart."""
+    for name in 'CDEFGH':
+        panel.add_series(name, _series(name))
+    panel.set_stacked(True)
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)
+    panel.add_marker(20.0, 'First event')
+    panel.add_marker(21.0, 'Second event')
+    qapp.processEvents()
+    assert _top_view(panel).height() < 120                       # low indeed
+    assert _inside(panel)
+    assert _overlapping(panel) == []
+    for i in range(8):                                           # more names than rows fit
+        panel.add_marker(22.0 + i, f'Event {i}')
+    qapp.processEvents()
+    assert _inside(panel)
+
+
+def test_the_rows_follow_the_zoom_after_the_plots_were_rebuilt(panel, qapp):
+    panel.add_marker(20.0, 'First event')
+    panel.add_marker(21.0, 'Second event')
+    panel.set_stacked(True)                                      # other plots, another view
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)
+    qapp.processEvents()
+    assert len({pos for _name, _rect, pos in _names(panel)}) == 2
+    panel.zoom_to_time(19.9, 23.9, margin=0.0)
+    qapp.processEvents()
+    assert len({pos for _name, _rect, pos in _names(panel)}) == 1
+    panel.set_stacked(False)
+    panel.zoom_to_time(0.0, 100.0, margin=0.0)
+    qapp.processEvents()
+    assert _overlapping(panel) == [] and len({pos for _n, _r, pos in _names(panel)}) == 2
+
+
 # ── Menus ────────────────────────────────────────────────────────────────
 
 
