@@ -18,6 +18,12 @@ bus-log-analyzer/
 │   ├── asammdf_guard.py          # Stops asammdf writing past the end of a channel's sample buffer (upstream overrun)
 │   ├── measurement_info.py       # A file's own information: MF4 header, events, attachments; BLF start/stop; ASC date line; TRC version, start, connections, events
 │   ├── signal_statistics.py      # Min / max / mean / std dev / RMS / samples of a signal over a time range
+│   ├── xy_data.py                # The points of an XY plot: Y and a colour signal held onto the X signal's sample times, cut to a time range, thinned evenly
+│   ├── histogram.py              # How long a signal spent at each value: time-weighted bars, gap limit, automatic/width/typed bins, the stretches a bar covers
+│   ├── residency.py              # How long two signals spent together in each grid cell (load collective): time cut at both signals' samples, gap limits, a third signal's mean per cell, cell stretches, table text
+│   ├── gps_track.py              # GPS track: the latitude and longitude found among the decoded signals by name, unit and values; fixes cleaned (missing, out of range, "not available", 0/0); breaks at a lost fix or a jump; laid flat in metres north up; distance with standing wander left out; the passes near a point, the times inside a box
+│   ├── map_tiles.py              # Map files for the GPS track: a raster MBTiles file kept on the PC, opened read only (never fetched over the network); Web Mercator tile arithmetic, the zoom whose tile pixels match the screen's, the tiles over an area, rows turned round from MBTiles' south-up count; vector tiles and other files refused with the reason; the credit to show
+│   ├── state_lane.py             # State lanes: which signals become one (a value table and up to 16 values, or a 0/1 bit), their stretches, colour per value (fault words red), what to draw at a zoom (narrow neighbours as one busy block)
 │   ├── debug_inspector.py        # Read-only forensic probes of a measurement that failed to load; the readers stay untouched
 │   ├── signal_properties.py      # Right-click ▸ Properties: a signal's definition, looked up again in its channel's database; file-decoded and calculated signals; why none was found; the raw value on the bus for the signal table's Hex column
 │   ├── trace_differences.py      # Trace Δt and changed bytes: each frame's previous frame of the same ID, channel and kind, indexed in chunks (4 B/frame)
@@ -40,11 +46,18 @@ bus-log-analyzer/
 ├── gui/
 │   ├── main_window.py            # MainWindow, top row, config save/load, plot_finding()
 │   ├── load_worker.py            # LoadWorker (QThread): native MDF arrays + batched CAN-raw vectorized decode paths
-│   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Hex, Δ C2−C1, statistics), Table view, measurement events
-│   ├── plot_tabs.py              # PlotTabs: tabs of plots, each with its own PlotPanel; drop and move signals between tabs, synchronized time and cursors, tabs in configurations
+│   ├── plot_widget.py            # PlotPanel: normal / multi-axis / stacked, dual cursors, zoom_to_time(), signal table columns chosen from its header (Hex, Δ C2−C1, statistics) and headed by the time plot's name, Table view, measurement events; its tab's panels in a PanelArea, the time plot's card headed by a band with the cursor readout, the signal table a card level with it
+│   ├── plot_tabs.py              # PlotTabs: tabs of plots, each with its own PlotPanel; drop and move signals between tabs, synchronized time and cursors, tabs (and their panels) in configurations
+│   ├── panel_area.py             # PanelArea: a tab's panels (time plot, Table, XY views, CAN Trace) tiled by splitters or tabbed together, each drawn as a card with even gaps between (Card draws one for a widget beside them, gutter_splitter splits two cards with the same gap), a panel's header row a HeaderBand; titles drawn as plot tabs, shown at a panel's top edge on hover or always; maximise, close and reopen where it was, undock to an own window and dock back (✕ closes), rename in place; layouts in configurations
+│   ├── tab_drawing.py            # The plot tabs' drawing (outlined tab, curving feet, small raised "x"), shared by the plot tabs and the panels' titles
 │   ├── stack_sections.py         # MultiStack: the signal table split into one section per stack, level with it (filtered views of the table's model), a line between stacks
+│   ├── state_lane.py             # Drawing a state lane: labelled coloured stretches, hatched busy blocks, a click on a stretch; the name axis of a lane row
 │   ├── plot_tag.py               # The user's tag under the signal table: their text, user name and date, kept beside the application
 │   ├── tabular_view.py           # Table view: plotted signals on the union of their sample times, a virtual model
+│   ├── plot_toolbar.py           # Plot toolbar parts: a button that opens a menu, the plot layouts by name
+│   ├── xy_view.py                # XY views, each a panel of one kind, as many per tab as wanted: XY plot (one signal against another, coloured by a third; a click places Cursor 1), histogram (one signal's time at each value), residency map (two signals' time per grid cell); follow the time shown, mark the cursors, a clicked bar or cell is shaded on the plot; settings behind a gear, applied by Update; colour scale and pointed-at reading drawn over the plot
+│   ├── gps_view.py               # GPS track view, a panel like the XY views (Views ▸ Add GPS track): the route on an equal-scale grid with scale bar and north arrow, coloured by a chosen signal, dimmed outside the time shown, dashed where there was no fix; cursor marks; a click places Cursor 1 (again for the next pass), Shift+drag shades the times inside a box; settings behind a gear
+│   ├── map_background.py         # The map under the GPS track: the tiles the view shows, at the zoom that suits it, each placed by its corners' latitude and longitude so the streets lie under the route; a missing tile cut from a coarser one; decoded tiles kept up to a limit; none when zoomed out far beyond what the file holds
 │   ├── measurement_info.py       # File ▸ Measurement info dialog
 │   ├── load_debug_window.py      # Session-only plain-text window for measurement load forensics (Debug mode)
 │   ├── signal_properties_dialog.py # Right-click a signal ▸ Properties window: Signal and Value table tabs, Copy
@@ -53,9 +66,10 @@ bus-log-analyzer/
 │   ├── overflow_row.py           # OverflowButtonRow: plot buttons that do not fit move into a "»" menu
 │   ├── edge_tab.py               # EdgeTab: the small flat handle on a panel edge that shows or hides it
 │   ├── plot_icons.py             # Monochrome plot button icons, drawn from SVG in the palette's text colour
+│   ├── bin_menu.py               # BinMenu: a menu whose rows carry a waste bin, in one column at its right clear of the longest text, that deletes what the row stands for (Go to marker, the markers button's menu, the views in Views ▾); stays open on the rest, Delete deletes the highlighted row
 │   ├── brand_logo.py             # BrandLogo: the Osvanta logo at the status bar's right end, in the light or dark theme's colours
-│   ├── signal_tree.py            # SignalTreeWidget with live search
-│   ├── raw_frame_dialog.py       # Sliding-window CAN/LIN Trace (RawFrameStore, no cap); Δt, changed-byte highlight, follows plot Cursor 1
+│   ├── signal_tree.py            # SignalTreeWidget with live search, in two cards drawn as the panels are: its name over the search box (the dock's title row), and the tree under a band with Collapse and Expand; the window lines them up with the plot area (place_cards)
+│   ├── raw_frame_dialog.py       # Sliding-window CAN/LIN Trace (RawFrameStore, no cap), a panel of a plot tab; Δt, changed-byte highlight, follows plot Cursor 1
 │   ├── dbc_manager.py            # Database Manager dialog: per-bus-channel DBC/ARXML/LDF, match quality bars
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
 │   ├── gc_guard.py               # Runs Python's cyclic garbage collector on the GUI thread only

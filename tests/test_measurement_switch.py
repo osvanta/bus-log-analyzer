@@ -129,6 +129,9 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
                 "hide_plot_lines": False,
                 "cursor1": False,
                 "cursor2": False,
+                "plot_name": "Time plot",
+                "xy_views": [],
+                "panels": {"tree": {"panels": ["plot"], "current": "plot"}},
                 "signals": [
                     {
                         "key": old_series.key,
@@ -139,6 +142,7 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
                         "own_axis": False,
                         "multistack_id": -1,
                         "line_style": "solid",
+                        "show_as": "",
                     }
                 ],
             }

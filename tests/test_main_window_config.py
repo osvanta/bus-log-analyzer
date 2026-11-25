@@ -66,11 +66,11 @@ def test_plot_toolbar_does_not_show_remove_selected_button(window):
 
 
 def test_plot_toolbar_has_multistack_next_to_stacked(window):
-    layout = window.btn_stacked.parentWidget().layout()
-    stacked_index = layout.indexOf(window.btn_stacked)
+    # In the layout picker's menu, which stands for the three mode buttons.
+    names = [action.text() for action in window.btn_layout.menu().actions()]
 
     assert window.btn_multistack.text() == 'MultiStack'
-    assert layout.indexOf(window.btn_multistack) == stacked_index + 1
+    assert names.index('MultiStack') == names.index('Stacked') + 1
 
 
 def test_multistack_plot_mode_is_mutually_exclusive(window):

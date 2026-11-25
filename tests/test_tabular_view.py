@@ -123,6 +123,11 @@ def window(qapp, monkeypatch, tmp_path):
     qapp.processEvents()
 
 
+def _left_and_width(panel, widget):
+    from PySide6.QtCore import QPoint
+    return widget.mapTo(panel, QPoint(0, 0)).x(), widget.width()
+
+
 def test_the_table_button_puts_the_table_right_of_the_plot(window, qapp):
     panel = window.plot_panel
     window.resize(1400, 800)
@@ -133,10 +138,10 @@ def test_the_table_button_puts_the_table_right_of_the_plot(window, qapp):
     qapp.processEvents()
     assert panel.table_view_active()
     assert panel.view_stack.isVisible() and panel.tabular.isVisible()      # both shown
-    assert panel.area_stack.indexOf(panel.view_stack) == 0                 # plot left
-    assert panel.area_stack.indexOf(panel.tabular) == 1                    # table right
-    plot, table = panel.area_stack.sizes()
-    assert plot > table > 0
+    # A panel right of the plot, narrower than it (gui.panel_area).
+    plot, table = (_left_and_width(panel, widget) for widget in (panel.view_stack, panel.tabular))
+    assert plot[0] < table[0]                                              # plot left
+    assert plot[1] > table[1] > 0
     assert panel.tabular.model.columnCount() == 3
     window.btn_table.setChecked(False)
     qapp.processEvents()
@@ -151,12 +156,16 @@ def test_the_table_keeps_the_width_it_was_dragged_to(window, qapp):
     qapp.processEvents()
     window.btn_table.setChecked(True)
     qapp.processEvents()
-    total = sum(panel.area_stack.sizes())
-    panel.area_stack.setSizes([total - 300, 300])
+    splitter = panel.tabular.parentWidget().parentWidget().parentWidget()   # its place's
+    total = sum(splitter.sizes())
+    splitter.setSizes([total - 300, 300])
+    qapp.processEvents()
     window.btn_table.setChecked(False)
+    qapp.processEvents()
     window.btn_table.setChecked(True)
     qapp.processEvents()
-    assert panel.area_stack.sizes()[1] == 300
+    from gui.panel_area import CARD_INSET
+    assert abs(panel.tabular.width() + 2 * CARD_INSET - 300) <= 2      # inside its card
 
 
 def test_hidden_signals_are_left_out_and_changes_follow(window, qapp):

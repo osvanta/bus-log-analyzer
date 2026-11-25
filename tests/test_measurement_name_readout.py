@@ -5,9 +5,10 @@
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
 """
-The cursor line under the plot names the measurement file after the cursor
-readout, on the same line and in the same text, so the user sees which file
-the plotted signals come from.
+The line under the plots names the measurement file, in the cursor readout's
+text, so the user sees which file the plotted signals come from. The readout
+heads the time plot; the user's tag lies under the signal table, on the file
+name's line.
 
 Decode runs on a stand-in thread and worker; the decoded store is
 handed to the window as the worker would hand it.
@@ -87,7 +88,9 @@ def window(qapp, monkeypatch, tmp_path):
     w = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
     w._temporary_plot_config_path = tmp_path / 'osvanta_temp_plot_config.json'
     w._log = Mock()
-    w.resize(1400, 800)
+    # Wide enough for the readout and a file name, in the offscreen
+    # platform's wide fallback font.
+    w.resize(1500, 800)
     w.show()
     qapp.processEvents()
     yield w
@@ -113,31 +116,36 @@ def _load_and_plot(qapp, window):
     qapp.processEvents()
 
 
-def test_file_name_follows_the_cursor_readout_on_its_line(qapp, window, monkeypatch, tmp_path):
+def test_file_name_lies_under_the_plots_level_with_the_tag(qapp, window, monkeypatch, tmp_path):
+    from PySide6.QtCore import QPoint
+
     measurement = tmp_path / 'drive_cycle_03.csv'
     _open(window, monkeypatch, measurement)
     _load_and_plot(qapp, window)
     panel = window.plot_panel
-    readout, name = panel.cursor_label, panel.file_name_label
+    readout, name, tag = panel.cursor_label, panel.file_name_label, panel.tag_hint
 
-    assert readout.isVisible() and name.isVisible()
-    assert name.text() == '   |   drive_cycle_03.csv'
+    def on_window(widget):
+        return widget.mapTo(window, QPoint(0, 0))
+
+    assert readout.isVisible() and name.isVisible() and tag.isVisible()
+    # Alone on its line: no separator before it.
+    assert name.text() == 'drive_cycle_03.csv'
     assert name.toolTip() == str(measurement)
-    # Straight after the readout, in a box of the same height and font, so
-    # both texts sit on one baseline.
-    assert name.x() == readout.geometry().right() + 1
-    assert name.y() == readout.y()
-    assert name.height() == readout.height()
+    # Under the plots, from their left edge, in the readout's font; the tag
+    # under the table beside it, on the same line.
+    area = panel.panels
+    assert on_window(name).y() >= on_window(area).y() + area.height()
+    assert on_window(name).x() == on_window(area).x()
+    assert on_window(name).y() == on_window(tag).y()
     assert name.font() == readout.font()
 
-    # Room for the longer readout of both cursors and the whole name.
-    window.resize(2400, 800)
+    # The longer readout of both cursors leaves the name whole.
     window.btn_cursor1.setChecked(True)
     window.btn_cursor2.setChecked(True)
     qapp.processEvents()
     assert 'ΔT=' in readout.text()
-    assert name.x() == readout.geometry().right() + 1
-    assert name.text().endswith('drive_cycle_03.csv')
+    assert name.text() == 'drive_cycle_03.csv'
 
 
 def test_no_file_name_without_plotted_signals(qapp, window, monkeypatch, tmp_path):
@@ -167,7 +175,7 @@ def test_another_file_names_itself_once_loaded(qapp, window, monkeypatch, tmp_pa
     assert window.plot_panel.file_name_label.full_text() == ''
 
     _load_and_plot(qapp, window)
-    assert window.plot_panel.file_name_label.text() == '   |   second.csv'
+    assert window.plot_panel.file_name_label.text() == 'second.csv'
 
 
 def test_long_file_name_is_shortened_and_does_not_hold_the_plot_wide(qapp, window):
@@ -190,7 +198,7 @@ def test_long_file_name_is_shortened_and_does_not_hold_the_plot_wide(qapp, windo
     assert label.geometry().right() <= panel.width()
     assert label.fontMetrics().horizontalAdvance(label.text()) <= label.width()
     # The start of the name and its end, with "…" for what is left out.
-    start, end = label.text().removeprefix('   |   ').split('…')
+    start, end = label.text().split('…')
     assert start.startswith('measure') and long_name.startswith(start)
     assert end.endswith('_end.blf') and long_name.endswith(end)
     assert label.toolTip() == 'C:/logs/' + long_name

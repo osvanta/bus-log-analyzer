@@ -235,66 +235,106 @@ def test_plot_buttons_sit_above_the_plot_not_the_table(window):
     assert plots.parentWidget() is plot_side
     assert window.plot_panel.parentWidget() is plots
     assert window.plot_button_row.geometry().bottom() < plots.geometry().top()
-    for button in (window.btn_fit, window.btn_stacked, window.btn_points):
+    for button in (window.btn_fit, window.btn_layout, window.btn_display):
         assert button.parentWidget() is window.plot_button_row
 
 
-def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(window, qapp):
+def test_the_layout_picker_comes_first_then_a_gap_then_the_icon_buttons(window, qapp):
     # Wide enough for the whole row in the offscreen platform's fallback
     # font, which makes the text buttons wider than Segoe UI does.
-    window.resize(1600, 800)
+    window.resize(1700, 800)
     qapp.processEvents()
     row = window.plot_button_row
-    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack, window.btn_table]
     icons = [window.btn_fit, window.btn_fit_v, window.btn_zoom_rect, window.btn_cursor1,
-             window.btn_cursor2, window.btn_line_mode, window.btn_points, window.btn_hide_line,
-             window.btn_delete_markers]
+             window.btn_cursor2, window.btn_markers]
 
-    clear = window.btn_clear_plot
-
-    assert row._buttons == modes + icons + [clear]
-    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack', 'Table']
-    assert [b.accessibleName() for b in icons + [clear]] == [
-        'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
-        'Step Mode', 'Show Data Points', 'Hide Line', 'Delete Markers', 'Clear Plot']
-    for button in icons + [clear]:
+    assert row._buttons == [window.btn_layout] + icons + [window.btn_display]
+    assert [b.accessibleName() for b in icons] == [
+        'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2', 'Markers']
+    for button in icons:
         assert button.text() == ''
         assert not button.icon().isNull()
         assert button.toolTip().startswith(button.accessibleName())
-        assert button.height() == window.btn_stacked.height()
-    multistack, fit = window.btn_multistack, window.btn_fit
-    assert fit.x() - (multistack.x() + multistack.width()) > 2 * row.SPACING
-    # Clear Plot, which empties the plot, stands apart from the view buttons.
-    last_icon = icons[-1]
+        assert button.height() == window.btn_layout.height()
     assert not row.overflowed_buttons()
-    assert clear.x() - (last_icon.x() + last_icon.width()) > 2 * row.SPACING
+    # A gap between the groups: layout, view, measuring, display.
+    for left, right in ((window.btn_layout, window.btn_fit),
+                        (window.btn_zoom_rect, window.btn_cursor1),
+                        (window.btn_markers, window.btn_display)):
+        assert right.x() - (left.x() + left.width()) > 2 * row.SPACING
+    # Within a group, only the usual spacing.
+    assert window.btn_fit_v.x() - (window.btn_fit.x() + window.btn_fit.width()) == row.SPACING
 
 
-def test_plot_buttons_are_level_with_the_table_header(window):
+def test_the_table_lines_up_with_the_time_plot(qapp, window):
+    # The signal table is drawn as a card, as the time plot beside it is:
+    # the two cards start on one line, and the table's header is as tall as
+    # what heads the plot, so its first row starts level with the plot. The
+    # plot buttons sit above the plot only, beside the room over the table.
+    import array
     from PySide6.QtCore import QPoint
+    from core.signal_store import SignalSeries
+    from gui.panel_area import CARD_INSET, Card
 
     splitter = window.center_splitter
-    row = window.plot_button_row
-    table = window.plot_panel.table
-    header = table.horizontalHeader()
+    panel = window.plot_panel
 
     def top_and_bottom(widget):
         top = widget.mapTo(splitter, QPoint(0, 0)).y()
         return top, top + widget.height()
 
-    row_top, _ = top_and_bottom(row)
-    table_top, _ = top_and_bottom(table)
-    first_row_top, _ = top_and_bottom(table.viewport())
-    plot_top, _ = top_and_bottom(window.plot_panel.view_stack)
+    def assert_lined_up(panel):
+        qapp.processEvents()
+        header = panel.table.horizontalHeader()
+        # The plot's card (gui.panel_area): its outline is the plot's edge.
+        card_top, _ = top_and_bottom(panel.panels.card_of('plot'))
+        plot_top, _ = top_and_bottom(panel.view_stack)
+        assert isinstance(panel.table_card, Card)
+        assert top_and_bottom(panel.table_card)[0] == card_top
+        assert top_and_bottom(header) == (card_top + CARD_INSET, plot_top)
+        assert top_and_bottom(panel.table.viewport())[0] == plot_top
 
-    assert row_top == table_top
-    # The plot and the table's first row start on one line.
-    assert plot_top == first_row_top
+    assert_lined_up(panel)
+    # The header and the plot's band: one row across.
+    assert top_and_bottom(panel.table.horizontalHeader()) == top_and_bottom(panel.plot_header)
+    row_top, row_bottom = top_and_bottom(window.plot_button_row)
+    assert row_top == top_and_bottom(panel.table_panel)[0]
+    assert row_bottom <= top_and_bottom(panel.table_card)[0]
+    # The room above the table's card, beside the buttons, is the window's
+    # colour, not the plot background's.
+    gap = panel.table_card.y()
+    image = panel.table_panel.grab().toImage()
+    ratio = image.devicePixelRatio()
+    assert gap > 0
+    assert (image.pixelColor(round(image.width() / 2), round(gap / 2 * ratio)).name()
+            == panel._header_colors()[0])
+
+    ts = array.array('d', (i * 0.1 for i in range(100)))
+    panel.add_series('Speed', SignalSeries(None, 'Msg', 1, 'Speed', 'km/h', ts, ts))
+    window.btn_cursor1.setChecked(True)
+    window.btn_cursor2.setChecked(True)
+    assert_lined_up(panel)
+    # Titles shown, with a panel beside the plot (alone, it shows none):
+    # the header takes in the plot's title row too.
+    panel.set_table_view(True)
+    assert_lined_up(panel)
+    panel.panels.set_titles_shown(True)
+    assert_lined_up(panel)
+    assert panel.table.horizontalHeader().height() > panel.plot_header.height()
+    panel.panels.set_titles_shown(False)
+    assert_lined_up(panel)
+    assert top_and_bottom(panel.table.horizontalHeader()) == top_and_bottom(panel.plot_header)
+    window.resize(1400, 600)
+    assert_lined_up(panel)
+    # Another tab's table too.
+    window.plot_tabs.add_tab()
+    assert window.plot_panel is not panel
+    assert_lined_up(window.plot_panel)
 
 
 def test_the_table_ends_level_with_the_plot(qapp, window):
-    # Under the plot are the panel's margin and, once signals are plotted,
-    # the cursor line; the table leaves the same space under it.
+    # Under the plot's card are the panel's margin and the file name's line;
+    # the table's card leaves the same space under it.
     import array
     from PySide6.QtCore import QPoint
     from core.signal_store import SignalSeries
@@ -306,7 +346,9 @@ def test_the_table_ends_level_with_the_plot(qapp, window):
 
     def assert_level():
         qapp.processEvents()
-        assert bottom(window.plot_panel.table) == bottom(window.plot_panel.view_stack)
+        # The plot's card (gui.panel_area): its outline is the plot's edge.
+        card = window.plot_panel.panels._group_of('plot')
+        assert bottom(window.plot_panel.table_card) == bottom(card)
 
     assert_level()
     ts = array.array('d', (i * 0.1 for i in range(100)))
@@ -322,32 +364,178 @@ def test_the_table_ends_level_with_the_plot(qapp, window):
     assert_level()
 
 
-def test_only_the_cursor_line_lies_under_the_plot(qapp, window):
-    # How to plot signals is told on the empty plot; no hint line under the
-    # plot repeats it once signals are plotted.
-    import array
+def test_the_gap_beside_the_table_is_the_gap_between_panels(qapp, window):
+    # The table's card and the plot's are as far apart as two panels' cards
+    # (feedback item 14): one gutter, not the splitter's handle plus the
+    # plot tab's margin. The gutter still resizes the table.
     from PySide6.QtCore import QPoint
+    from gui.panel_area import GUTTER
+
+    panel = window.plot_panel
+    panel.add_xy_view('scatter')
+    qapp.processEvents()
+
+    def left_and_right(widget):
+        left = widget.mapTo(window, QPoint(0, 0)).x()
+        return left, left + widget.width()
+
+    table, plot = left_and_right(panel.table_card), left_and_right(panel.panels.card_of('plot'))
+    xy = left_and_right(panel.panels.card_of('xy'))
+    between_panels = xy[0] - plot[1]
+    assert between_panels == GUTTER
+    assert plot[0] - table[1] == between_panels
+    splitter = window.center_splitter
+    assert splitter.handleWidth() == GUTTER
+    sizes = splitter.sizes()
+    splitter.moveSplitter(sizes[0] + 40, 1)
+    qapp.processEvents()
+    assert splitter.sizes()[0] == sizes[0] + 40
+    table, plot = left_and_right(panel.table_card), left_and_right(panel.panels.card_of('plot'))
+    assert plot[0] - table[1] == GUTTER
+
+
+def test_the_signal_panels_cards_line_up_with_the_plot_areas(qapp, window):
+    # Feedback item 15: the signal panel's two cards, drawn as the panels
+    # are. The head's card starts level with the plot tabs and ends a gutter
+    # above the table's and plot's cards; the tree's card is level with
+    # those cards, and its band with the time plot's band. Docked on either
+    # side; floating, it keeps its own even margin.
+    from PySide6.QtCore import QPoint, Qt
+    from gui.panel_area import GUTTER
+    from gui.signal_tree import MARGIN
+
+    tree, dock = window.signal_tree, window.left_dock
+    assert dock.titleBarWidget() is tree.head            # the name still drags it
+
+    def span(widget):
+        top = widget.mapTo(window, QPoint(0, 0)).y()
+        return top, top + widget.height()
+
+    def side(widget):
+        left = widget.mapTo(window, QPoint(0, 0)).x()
+        return left, left + widget.width()
+
+    def assert_lined_up(outer_side):
+        for _ in range(4):
+            qapp.processEvents()
+        panel = window.plot_panel
+        plot_card = panel.panels.card_of('plot')
+        cards_top, cards_bottom = span(plot_card)
+        head_top, head_bottom = span(tree.search_card)
+        assert head_top == span(window.plot_tabs.strip)[0]
+        assert cards_top - head_bottom == GUTTER
+        assert span(tree.tree_card) == (cards_top, cards_bottom)
+        assert span(tree.tree_card) == span(panel.table_card)
+        assert span(tree.tree_band) == span(panel.plot_header)
+        # The window's margin on its outer side; on the side toward the plot
+        # area, the gap holds the panel's handle.
+        left, right = side(tree.tree_card)
+        dock_left, dock_right = side(dock)
+        if outer_side == 'left':
+            assert (left - dock_left, dock_right - right) == (MARGIN, 0)
+        else:
+            assert (left - dock_left, dock_right - right) == (0, MARGIN)
+        assert side(tree.search_card) == (left, right)
+
+    assert_lined_up('left')
+    window.resize(1200, 640)
+    assert_lined_up('left')
+    window.plot_tabs.add_tab()
+    assert_lined_up('left')
+    window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+    assert_lined_up('right')
+    window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+    assert_lined_up('left')
+    dock.setFloating(True)
+    for _ in range(4):
+        qapp.processEvents()
+    margins = tree.body.layout().contentsMargins()
+    assert (margins.left(), margins.right()) == (MARGIN, MARGIN)
+    assert tree._tree_gap.height() == GUTTER and tree._below.height() == MARGIN
+    dock.setFloating(False)
+    assert_lined_up('left')
+    # A taller time plot band: the tree's band follows it, in the tab shown.
+    first = window.plot_panel
+    first.plot_header.setMinimumHeight(first.plot_header.height() + 12)
+    assert_lined_up('left')
+    second = window.plot_tabs.panels()[1]
+    second.plot_header.setMinimumHeight(first.plot_header.height() + 6)
+    for panel in (second, first, second):
+        window.plot_tabs.bar.setCurrentIndex(window.plot_tabs.panels().index(panel))
+        assert window.plot_panel is panel
+        assert_lined_up('left')
+    # A search font a little too big for the room: the head starts higher,
+    # and the tree's card still lines up with the plot's, a gutter under it.
+    plot_card = window.plot_panel.panels.card_of('plot')
+    room = span(plot_card)[0] - GUTTER - span(window.plot_tabs.strip)[0]
+    font = tree.search_edit.font()
+    while tree.search_card.minimumSizeHint().height() <= room:
+        font.setPointSizeF(font.pointSizeF() + 0.5)
+        tree.search_edit.setFont(font)
+    window.resize(1200, 660)
+    for _ in range(4):
+        qapp.processEvents()
+    assert span(tree.search_card)[0] < span(window.plot_tabs.strip)[0]
+    assert span(plot_card)[0] - span(tree.search_card)[1] == GUTTER
+    assert span(tree.tree_card) == span(plot_card)
+
+
+def test_the_cursor_readout_heads_the_plot_and_the_file_name_lies_under_it(qapp, window):
+    # The readout is in the time plot's header band, at the top of its card;
+    # under the plots is the file name's line, as before. How to plot
+    # signals is told on the empty plot, and no hint line repeats it.
+    import array
+    from PySide6.QtCore import QPoint, QRect
     from PySide6.QtWidgets import QLabel
     from core.signal_store import SignalSeries
+    from gui.panel_area import CARD_INSET, HeaderBand
 
     panel = window.plot_panel
     ts = array.array('d', (i * 0.1 for i in range(100)))
     panel.add_series('Speed', SignalSeries(None, 'Msg', 1, 'Speed', 'km/h', ts, ts))
+    panel.set_measurement_file('C:/logs/bench_run.mf4')
     qapp.processEvents()
 
-    plot = panel.view_stack.geometry()
+    header, area = panel.plot_header, panel.panels
+    card = area._group_of('plot')
+    assert isinstance(header, HeaderBand)
+    assert panel.cursor_label.isVisible() and panel.cursor_label.parentWidget() is header
+    assert panel.file_name_label.isVisible()
+    assert panel.file_name_label.parentWidget() is not header
+
+    def on_panel(widget):
+        return QRect(widget.mapTo(panel, QPoint(0, 0)), widget.size())
+
+    assert on_panel(header).top() == on_panel(card).top() + CARD_INSET
+    assert on_panel(panel.view_stack).top() == on_panel(header).bottom() + 1
+    plot = on_panel(panel.view_stack)
 
     def under_plot(label):
         top_left = label.mapTo(panel, QPoint(0, 0))
-        return top_left.y() > plot.bottom() and plot.left() <= top_left.x() <= plot.right()
+        return (top_left.y() > plot.bottom()
+                and on_panel(card).left() <= top_left.x() <= plot.right())
 
     assert [label for label in panel.findChildren(QLabel)
-            if label.isVisible() and under_plot(label)] == [panel.cursor_label]
+            if label.isVisible() and under_plot(label)] == [panel.file_name_label]
+
+    # With another panel beside it, its title, shown at the card's top
+    # edge, covers the band exactly.
+    def on_screen(widget):
+        return QRect(widget.mapToGlobal(QPoint(0, 0)), widget.size())
+
+    panel.set_table_view(True)
+    qapp.processEvents()
+    area._timer.stop()
+    area.peek(card, hold=60)
+    qapp.processEvents()
+    assert on_screen(card.strip) == on_screen(header)
+    area.peek(None)
 
 
 def test_plotting_the_first_signal_resizes_neither_plot_nor_table(qapp, window):
-    # The cursor line keeps its room under the empty plot. Making room for it
-    # when the first signals were plotted drew every stacked row once more.
+    # The plot's header band keeps its room over the empty plot. Making room
+    # for the readout when the first signals were plotted drew every stacked
+    # row once more.
     import array
     from core.signal_store import SignalSeries
 
@@ -365,15 +553,33 @@ def test_plotting_the_first_signal_resizes_neither_plot_nor_table(qapp, window):
     assert (panel.view_stack.size(), panel.table.size()) == (plot, table)
 
 
-def test_the_empty_cursor_line_does_not_hold_the_plot_wide(qapp, window):
+def test_the_cursor_readout_does_not_hold_the_plot_wide(qapp, window):
+    # In the time plot's own card, the readout of both cursors would keep
+    # the plot from narrowing as the panels beside it widen.
+    import array
+    from core.signal_store import SignalSeries
+
+    panel = window.plot_panel
+    ts = array.array('d', (i * 0.1 for i in range(100)))
+    panel.add_series('Speed', SignalSeries(None, 'Msg', 1, 'Speed', 'km/h', ts, ts))
+    window.btn_cursor1.setChecked(True)
+    window.btn_cursor2.setChecked(True)
+    qapp.processEvents()
+    readout = panel.cursor_label
+    assert readout.isVisible() and 'ΔT' in readout.text()
+    assert panel.plot_card.minimumSizeHint().width() < readout.sizeHint().width() // 2
+
+
+def test_the_empty_plot_header_does_not_hold_the_plot_wide(qapp, window):
     panel = window.plot_panel
     assert not panel.cursor_label.isVisible()
-    assert panel._cursor_line.minimumSizeHint().width() == 0
+    margins = panel.plot_header.layout().contentsMargins()
+    assert panel.plot_header.minimumSizeHint().width() <= margins.left() + margins.right()
 
 
 def test_the_cursor_readout_reads_a_point_larger_than_the_table(qapp, window):
-    # It stands out from the signal values in the table. The file name after
-    # it and the tag beside it read in its font.
+    # It stands out from the signal values in the table. The file name under
+    # the plots and the tag under the table read in its font.
     import array
     from core.signal_store import SignalSeries
 

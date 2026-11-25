@@ -27,6 +27,7 @@ from core.bus_types import BusType, channel_label
 from core.raw_frame_store import FrameSearch, RawFrameStore
 from core.trace_differences import previous_frames, window_differences
 from core.trace_query import ColourRule, Colouring, TraceCatalog, TraceFilter
+from gui.panel_area import HeaderBand
 from gui.user_settings import read_setting, write_setting
 
 _WINDOW = 5_000
@@ -542,7 +543,15 @@ class RawFrameDialog(QDialog):
             'On: picking a frame moves plot Cursor 1 to it, and moving Cursor 1 '
             'brings its frame into view.')
 
-        top_row = QHBoxLayout()
+        # The panel's name, while its title is folded away (gui.panel_area).
+        self.name_label = QLabel('CAN Trace')
+        self.name_label.setContentsMargins(0, 0, 8, 0)
+        self.name_label.hide()
+        # Its header band (gui.panel_area), across the top of its panel.
+        self.header = HeaderBand()
+        top_row = QHBoxLayout(self.header)
+        top_row.setContentsMargins(6, 2, 6, 2)
+        top_row.addWidget(self.name_label)
         top_row.addWidget(self.search_edit, 1)
         top_row.addWidget(self.hit_label)
         top_row.addWidget(self.prev_button)
@@ -604,9 +613,13 @@ class RawFrameDialog(QDialog):
 
         # ── Layout ────────────────────────────────────────────────────────
         layout = QVBoxLayout(self)
-        layout.addLayout(top_row)
-        layout.addLayout(status_row)
-        layout.addLayout(body, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.header)
+        content = QVBoxLayout()
+        content.setContentsMargins(6, 0, 6, 6)
+        content.addLayout(status_row)
+        content.addLayout(body, 1)
+        layout.addLayout(content, 1)
 
         # ── Connections ───────────────────────────────────────────────────
         # Typing waits for a pause: each search looks at every frame, and a
@@ -1388,6 +1401,14 @@ class RawFrameDialog(QDialog):
         self.set_option('follow_cursor', on)
         if on and self._follow_time is not None:
             self._follow_now()
+
+    def keyPressEvent(self, event) -> None:
+        # A dialog closes on Escape; as a panel in a tab it is no window to
+        # close, so Escape is left to the window around it.
+        if event.key() == Qt.Key.Key_Escape and not self.isWindow():
+            event.ignore()
+            return
+        super().keyPressEvent(event)
 
     def follow_time(self, t: float) -> None:
         """Cursor 1 is at *t*: show its frame (the last at or before *t*)

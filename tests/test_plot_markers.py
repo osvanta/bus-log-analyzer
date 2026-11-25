@@ -494,7 +494,10 @@ def test_the_bins_are_drawn_where_they_are_clicked_and_light_up_under_the_pointe
     go_to.hide()
 
 
-def test_each_bin_sits_just_after_its_rows_text(panel):
+def test_the_bins_sit_in_one_column_clear_of_the_longest_text(panel):
+    # One column toward the right, not each bin right after its own name
+    # (feedback item 12).
+    from gui.bin_menu import BinMenu
     panel.add_marker(1.0)                                     # short: M1
     panel.add_marker(123456.789, 'A rather long marker name')
     menu, go_to = _open_go_to(panel)
@@ -508,12 +511,12 @@ def test_each_bin_sits_just_after_its_rows_text(panel):
         geometry, area = go_to.actionGeometry(row), go_to.bin_area(row)
         top, bottom = geometry.top() + 1, geometry.bottom()
         text_end = max(x for x in range(geometry.left(), area.left()) if lit(x, top, bottom))
-        assert 0 < area.left() - text_end <= 12            # beside the text ...
+        assert area.left() - text_end >= BinMenu.BIN_GAP // 2   # well clear of the text ...
         assert not any(lit(x, top, bottom) for x in range(area.left(), area.left() + 4))
-        assert any(lit(x, top, bottom) for x in range(area.left(), area.right()))   # ... not over it
-        assert area.right() <= geometry.right()            # and inside the row
+        assert any(lit(x, top, bottom) for x in range(area.left(), area.right()))   # ... drawn
+        assert area.right() == geometry.right() - BinMenu.BIN_RIGHT  # at the row's right
     short, long_ = go_to.actions()
-    assert go_to.bin_area(short).left() < go_to.bin_area(long_).left()
+    assert go_to.bin_area(short).left() == go_to.bin_area(long_).left()   # one column
     go_to.hide()
 
 
@@ -761,20 +764,38 @@ def test_delete_markers_opens_its_menu_and_deletes_them_all(window, monkeypatch)
 def test_delete_markers_works_from_the_overflow_menu(window, qapp, monkeypatch):
     # Squeezed out of the row, the button is reached through "»", whose
     # entry clicks it; the menu then opens at the pointer.
+    from PySide6.QtGui import QCursor
     panel = window.plot_panel
-    monkeypatch.setattr(panel, '_make_menu', lambda parent=None: _RecordingMenu())
-    _RecordingMenu.shown = []
+    button = window.btn_markers
+    fill_menu = button.menu
+    shown = []
+
+    class _Shown:
+        # The Markers menu as it would open, recorded where a real one
+        # would wait for a click.
+        def __init__(self):
+            self.menu = fill_menu()
+
+        def exec(self, at):
+            shown.append((self.menu, at))
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(button, 'menu', _Shown)
     panel.add_marker(2.0)
     window.show()
     window.resize(300, 600)
     qapp.processEvents()
     row = window.plot_button_row
-    assert window.btn_delete_markers in row.overflowed_buttons()
+    assert button in row.overflowed_buttons()
     row._fill_menu()
-    entry = next(a for a in row.more_menu.actions() if a.text() == 'Delete Markers')
+    entry = next(a for a in row.more_menu.actions() if a.text() == 'Markers')
     assert entry.isEnabled()
     entry.trigger()
-    _RecordingMenu.shown[0].actions()[0].trigger()
+    menu, at = shown[0]
+    assert at == QCursor.pos()
+    next(a for a in menu.actions() if a.text() == 'Delete all markers (1)').trigger()
     assert panel.markers() == []
 
 

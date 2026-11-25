@@ -70,7 +70,10 @@ def _row(window):
 
 def test_the_row_reads_in_the_order_of_the_work(window):
     assert _row(window) == ['File', '|', 'Open Measurement', 'Databases', 'Decode', '|',
-                            'Calculated Signal', 'Trace', 'Tools', '|', 'Help']
+                            'Calculated Signal', 'Tools', '|', 'Help']
+    # Trace is in the plot's Views menu, with the other panels.
+    assert 'CAN Trace' in [action.text().split('	')[0]
+                           for action in window.btn_views.menu().actions()]
 
 
 def test_the_file_menu_holds_what_is_done_now_and_then(window):
@@ -205,12 +208,16 @@ def test_decode_waits_for_a_measurement(window):
 def test_clear_plot_sits_apart_at_the_end_of_the_plot_buttons(window):
     from PySide6.QtWidgets import QAbstractButton
 
+    # In the More menu, the last button of the row, away from the buttons
+    # used every minute.
     row = window.plot_button_row
     buttons = row.findChildren(QAbstractButton)
-    assert window.btn_clear_plot in buttons
+    assert window.btn_more in buttons
+    assert window.btn_more in row._end_buttons
+    assert window.btn_clear_plot not in row._buttons
+    clear = next(a for a in window.btn_more.menu().actions() if a.text() == 'Clear Plot')
+    assert 'Ctrl+Z' in clear.toolTip()
     assert window.btn_clear_plot.accessibleName() == 'Clear Plot'
-    assert 'Ctrl+Z' in window.btn_clear_plot.toolTip()
-    assert row._buttons[-1] is window.btn_clear_plot
 
 
 def test_clear_plot_needs_decoded_signals_and_no_calculation(window, monkeypatch):
