@@ -131,6 +131,8 @@ def _judge_step(number: int, step: dict, broken: bool, failures: list, warnings:
         failures.append(f'{where}: the file was not opened')
     if step.get('databases_assigned') is False:
         failures.append(f'{where}: the Database Manager did not keep the databases')
+    if step['op'] == 'responsive' and step.get('outcome') != 'measured':
+        failures.append(f"{where}: {step.get('outcome') or 'not measured'}")
     if step['op'] == 'load':
         outcome = step.get('outcome')
         if outcome == 'timed out':
@@ -163,7 +165,7 @@ def render(header: list[str], measurements: list[Measurement], runs: list[Run],
         '',
         f'RESULT: {verdict}   {len(counted) - failed} of {len(counted)} runs passed'
         + (f', {failed} failed' if failed else '')
-        + ('' if all(passed for _, passed in sections) else '; the known-good timing did not pass'),
+        + ('' if all(passed for _, passed in sections) else '; a known-good check did not pass'),
         '',
         'Files (names are in the separate files list, which stays on this PC):',
         *(f'  {m.describe()}' for m in measurements),
@@ -225,6 +227,9 @@ def _step_text(step: dict) -> str:
         parts.append(f"{step['warnings']} skipped item(s)")
     if 'plotted' in step:
         parts.append(f"{step['plotted']} plotted")
+    if 'rows' in step:
+        parts.append(f"{len(step['rows'])} state(s) timed in a window "
+                     f"{step.get('window', ['?', '?'])[0]} x {step.get('window', ['?', '?'])[1]}")
     if 'load_running_at_close' in step:
         parts.append('closed while loading' if step['load_running_at_close'] else 'closed after the load')
     if 'exit_seconds' in step:

@@ -121,8 +121,11 @@ class KnownGood:
         return self.values.get(item_id, {}).get(build, {}).get(which)
 
 
-def read_known_good(path: Path) -> KnownGood:
-    """The reference files and the fixed limits in a known-good file."""
+def read_known_good(path: Path, reference_id: re.Pattern = _REFERENCE_ID,
+                    item_id: re.Pattern = _ITEM_ID) -> KnownGood:
+    """The reference files and the fixed limits in a known-good file: the
+    rows whose first cell is a *reference_id* or an *item_id* (the timing
+    check's R1 and KG-01 unless told otherwise)."""
     known = KnownGood(path)
     headings: list[str] = []
     for line in path.read_text(encoding='utf-8').splitlines():
@@ -135,9 +138,9 @@ def read_known_good(path: Path) -> KnownGood:
         if not headings:
             headings = [cell.lower() for cell in cells]
             continue
-        if _REFERENCE_ID.match(cells[0]) and len(cells) > 1:
+        if reference_id.match(cells[0]) and len(cells) > 1:
             known.references[cells[0]] = cells[1].replace('\\', '/')
-        elif _ITEM_ID.match(cells[0]):
+        elif item_id.match(cells[0]):
             for column, heading in enumerate(headings[:len(cells)]):
                 build = next((b for b in BUILDS if b in heading), None)
                 which = next((w for w in ('baseline', 'limit') if w in heading), None)

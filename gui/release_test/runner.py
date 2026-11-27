@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui import crash_log
-from gui.release_test import SCENARIO_FLAG, timing
+from gui.release_test import SCENARIO_FLAG, responsiveness, timing
 from gui.release_test.driver import LOAD_TIMEOUT
 from gui.release_test.plan import build_scenarios, find_measurements, select
 from gui.release_test.report import Run, anonymise, crash_log_session, files_list, judge, render
@@ -261,14 +261,24 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
     folder = args.folder.resolve()
     measurements = find_measurements(folder) if folder.is_dir() else []
     scenarios = build_scenarios(measurements, args.heavy)
-    known = None
+    known = responsive = None
     problems: list[str] = []
     states: list[timing.PcState] = []   # before the runs, and after them
     if args.known_good is not None:
         known = timing.read_known_good(args.known_good)
         timed, problems = timing.timing_scenarios(measurements, known.references, folder)
         scenarios += timed
+        responsive = responsiveness.read_known_good(args.known_good)
+        timed, more = responsiveness.scenarios(measurements, responsive.references, folder)
+        scenarios += timed
+        problems += more
     scenarios = select(scenarios, args.only)
+    # A known-good check left out by --only is not reported as not measured.
+    families = {scenario.family for scenario in scenarios}
+    if timing.FAMILY not in families and responsiveness.FAMILY in families:
+        known = None
+    if responsiveness.FAMILY not in families:
+        responsive = None
     packaged = getattr(sys, 'frozen', False)
     started = time.time()
     header = [
@@ -280,8 +290,8 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
         f'Started: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))}',
         f'Tier: {"heavy" if args.heavy else "standard"}   Rounds: {args.repeat}',
     ]
-    if known is not None:
-        header.append(f'Known-good file: {known.path.name}')
+    if args.known_good is not None:
+        header.append(f'Known-good file: {args.known_good.name}')
         header += [f'  Known-good file: {problem}' for problem in problems]
     for line in header[1:]:
         window.say(line)
@@ -307,9 +317,14 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
         header.append(f'Took: {int(took // 60)} min {int(took % 60)} s')
         stamp = time.strftime('%Y%m%d_%H%M%S', time.localtime(started))
         sections = []
-        if known is not None:
+        if known is not None or responsive is not None:
             states.append(timing.pc_state())
+        if known is not None:
             sections.append(timing.summary(runs, known, packaged, states))
+            for line in sections[-1][0]:
+                window.say(line)
+        if responsive is not None:
+            sections.append(responsiveness.summary(runs, responsive, packaged, states))
             for line in sections[-1][0]:
                 window.say(line)
         text = anonymise(render(header, measurements, runs, sections), measurements, folder)
@@ -331,7 +346,7 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
 
     test.finished.connect(finish)
     app.aboutToQuit.connect(test.stop)
-    if known is not None:
+    if known is not None or responsive is not None:
         states.append(timing.pc_state())
     test.start()
     code = app.exec()
