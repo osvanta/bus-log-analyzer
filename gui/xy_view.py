@@ -37,6 +37,7 @@ from core.xy_data import (
 )
 from gui.panel_area import STRIP_BUTTON_SIZE, TITLE_BUTTONS_ROOM, HeaderBand
 from gui.plot_icons import plot_icon
+from gui.plot_painting import PlotView, PreparedViewBox, grid_axes
 
 #: Blue for low to red for high (the turbo scale without its two dark ends,
 #: which a black plot background would hide).
@@ -474,7 +475,7 @@ class XYView(QWidget):
         self.cursor_lines: list[pg.InfiniteLine] = []
         self.res_marks: list[pg.ScatterPlotItem] = []
         if kind == SCATTER:
-            self.plot = shown = pg.PlotWidget()
+            self.plot = shown = PlotView(viewBox=PreparedViewBox(), axisItems=grid_axes())
             self.plot.setMenuEnabled(False)
             self.plot.showGrid(x=True, y=True, alpha=0.25)
             self.scatter = pg.ScatterPlotItem(pxMode=True, size=_POINT_SIZE, pen=None)
@@ -485,7 +486,7 @@ class XYView(QWidget):
                 self.plot.addItem(item)
             self.plot.scene().sigMouseClicked.connect(self._on_click)
         elif bars:
-            self.hist_plot = shown = pg.PlotWidget()
+            self.hist_plot = shown = PlotView(viewBox=PreparedViewBox(), axisItems=grid_axes())
             self.hist_plot.setMenuEnabled(False)
             self.hist_plot.showGrid(x=False, y=True, alpha=0.25)
             self.hist_plot.getPlotItem().vb.setMouseEnabled(x=False, y=False)
@@ -504,7 +505,7 @@ class XYView(QWidget):
             self.hist_plot.scene().sigMouseMoved.connect(self._on_bar_hover)
             self.hist_plot.scene().sigMouseClicked.connect(self._on_bar_click)
         else:
-            self.res_plot = shown = pg.PlotWidget()
+            self.res_plot = shown = PlotView(viewBox=PreparedViewBox(), axisItems=grid_axes())
             self.res_plot.setMenuEnabled(False)
             self.res_plot.getPlotItem().vb.setMouseEnabled(x=False, y=False)
             self.cells = _CellGrid()

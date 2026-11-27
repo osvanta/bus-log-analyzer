@@ -12,7 +12,8 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QAction, QBrush, QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter,
+    QAction, QBrush, QColor, QFont, QFontMetrics, QFontMetricsF, QIcon, QKeySequence,
+    QPainter,
     QPalette, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from core import trace_query
 from core.bus_types import BusType, channel_label
-from core.raw_frame_store import FrameSearch, RawFrameStore
+from core.raw_frame_store import FLAG_DECODED, FrameSearch, RawFrameStore
 from core.trace_differences import previous_frames, window_differences
 from core.trace_query import ColourRule, Colouring, TraceCatalog, TraceFilter
 from gui.panel_area import HeaderBand
@@ -48,6 +49,17 @@ _HEADERS = ['Time (s)', 'Δt (ms)', 'Chn', 'ID', 'Name', 'Dir', 'DLC', 'Data / V
 _CHANGED_ROLE = Qt.ItemDataRole.UserRole + 1
 #: Item data of a signal row's Name cell: (message, signal, number, shown).
 _SIGNAL_ROLE = Qt.ItemDataRole.UserRole + 2
+_USER_ROLE = int(Qt.ItemDataRole.UserRole)
+_RIGHT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+#: A decoded frame not opened yet shows its arrow without rows under it.
+_OPENS = QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+_OPENED = QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless
+#: Frames read from the store at once when a row is first asked for.
+_ROW_CHUNK = 256
+#: Columns holding digits and a point only: where every digit is as wide as
+#: any other, two of their texts of one shape are equally wide.
+_DIGIT_COLUMNS = (_TIME, _DELTA, _DLC)
+_DIGITS_ALIKE = str.maketrans('123456789', '000000000')
 
 #: The user setting holding the Trace's choices, and their defaults.
 _OPTIONS_KEY = 'trace_options'
@@ -87,6 +99,132 @@ def _tint(colour: str, alpha: int) -> QBrush:
     return QBrush(c)
 
 
+class _FrameRow(QTreeWidgetItem):
+    """The row of one frame. What it shows is worked out when first asked
+    for: the table holds 5,000 rows and shows some forty, and writing every
+    cell of every row was most of the 0.35 s each step of the Trace took."""
+
+    def __init__(self, rows: '_WindowRows', position: int) -> None:
+        super().__init__()
+        self._rows: _WindowRows | None = rows
+        self._position = position
+
+    def data(self, column: int, role: int):
+        rows = self._rows
+        if rows is not None:
+            if role == _USER_ROLE and column == 0:
+                return rows.indices[self._position]
+            self._rows = None
+            rows.fill(self, self._position)
+        return super().data(column, role)
+
+
+class _WindowRows:
+    """What the rows of the frames loaded show, for each row as it is first
+    asked for (:class:`_FrameRow`)."""
+
+    def __init__(self, tree: QTreeWidget, store: RawFrameStore, indices: list[int],
+                 delta, changed, numbers, is_hit, brushes: list, hit_brush: QBrush) -> None:
+        self._tree = tree
+        self._store = store
+        self.indices = indices
+        self._delta_ms = None if delta is None else (delta * 1000).tolist()
+        # Which bytes changed, as one text of 0 and 1 for all the rows.
+        self._marks = self._width = None
+        if changed is not None:
+            self._width = changed.shape[1]
+            self._marks = (np.ascontiguousarray(changed).view(np.uint8)
+                           + np.uint8(48)).tobytes().decode('ascii')
+        self._numbers = None if numbers is None else numbers.tolist()
+        self._is_hit = None if is_hit is None else is_hit.tolist()
+        self._brushes = brushes
+        self._hit_brush = hit_brush
+        self._labels: dict = {}
+        self._records: dict[int, list] = {}
+
+    def _record(self, position: int):
+        """The frame of row *position*; None once the measurement is closed."""
+        chunk, offset = divmod(position, _ROW_CHUNK)
+        records = self._records.get(chunk)
+        if records is None:
+            start = chunk * _ROW_CHUNK
+            try:
+                records = self._store.get_window(self.indices[start:start + _ROW_CHUNK])
+            except (RuntimeError, ValueError, OSError):
+                records = []
+            self._records[chunk] = records
+        return records[offset] if offset < len(records) else None
+
+    def cells(self, position: int) -> tuple[list[str], str]:
+        """The texts of row *position*, and which of its data bytes changed
+        (a text of 0 and 1, empty when none did)."""
+        rec = self._record(position)
+        if rec is None:
+            return [''] * _COL, ''
+        channel_key = rec.channel_key
+        ch_text = self._labels.get(channel_key)
+        if ch_text is None:
+            ch_text = self._labels[channel_key] = channel_label(channel_key)
+        data = rec.data[:rec.dlc]
+        delta_text = ''
+        delta_ms = self._delta_ms
+        if delta_ms is not None and delta_ms[position] == delta_ms[position]:
+            delta_text = f'{delta_ms[position]:.3f}'
+        shown = ''
+        if self._marks is not None:
+            at = position * self._width
+            shown = self._marks[at:at + len(data)]
+            if '1' not in shown:
+                shown = ''
+        return [
+            f'{rec.time_s:.6f}',
+            delta_text,
+            ch_text,
+            f'{rec.arbitration_id:X}',
+            rec.frame_name or ('(decoded)' if rec.decoded else '(unmatched)'),
+            rec.direction,
+            str(rec.dlc),
+            data.hex(' ').upper(),
+        ], shown
+
+    def fill(self, item: QTreeWidgetItem, position: int) -> None:
+        """Write row *position* into its *item*. The table is not told: the
+        row is being asked for, so whoever asks gets it as written."""
+        texts, shown = self.cells(position)
+        model = self._tree.model()
+        blocked = model.blockSignals(True)
+        try:
+            for col, text in enumerate(texts):
+                item.setText(col, text)
+            item.setTextAlignment(_DELTA, _RIGHT)
+            if shown:
+                item.setData(_DATA, _CHANGED_ROLE, shown)
+            numbers = self._numbers
+            if numbers is not None and numbers[position] and numbers[position] < len(self._brushes):
+                brush = self._brushes[numbers[position]]
+                for col in range(_COL):
+                    item.setBackground(col, brush)
+            if self._is_hit is not None and self._is_hit[position]:
+                item.setBackground(_NAME, self._hit_brush)
+            # The store index, for decoding the signals when the row is opened.
+            item.setData(0, _USER_ROLE, self.indices[position])
+        finally:
+            model.blockSignals(blocked)
+
+
+class _Advances(dict):
+    """How far each byte of a Data cell moves the pen in one font, with the
+    space after it; asked of the font once per byte."""
+
+    def __init__(self, font: QFont) -> None:
+        super().__init__()
+        self._metrics = QFontMetrics(font)
+
+    def __missing__(self, byte: str) -> int:
+        width = self[byte] = self._metrics.horizontalAdvance(byte + ' ')
+        return width
+
+
 class _DataDelegate(QStyledItemDelegate):
     """The Data column, with the bytes that changed since the previous frame
     of the same kind drawn bold in the highlight colour."""
@@ -94,6 +232,16 @@ class _DataDelegate(QStyledItemDelegate):
     def __init__(self, dialog: 'RawFrameDialog') -> None:
         super().__init__(dialog)
         self._dialog = dialog
+        # How wide each byte is drawn, plain and bold, in the font last used:
+        # asking the font for every byte of every row on screen was most of
+        # the time the table took to draw.
+        self._advances: tuple[str, dict, dict] = ('', {}, {})
+
+    def _byte_advances(self, font: QFont, bold: QFont) -> tuple[dict, dict]:
+        key = font.key()
+        if self._advances[0] != key:
+            self._advances = (key, _Advances(font), _Advances(bold))
+        return self._advances[1], self._advances[2]
 
     def _changes(self, index) -> str:
         if not self._dialog.highlight_changes:
@@ -126,15 +274,14 @@ class _DataDelegate(QStyledItemDelegate):
         bold = QFont(opt.font)
         bold.setBold(True)
         accent = self.colour(opt.palette)
+        plain_widths, bold_widths = self._byte_advances(opt.font, bold)
         painter.save()
         x = rect.left() + 3
         for number, byte in enumerate(text.split(' ')):
             hit = number < len(changed) and changed[number] == '1'
-            font = bold if hit else opt.font
-            metrics = QFontMetrics(font)
-            painter.setFont(font)
+            painter.setFont(bold if hit else opt.font)
             painter.setPen(accent if hit else plain)
-            width = metrics.horizontalAdvance(byte + ' ')
+            width = (bold_widths if hit else plain_widths)[byte]
             painter.drawText(QRect(x, rect.top(), width, rect.height()),
                              int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                              byte)
@@ -511,6 +658,15 @@ class RawFrameDialog(QDialog):
         self._follow_timer.setInterval(_FOLLOW_PAUSE_MS)
         self._follow_timer.timeout.connect(self._follow_now)
 
+        # Column widths: what Qt measured for each text, and for what font.
+        self._widths: list[dict[str, int]] = [{} for _ in range(_COL)]
+        self._fit_seen: tuple | None = None
+        self._fit_digits = False
+        self._fit_bytes: list[tuple[dict, float]] | None = None
+        #: The width each column was last fitted to. The last column fills
+        #: the room left, so its own width shows only here.
+        self._fitted = [0] * _COL
+
         # ── Toolbar: Search, its hits, Filter, Follow ────────────────────
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText(
@@ -564,6 +720,7 @@ class RawFrameDialog(QDialog):
         # ── Status ────────────────────────────────────────────────────────
         self.status_label = QLabel()
         self.status_label.setStyleSheet('color: #8B949E; font-size: 11px;')
+        self._status_room: tuple[int, int] | None = None
         self.cursor_label = QLabel()
         self.cursor_label.setStyleSheet('color: #8B949E; font-size: 11px;')
         status_row = QHBoxLayout()
@@ -581,7 +738,10 @@ class RawFrameDialog(QDialog):
             _DATA, 'Bytes that changed since the previous frame with the same ID '
                    'on the same channel are bold and coloured.')
         self.tree.setAlternatingRowColors(True)
-        self.tree.setUniformRowHeights(False)
+        # Every row is one line of the same font. Told so, Qt places a row
+        # by its number; untold, it asked every row above it for its height
+        # (eight cells each) whenever a row far down was made current.
+        self.tree.setUniformRowHeights(True)
         self.tree.setRootIsDecorated(True)
         self.tree.setItemDelegateForColumn(_DATA, _DataDelegate(self))
         self.tree.setColumnHidden(_DELTA, not self._options['delta_column'])
@@ -1229,9 +1389,6 @@ class RawFrameDialog(QDialog):
         else:
             indices = self._matching[w_start:w_end].tolist()
 
-        # Fetch records from store (disk read for data bytes)
-        records = self._raw_store.get_window(indices)
-
         delta = changed = None
         if indices and self._previous.ready:
             delta, changed = window_differences(
@@ -1249,46 +1406,20 @@ class RawFrameDialog(QDialog):
         brushes = [None] + [_tint(rule.colour, _ROW_ALPHA) for rule in self._rules]
         hit_brush = _tint(HIT_COLOUR, _HIT_ALPHA)
 
+        # The rows are made empty and written when first shown (_FrameRow):
+        # a move of Cursor 1 to another part of the file waited 0.35 s for
+        # 5,000 rows of which forty are seen.
+        rows = _WindowRows(self.tree, self._raw_store, indices, delta, changed,
+                           numbers, is_hit, brushes, hit_brush)
+        decoded: list = []
+        if indices:
+            flags = np.frombuffer(self._raw_store.flags, dtype=np.uint8)[index_array]
+            decoded = ((flags & np.uint8(FLAG_DECODED)) != 0).tolist()
         top_items: list[QTreeWidgetItem] = []
-        for rec in records:
-            position = len(top_items)
-            ch_text = channel_label(rec.channel_key)
-            id_text = f'{rec.arbitration_id:X}'
-            data_hex = ' '.join(f'{b:02X}' for b in rec.data[:rec.dlc])
-            delta_text = ''
-            if delta is not None and delta[position] == delta[position]:
-                delta_text = f'{delta[position] * 1000:.3f}'
-
-            top = QTreeWidgetItem([
-                f'{rec.time_s:.6f}',
-                delta_text,
-                ch_text,
-                id_text,
-                rec.frame_name or ('(decoded)' if rec.decoded else '(unmatched)'),
-                rec.direction,
-                str(rec.dlc),
-                data_hex,
-            ])
-            top.setTextAlignment(_DELTA, Qt.AlignmentFlag.AlignRight
-                                 | Qt.AlignmentFlag.AlignVCenter)
-            if changed is not None:
-                shown = changed[position, :len(rec.data[:rec.dlc])]
-                if shown.any():
-                    top.setData(_DATA, _CHANGED_ROLE,
-                                ''.join('1' if c else '0' for c in shown))
-            if numbers is not None and numbers[position] and numbers[position] < len(brushes):
-                brush = brushes[numbers[position]]
-                for col in range(_COL):
-                    top.setBackground(col, brush)
-            if is_hit is not None and is_hit[position]:
-                top.setBackground(_NAME, hit_brush)
-            # Store store-index in item data for lazy signal decode
-            top.setData(0, Qt.ItemDataRole.UserRole, indices[position])
-            # Placeholder child so the expand arrow appears for decoded frames
-            if rec.decoded:
-                placeholder = QTreeWidgetItem(['…'])
-                placeholder.setData(0, Qt.ItemDataRole.UserRole, -1)  # sentinel
-                top.addChild(placeholder)
+        for position, opens in enumerate(decoded):
+            top = _FrameRow(rows, position)
+            if opens:
+                top.setChildIndicatorPolicy(_OPENS)     # its arrow
             top_items.append(top)
 
         self.tree.setUpdatesEnabled(False)
@@ -1303,15 +1434,187 @@ class RawFrameDialog(QDialog):
         finally:
             self._following = False
         self.tree.setUpdatesEnabled(True)
-
-        for col in range(_COL):
-            self.tree.resizeColumnToContents(col)
+        self._fit_columns(top_items, rows)
 
         ts_arr = np.frombuffer(self._raw_store.timestamps, dtype=np.float64)
         t_win_s = float(ts_arr[indices[0]]) if indices else None
         t_win_e = float(ts_arr[indices[-1]]) if indices else None
         self.time_bar.set_window(t_win_s, t_win_e)
         self._show_status(t_win_s, t_win_e)
+
+    # ── Column widths ─────────────────────────────────────────────────────
+
+    def _measured_rows(self, count: int) -> list[int]:
+        """The rows resizeColumnToContents measures in a table of *count*
+        frames, none opened: those on screen, then their neighbours below and
+        above in turn, up to the header's precision (1,000 rows); with the
+        end of the table on screen, the last rows up to that many. Kept in
+        step with QTreeView.sizeHintForColumn; a test compares the two."""
+        tree = self.tree
+        limit = tree.header().resizeContentsPrecision()
+        start = tree.indexAt(QPoint(1, 0)).row()
+        end = tree.indexAt(QPoint(1, tree.viewport().rect().bottom())).row()
+        bottom = count - 1
+        if start < 0 or end < 0 or end == bottom:
+            end = bottom
+            start = max(0, end - limit)
+        rows: list[int] = []
+        done = 0
+        for row in range(start, end + 1):
+            rows.append(row)
+            done += 1
+            if done == limit:
+                break
+        end -= 1
+        while done != limit and (start > 0 or end < bottom):
+            if (done % 2 and start > 0) or end == bottom:
+                start -= 1
+                rows.append(start)
+            else:
+                end += 1
+                rows.append(end)
+            done += 1
+        return rows
+
+    def _fit_signature(self) -> tuple:
+        """What a measured width depends on besides its text."""
+        tree = self.tree
+        return (tree.font().key(), id(tree.style()), tree.devicePixelRatioF(),
+                tree.logicalDpiX(), self.highlight_changes)
+
+    def _digits_alike(self) -> bool:
+        """Whether, in the table's font, a digit is as wide as any other,
+        next to any digit, a point or a minus."""
+        metrics = QFontMetricsF(self.tree.font())
+        digits = '0123456789'
+        for shape, seconds in (('{}{}', digits), ('{}.', ' '), ('.{}', ' '), ('-{}', ' ')):
+            widths = {round(metrics.horizontalAdvance(shape.format(a, b)), 3)
+                      for a in digits for b in seconds}
+            if len(widths) != 1:
+                return False
+        return True
+
+    def _byte_widths(self) -> list[tuple[dict, float]] | None:
+        """How wide each byte of a Data cell is written and the space between
+        two, plain and bold, when a cell is as wide as its bytes and spaces
+        together (the font moves no letter towards a space); else None."""
+        tokens = [f'{byte:02X}' for byte in range(256)]
+        tables = []
+        for bold in (False, True):
+            font = QFont(self.tree.font())
+            font.setBold(bold)
+            advance = QFontMetricsF(font).horizontalAdvance
+            space = advance(' ')
+            widths = {'': 0.0}
+            for token in tokens:
+                width = widths[token] = advance(token)
+                if (abs(advance(token + ' ') - width - space) > 1e-3
+                        or abs(advance(' ' + token) - width - space) > 1e-3):
+                    return None
+            for first in range(0, 256, 16):
+                row = tokens[first:first + 16]
+                together = sum(widths[token] for token in row) + space * (len(row) - 1)
+                if abs(advance(' '.join(row)) - together) > 1e-3:
+                    return None
+            tables.append((widths, space))
+        return tables
+
+    def _fit_columns(self, items: list[QTreeWidgetItem], source: _WindowRows) -> None:
+        """Make each column as wide as resizeColumnToContents does: the
+        wider of its heading and its widest cell among the rows measured.
+
+        Qt measured some 8,000 cells again on every step of the Trace, 120 ms
+        of a 350 ms step. A cell's width follows from its text alone, so Qt is
+        asked once for each text and the answer kept; of the Data cells, all
+        different, it is asked for the widest only. The widths are the same.
+        """
+        tree = self.tree
+        header = tree.header()
+        if header.resizeContentsPrecision() <= 0:      # another rule: Qt's own
+            for col in range(_COL):
+                tree.resizeColumnToContents(col)
+            return
+        signature = self._fit_signature()
+        if signature != self._fit_seen:
+            self._fit_seen = signature
+            self._widths = [{} for _ in range(_COL)]
+            self._fit_digits = self._digits_alike()
+            self._fit_bytes = self._byte_widths()
+        rows = self._measured_rows(len(items)) if items else []
+        cells = [source.cells(row) for row in rows]
+        marked = self.highlight_changes
+
+        def measured(row: int, col: int) -> int:
+            return tree.sizeHintForIndex(tree.indexFromItem(items[row], col)).width()
+
+        tree_column = header.logicalIndex(0)
+        for col in range(_COL):
+            known = self._widths[col]
+            alike = self._fit_digits and col in _DIGIT_COLUMNS
+            widest = -1
+            if col == _DATA and self._fit_bytes is not None:
+                # Plain, the widest text is the widest cell; bold (a cell
+                # with changed bytes), the widest bold text is.
+                (plain, space), (bold, bold_space) = self._fit_bytes
+                best = [(-1.0, -1), (-1.0, -1)]
+                for at, (texts, shown) in enumerate(cells):
+                    data = texts[col].split(' ')
+                    width = sum(map(plain.__getitem__, data)) + space * (len(data) - 1)
+                    if width > best[0][0]:
+                        best[0] = (width, rows[at])
+                    if marked and shown:
+                        width = sum(map(bold.__getitem__, data)) + bold_space * (len(data) - 1)
+                        if width > best[1][0]:
+                            best[1] = (width, rows[at])
+                for _width, row in best:
+                    if row >= 0:
+                        widest = max(widest, measured(row, col))
+            else:
+                for at, (texts, shown) in enumerate(cells):
+                    text = texts[col]
+                    if alike:
+                        text = text.translate(_DIGITS_ALIKE)
+                    elif col == _DATA and marked and shown:
+                        text += '*'          # some bytes are drawn bold
+                    width = known.get(text)
+                    if width is None:
+                        width = known[text] = measured(rows[at], col)
+                    if width > widest:
+                        widest = width
+            if rows:
+                widest = max(widest, 0)
+                if col == tree_column and tree.rootIsDecorated():
+                    widest += tree.indentation()
+            heading = 0 if header.isHidden() else header.sectionSizeHint(col)
+            self._fitted[col] = max(widest, heading)
+            header.resizeSection(col, self._fitted[col])
+
+    def _keep_status_width(self, n: int) -> None:
+        """Give the status line the room its longest text needs, whichever
+        frames are shown.
+
+        Its room was that of the text it showed, a few pixels more or less
+        with every other frame number and time. The Trace as a panel is no
+        narrower than this line, so in a window with no room to spare each
+        step of the Trace moved the panels beside it, and every plot was
+        resized and drawn again with each move of Cursor 1.
+        """
+        total = len(self._raw_store)
+        if self._status_room == (n, total):
+            return
+        self._status_room = (n, total)
+        label = self.status_label
+        metrics = label.fontMetrics()
+        times = np.frombuffer(self._raw_store.timestamps, dtype=np.float64)[:total]
+        longest_time = ''
+        if total:
+            longest_time = max(_fmt_t(float(times[0])), _fmt_t(float(times[total - 1])), key=len)
+        widest_digit = max('0123456789', key=metrics.horizontalAdvance)
+        longest = (f'Showing frames {n:,}–{n:,} of {n:,} shown  '
+                   f'({longest_time} → {longest_time})  '
+                   f'| Total in file: {total:,}').translate(
+                       str.maketrans('0123456789', widest_digit * 10))
+        label.setMinimumWidth(metrics.horizontalAdvance(longest) + 2 * label.margin() + 2)
 
     def _show_status(self, t_win_s=None, t_win_e=None, *, keep_times: bool = False) -> None:
         if not keep_times:
@@ -1322,6 +1625,7 @@ class RawFrameDialog(QDialog):
         text = (f'Showing frames {self._win_start+1:,}–{w_end:,} of {n:,} shown  '
                 f'({_fmt_t(t_win_s)} → {_fmt_t(t_win_e)})  '
                 f'| Total in file: {len(self._raw_store):,}')
+        self._keep_status_width(n)
         if self._search is not None:
             text += f'  | Searching… {self._search.progress:.0%}'
         if not self._previous.ready:
@@ -1491,19 +1795,15 @@ class RawFrameDialog(QDialog):
 
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
         """Decode signals for this frame on first expand."""
-        # Check if placeholder is still present
-        if item.childCount() == 0:
-            return
-        first_child = item.child(0)
-        if first_child is None or first_child.data(0, Qt.ItemDataRole.UserRole) != -1:
+        # A decoded frame keeps its arrow without rows until first opened.
+        if item.parent() is not None or item.childIndicatorPolicy() != _OPENS:
             return   # already decoded
 
         store_idx = item.data(0, Qt.ItemDataRole.UserRole)
         if store_idx is None or store_idx < 0:
             return
 
-        # Remove placeholder
-        item.removeChild(first_child)
+        item.setChildIndicatorPolicy(_OPENED)
 
         # Fetch the record first so we have rec.channel for per-channel lookup
         from core.models import RawFrame

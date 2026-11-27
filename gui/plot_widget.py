@@ -60,6 +60,9 @@ from gui.xy_view import KIND_NAMES, KINDS, SCATTER, XYView
 from gui.edge_tab import _mix
 from gui.bin_menu import BinMenu
 from gui.panel_area import CARD_INSET, Card, HeaderBand, PanelArea
+from gui.plot_painting import (
+    GridAxis, LayoutView, PlotView, PreparedViewBox, paint_exposed_part,
+)
 from gui.plot_tag import TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
 from gui.stack_sections import StackSectionArea
@@ -310,7 +313,7 @@ class _MarkerListMenu(BinMenu):
         return True
 
 
-class _LeftAxis(pg.AxisItem):
+class _LeftAxis(GridAxis):
     """Left AxisItem that keeps its title adjacent to tick labels even when setWidth()
     expands the item far beyond its natural content width.
 
@@ -365,7 +368,7 @@ class _LeftAxis(pg.AxisItem):
             QTimer.singleShot(0, self._apply_title_pos)
 
 
-class _ZoomViewBox(pg.ViewBox):
+class _ZoomViewBox(PreparedViewBox):
     """A plot area that, while Rectangle Zoom is on, turns a left drag into a
     box and zooms the plot to the box when the button is let go. With Shift
     held as it is let go, it zooms out instead.
@@ -516,7 +519,7 @@ class _BottomClippedTextItem(QGraphicsTextItem):
         super().paint(painter, option, widget)
 
 
-class _StackedLeftAxis(pg.AxisItem):
+class _StackedLeftAxis(GridAxis):
     """
     Left axis for stacked mode:
     1. Label anchored to BOTTOM of row  (text start = bottom edge)
@@ -1213,7 +1216,8 @@ class PlotPanel(QWidget):
 
         # ── Normal / multi-axis plot ──────────────────────────────────────
         _left_axis = _LeftAxis()
-        self.plot = pg.PlotWidget(axisItems={'left': _left_axis}, viewBox=_ZoomViewBox(self))
+        self.plot = PlotView(axisItems={'left': _left_axis, 'bottom': GridAxis('bottom')},
+                             viewBox=_ZoomViewBox(self))
         _left_axis._panel = self  # enables multi-axis drag routing in mouseDragEvent
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setLabel('bottom', 'Time (seconds)')
@@ -1251,7 +1255,7 @@ class PlotPanel(QWidget):
         _host_layout.addWidget(self.overlay_label, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
         # State lanes under the Multi-Axis plot, above its time axis.
         _host_layout.setVerticalSpacing(0)
-        self.lane_strip = pg.GraphicsLayoutWidget()
+        self.lane_strip = LayoutView()
         self.lane_strip.setBackground(self._background_color)
         self.lane_strip.ci.setContentsMargins(0, 0, 0, 0)
         self.lane_strip.ci.setSpacing(0)
@@ -1263,7 +1267,7 @@ class PlotPanel(QWidget):
         self.plot.getAxis('left').geometryChanged.connect(self._fit_strip_axes)
 
         # ── Stacked plot (GraphicsLayoutWidget) ──────────────────────────
-        self.glw = pg.GraphicsLayoutWidget()
+        self.glw = LayoutView()
         self.glw.setBackground(self._background_color)
         self.glw.setAcceptDrops(True)
         self.glw.viewport().setAcceptDrops(True)
@@ -2731,7 +2735,7 @@ class PlotPanel(QWidget):
                     main_axis.setStyle(showValues=False)
             else:
                 # Extra group → new floating AxisItem + ViewBox
-                axis = pg.AxisItem('left')
+                axis = GridAxis('left')
                 vb   = _ZoomViewBox(self)
                 # Disable auto-range before X-linking so the first setData()
                 # doesn't propagate an auto-range reset to the main plot.
@@ -2835,7 +2839,7 @@ class PlotPanel(QWidget):
                 _left_ax = _StackedLeftAxis('left')
                 p: pg.PlotItem = self.glw.addPlot(
                     row=idx, col=0,
-                    axisItems={'left': _left_ax},
+                    axisItems={'left': _left_ax, 'bottom': GridAxis('bottom')},
                     viewBox=_ZoomViewBox(self),
                 )
                 p.showGrid(x=True, y=True, alpha=0.25)
@@ -2967,7 +2971,8 @@ class PlotPanel(QWidget):
         lane = self.lane_of(key)
         p: pg.PlotItem = layout.addPlot(
             row=row, col=0,
-            axisItems={'left': LaneAxis(plotted.series.signal_name, plotted.color, axis_width)},
+            axisItems={'left': LaneAxis(plotted.series.signal_name, plotted.color, axis_width),
+                       'bottom': GridAxis('bottom')},
             viewBox=_ZoomViewBox(self),
         )
         p.setMenuEnabled(False)
@@ -3162,6 +3167,9 @@ class PlotPanel(QWidget):
         curve.setClipToView(True)
         curve.setDownsampling(auto=True, method='peak')   # kwarg is 'method', not 'mode'
         _hook_display_dataset(curve)
+        # A cursor moving over the plot repaints two thin columns: only the
+        # curve's segments there are drawn, not the curve from end to end.
+        paint_exposed_part(curve.curve)
 
     @staticmethod
     def _curve_connect_mask(ts: np.ndarray, vs: np.ndarray) -> np.ndarray:
@@ -4297,33 +4305,32 @@ class PlotPanel(QWidget):
 
     def _update_table_values(self, x: float, col: int = 2) -> None:
         """Update Cursor 1 (col=2) or Cursor 2 (col=3) value column."""
-        self.table.setUpdatesEnabled(False)
-        try:
-            for key, plotted in self._items.items():
-                if not plotted.visible:
-                    continue
-                row = self._row_lookup.get(key)
-                if row is None:
-                    continue
-                cell = self.table.item(row, col)
-                if cell is None:
-                    continue
-                idx = self._nearest_index(plotted.series.timestamps, x)
-                if idx is None:
-                    continue
-                value = plotted.series.display_value_at(idx)
-                if isinstance(value, str):
-                    cell.setText(value)
-                else:
-                    try:
-                        cell.setText(f"{float(value):.3f}")
-                    except (TypeError, ValueError):
-                        cell.setText(str(value))
-            self._update_delta()
-            if col == 2:
-                self._update_hex(x)
-        finally:
-            self.table.setUpdatesEnabled(True)
+        # Each cell that changes is repainted, and Qt paints them together
+        # once this returns. Updates switched off and on again round the loop
+        # repainted the whole table with every move of a cursor.
+        for key, plotted in self._items.items():
+            if not plotted.visible:
+                continue
+            row = self._row_lookup.get(key)
+            if row is None:
+                continue
+            cell = self.table.item(row, col)
+            if cell is None:
+                continue
+            idx = self._nearest_index(plotted.series.timestamps, x)
+            if idx is None:
+                continue
+            value = plotted.series.display_value_at(idx)
+            if isinstance(value, str):
+                cell.setText(value)
+            else:
+                try:
+                    cell.setText(f"{float(value):.3f}")
+                except (TypeError, ValueError):
+                    cell.setText(str(value))
+        self._update_delta()
+        if col == 2:
+            self._update_hex(x)
 
     def _update_delta(self) -> None:
         """Fill the Δ column: each signal's Cursor 2 value minus its Cursor 1
