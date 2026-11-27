@@ -48,7 +48,7 @@ The pictures follow your GitHub theme. They show a made-up demo vehicle; nothing
 | ASC (`.asc`) | Raw CAN and LIN frames | DBC or ARXML for CAN, LDF for LIN |
 | TRC (`.trc`) | Raw CAN frames, from PEAK PCAN trace files (PCAN-View, PCAN-Explorer; versions 1.0 to 3.0) | DBC or ARXML |
 | MDF4/MDF3 (`.mf4`, `.mdf`) | Raw CAN or LIN bus logging, or pre-decoded signals | Required only for raw bus logging |
-| CSV (`.csv`) | Raw CAN export, narrow signals, or wide signals | Required only for raw CAN data |
+| CSV (`.csv`) | Raw CAN export (incl. CSS Electronics CANedge and CANsub CSV files), narrow signals, or wide signals | Required only for raw CAN data |
 
 MDF and CSV content is detected automatically. The Database Manager assigns a DBC, ARXML or LDF database to each bus channel, mixes database formats, shows how well each database matches the frames on its channel, and has an all-channels fallback per bus.
 
