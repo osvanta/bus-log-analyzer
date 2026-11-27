@@ -178,6 +178,8 @@ jobs:
             2. Unzip anywhere
             3. Run `BusLogAnalyzer.exe` — no Python installation required
 
+            > ⚠️ This release is unsigned. Windows may show a SmartScreen warning — click **More info → Run anyway**.
+
             ### Check the download
             `BusLogAnalyzer_${{ github.ref_name }}_SHA256SUMS.txt` holds the SHA-256 of each file. In PowerShell:
             `Get-FileHash BusLogAnalyzer_${{ github.ref_name }}_Windows.zip` must print the same hash.
@@ -185,19 +187,21 @@ jobs:
             `BusLogAnalyzer_${{ github.ref_name }}_sbom.cdx.json` is the software bill of materials (CycloneDX): every package the release was built with, and its version.
 
             ### Supported formats
-            - Vector BLF (`.blf`) — requires DBC
-            - Vector ASC (`.asc`) — requires DBC
-            - ASAM MF4 (`.mf4`) — no DBC needed
-            - ASAM MDF (`.mdf`) — no DBC needed
-            - CSV signal files (`.csv`) — no DBC needed
-
-            > ⚠️ This release is unsigned. Windows may show a SmartScreen warning — click **More info → Run anyway**.
+            | Measurement | Content | Database |
+            |---|---|---|
+            | BLF (`.blf`), ASC (`.asc`) | Raw CAN and LIN frames | DBC or ARXML for CAN, LDF for LIN |
+            | TRC (`.trc`) | Raw CAN frames from PEAK PCAN trace files, versions 1.0 to 3.0 | DBC or ARXML |
+            | MF4, MDF (`.mf4`, `.mdf`) | Raw CAN or LIN bus logging, or decoded signals | Only for raw bus logging |
+            | CSV (`.csv`) | Raw CAN frames, or signals in columns | Only for raw CAN frames |
 
             ### Requirements
             - Windows 10 or later (64-bit)
 
-            ### Security and data handling
-            See [Security and data handling](https://osvanta.github.io/bus-log-analyzer/security-and-data/) in the user guide.
+            ### Getting started
+            - [User guide](https://osvanta.com/products/bus-log-analyzer/help/) — also **Help ▸ Getting started** (F1) in the application
+            - [Tutorial videos](https://www.youtube.com/@osvanta)
+            - [Security and data handling](https://osvanta.com/products/bus-log-analyzer/help/security-and-data/): what the application writes, and that it opens no network connection of its own
+            - Questions and ideas: [GitHub Discussions](https://github.com/${{ github.repository }}/discussions) · Problems: [issues](https://github.com/${{ github.repository }}/issues)
 
             ### Changes
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
