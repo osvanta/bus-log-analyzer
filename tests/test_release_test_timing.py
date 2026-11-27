@@ -318,7 +318,7 @@ def test_a_failed_timing_section_fails_the_report(tmp_path):
 
     text = render(['header'], [], runs, [(['Known-good timing: FAIL'], False)])
 
-    assert 'RESULT: FAIL   1 of 1 runs passed; the known-good timing did not pass' in text
+    assert 'RESULT: FAIL   1 of 1 runs passed; a known-good check did not pass' in text
     assert 'Known-good timing: FAIL' in text
     assert 'tree listed 900 ms after the click' in text
     assert 'drawn in 80 ms' in text

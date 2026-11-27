@@ -3993,6 +3993,14 @@ class MainWindow(QMainWindow):
         self.left_edge_btn.setAccessibleName(self.left_edge_btn.toolTip())
         self.bottom_edge_btn.setAccessibleName(self.bottom_edge_btn.toolTip())
         self._position_panel_toggle_buttons()
+        # A panel shown or hidden changes the room the plot area has and the
+        # gap kept beside it. Laid out now, the plots take their final size
+        # before anything is painted; left to the queued layout passes, they
+        # were painted at a size in between first, and then again.
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+        self._center_layout.activate()
 
     def _position_panel_toggle_buttons(self) -> None:
         # Each handle lies in the gap between its panel and the plot area,
