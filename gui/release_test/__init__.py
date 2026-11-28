@@ -19,7 +19,10 @@ It is hidden, and needs nothing but the release zip::
 ``--repeat`` runs every scenario N times. ``--only a_b_a,each_once`` limits
 the scenarios, and ``--quit-when-done`` closes the runner at the end with exit
 code 0 when every run passed. See ``plan`` for how the folder is laid out, and
-``report`` for what passes.
+``report`` for what passes. ``--known-good <file>`` adds the timing check
+(``timing``) and the responsiveness check (``responsiveness``), each against
+the fixed limits in that file; ``--only timing`` or ``--only responsive``
+runs one of them.
 
 The report, ``release_test_<time>_report.txt``, is written into the folder's
 ``release_test_reports`` subfolder.

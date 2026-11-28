@@ -66,7 +66,8 @@ class Measurement:
 
 @dataclass(frozen=True)
 class Step:
-    op: str                     # open, settle, load, plot, plot_stacked, close_during_load
+    op: str                     # open, settle, load, plot, plot_stacked, responsive,
+    #                             close_during_load
     file: int | None = None     # index into the measurements, for open
 
     def to_json(self) -> dict:
@@ -79,8 +80,8 @@ class Scenario:
     title: str
     steps: tuple[Step, ...]
     memcheck: bool = False      # run in the build with Python's memory checks
-    family: str = ''            # "timing" for the known-good timing scenarios
-    reference: str = ''         # R1, R2, …: the reference file a timing scenario loads
+    family: str = ''            # "timing" and "responsive" for the known-good scenarios
+    reference: str = ''         # R1, P1, …: the file a known-good scenario loads
 
     @property
     def loads(self) -> int:
@@ -88,7 +89,8 @@ class Scenario:
 
 
 def select(scenarios: list[Scenario], only: str) -> list[Scenario]:
-    """The scenarios ``--only`` names, by name or by family (``timing``)."""
+    """The scenarios ``--only`` names, by name or by family (``timing``,
+    ``responsive``)."""
     if not only:
         return scenarios
     wanted = set(only.split(','))

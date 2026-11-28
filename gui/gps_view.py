@@ -45,6 +45,7 @@ from core.xy_data import color_steps
 from gui.map_background import MapBackground
 from gui.panel_area import STRIP_BUTTON_SIZE, TITLE_BUTTONS_ROOM, HeaderBand
 from gui.plot_icons import plot_icon
+from gui.plot_painting import PlotView, PreparedViewBox
 from gui.xy_view import _ColorScale, _ElidedLabel, _backdrop, duration_text, scale_color
 
 TRACK = 'track'
@@ -199,7 +200,7 @@ class _MapKey(QWidget):
                              self.text())
 
 
-class _TrackViewBox(pg.ViewBox):
+class _TrackViewBox(PreparedViewBox):
     """Pans with a drag as any plot; Shift+drag draws a box instead."""
 
     def __init__(self) -> None:
@@ -365,7 +366,7 @@ class GPSView(QWidget):
         self.view_box = _TrackViewBox()
         self.view_box.setDefaultPadding(0.06)
         self.view_box.on_box = self._box_drawn
-        self.plot = pg.PlotWidget(viewBox=self.view_box)
+        self.plot = PlotView(viewBox=self.view_box)
         self.plot.setMenuEnabled(False)
         self.plot.hideAxis('left')
         self.plot.hideAxis('bottom')

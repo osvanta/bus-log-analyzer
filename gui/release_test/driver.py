@@ -33,6 +33,8 @@ import tracemalloc
 import weakref
 from pathlib import Path
 
+import statistics
+
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from shiboken6 import Shiboken
@@ -51,6 +53,16 @@ TIMED_PLOT_SIGNALS = 5      # plotted in Stacked by a timing scenario
 # readers has finished, as it would after a user has picked a file.
 PRELOAD_THREAD = 'Measurement support preload'
 SETTLE_SECONDS = 1.0
+# A responsiveness scenario: the window's size, the signals plotted, how often
+# each action is timed (the median counts), how long the window must be quiet
+# for an action to be over, and how long the Trace's Δt index may take.
+RESPONSIVE_WINDOW = (1260, 780)
+RESPONSIVE_LOWER = 750
+RESPONSIVE_SIGNALS = 6
+RESPONSIVE_REPEATS = 5
+QUIET_SECONDS = 0.15
+BUSY_LIMIT_SECONDS = 20.0
+TRACE_READY_SECONDS = 120.0
 # A message box is answered with the first of these its buttons have.
 _ANSWER_ROLES = (
     QMessageBox.ButtonRole.RejectRole, QMessageBox.ButtonRole.NoRole,
@@ -186,6 +198,8 @@ class ScenarioDriver(QObject):
                 yield from self._plot(record)
             elif step['op'] == 'plot_stacked':
                 self._plot_stacked(record)
+            elif step['op'] == 'responsive':
+                yield from self._responsive(record)
             elif step['op'] == 'close_during_load':
                 yield from self._close_during_load(record)
                 return
@@ -312,6 +326,121 @@ class ScenarioDriver(QObject):
         record['plot_collections'] = collections.found
         record['plotted'] = len(window.plot_panel.plotted_keys())
         record['outcome'] = 'plotted'
+
+    # ── Responsiveness ────────────────────────────────────────────────────
+
+    def _busy_ms(self, action) -> float:
+        """How long the GUI thread works for *action*: the call itself and
+        the events it leaves behind, until the window has been quiet for
+        QUIET_SECONDS. Painting is part of it; idling is not."""
+        started = time.perf_counter()
+        action()
+        spent = time.perf_counter() - started
+        last = time.perf_counter()
+        while (time.perf_counter() - last < QUIET_SECONDS
+               and time.perf_counter() - started < BUSY_LIMIT_SECONDS):
+            before = time.perf_counter()
+            QApplication.processEvents()
+            took = time.perf_counter() - before
+            if took > 0.002:
+                spent += took
+                last = time.perf_counter()
+            else:
+                time.sleep(0.004)
+        return spent * 1000
+
+    def _typical_ms(self, action, repeats: int = RESPONSIVE_REPEATS) -> float:
+        return round(statistics.median(self._busy_ms(action) for _ in range(repeats)), 1)
+
+    def _responsive(self, record: dict):
+        """Plot six signals in Stacked, then open the Table, the CAN Trace,
+        the XY plot, the histogram, the residency map and the GPS track one
+        after another; with the plot alone and after each panel, time what a
+        user does all the time (see gui.release_test.responsiveness)."""
+        from gui.gps_view import TRACK
+        from gui.xy_view import HISTOGRAM, RESIDENCY, SCATTER
+
+        window = self._window
+        record['file'] = self._current_file['alias'] if self._current_file else None
+        store = window.store
+        if store is None:
+            record['outcome'] = 'nothing to measure'
+            return
+        window.showNormal()
+        window.resize(*RESPONSIVE_WINDOW)
+        yield from self._wait(0.5)
+        record['window'] = [window.width(), window.height()]
+        window.btn_stacked.setChecked(True)
+        keys = sorted(store.all_keys())[:RESPONSIVE_SIGNALS]
+        opened = {'plot': round(self._busy_ms(lambda: window.add_signals_to_plot(keys)), 1)}
+        record['plotted'] = len(window.plot_panel.plotted_keys())
+        rows: dict[str, dict] = {}
+        record.update(opened_ms=opened, rows=rows)
+        yield from self._wait(0.3)
+        rows['plot'] = self._responsive_row()
+        panel = window.plot_panel
+        for state, open_panel in (
+                ('table', window.btn_table.toggle),
+                ('trace', window.show_raw_frames),
+                ('xy', lambda: panel.add_xy_view(SCATTER)),
+                ('histogram', lambda: panel.add_xy_view(HISTOGRAM)),
+                ('residency', lambda: panel.add_xy_view(RESIDENCY)),
+                ('gps', lambda: panel.add_xy_view(TRACK))):
+            opened[state] = round(self._busy_ms(open_panel), 1)
+            yield from self._wait(0.3)
+            if state == 'trace':
+                yield from self._trace_ready()
+            rows[state] = self._responsive_row()
+        record['outcome'] = 'measured'
+
+    def _trace_ready(self):
+        """Wait until the Trace has worked out its Δt column: on a large
+        measurement it does so in steps, between the user's actions."""
+        trace = getattr(self._window, '_raw_frame_dialog', None)
+        index = getattr(trace, '_previous', None)
+        deadline = time.monotonic() + TRACE_READY_SECONDS
+        while index is not None and not index.ready and time.monotonic() < deadline:
+            yield
+        yield from self._wait(0.3)
+
+    def _responsive_row(self) -> dict:
+        """Each action's typical time in the window's present state, and the
+        slower of the PC's speed before and after."""
+        from gui.release_test.timing import pc_speed_ms
+
+        window = self._window
+        panel = window.plot_panel
+        low, high = panel.time_range() or (0.0, 100.0)
+        length = high - low
+        speeds = [pc_speed_ms()]
+        row = {}
+        jumps = iter(low + length * part for part in (0.2, 0.35, 0.5, 0.65, 0.8))
+        row['cursor_jump'] = self._typical_ms(lambda: window._place_cursor1(next(jumps)))
+        steps = iter(low + length * (0.45 + part)
+                     for part in (0.0, 0.0004, 0.0009, 0.0003, 0.0012, 0.0006))
+        self._busy_ms(lambda: window._place_cursor1(next(steps)))
+        row['cursor_step'] = self._typical_ms(lambda: window._place_cursor1(next(steps)))
+        zooms = iter(((0.1, 0.5), (0.3, 0.6), (0.2, 0.9), (0.4, 0.5), (0.0, 1.0)))
+
+        def zoom(parts) -> None:
+            panel.zoom_to_time(low + length * parts[0], low + length * parts[1], margin=0.0)
+        row['zoom'] = self._typical_ms(lambda: zoom(next(zooms)))
+        self._busy_ms(lambda: zoom((0.2, 0.5)))
+        pans = iter((0.25, 0.30, 0.35, 0.40, 0.45))
+
+        def pan(start: float) -> None:
+            panel.show_time_range(low + length * start, low + length * (start + 0.3))
+        row['pan'] = self._typical_ms(lambda: pan(next(pans)))
+        self._busy_ms(lambda: zoom((0.0, 1.0)))
+        wide, tall = RESPONSIVE_WINDOW
+        heights = iter((RESPONSIVE_LOWER, tall, RESPONSIVE_LOWER, tall, RESPONSIVE_LOWER))
+        row['resize'] = self._typical_ms(lambda: window.resize(wide, next(heights)))
+        self._busy_ms(lambda: window.resize(wide, tall))
+        row['repaint'] = self._typical_ms(window.repaint)
+        row['signal_panel'] = self._typical_ms(window._toggle_left_panel, repeats=4)
+        speeds.append(pc_speed_ms())
+        row['speed_ms'] = max(speeds)
+        return row
 
     def _plot(self, record: dict):
         window = self._window
