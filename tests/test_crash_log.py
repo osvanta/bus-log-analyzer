@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,24 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Windows fail-fast: how both Qt's fatal errors and native crashes end.
 FAIL_FAST = 0xC0000409
 ACCESS_VIOLATION = 0xC0000005
+
+
+def _ended_in_a_fatal_error(returncode: int, *, fault_too: bool = True) -> bool:
+    """Whether the process was ended by Qt's fail-fast or Python's abort.
+
+    Windows reports a status code, POSIX the signal: abort(), or with
+    *fault_too* the access violation a thread torn down mid-run may raise.
+    """
+    if sys.platform == 'win32':
+        codes = (FAIL_FAST, ACCESS_VIOLATION) if fault_too else (FAIL_FAST,)
+        return returncode & 0xFFFFFFFF in codes
+    codes = (-signal.SIGABRT, -signal.SIGSEGV) if fault_too else (-signal.SIGABRT,)
+    return returncode in codes
+
+
+# What faulthandler calls a native crash.
+NATIVE_CRASH = ('Windows fatal exception: access violation' if sys.platform == 'win32'
+                else 'Fatal Python error: Segmentation fault')
 
 _PRELUDE = r"""
 import sys, threading, time
@@ -69,7 +88,7 @@ destroy_running_thread()
 
     # Usually fail-fast; now and then the still-running thread faults first
     # while the process is being torn down.
-    assert completed.returncode & 0xFFFFFFFF in (FAIL_FAST, ACCESS_VIOLATION)
+    assert _ended_in_a_fatal_error(completed.returncode)
     assert ("Qt fatal error, the application is terminated: "
             "QThread: Destroyed while thread") in log
     assert "destroy_running_thread" in log
@@ -188,7 +207,7 @@ crash_natively()
 """, tmp_path / "crash.log")
 
     assert completed.returncode != 0
-    assert "Windows fatal exception: access violation" in log
+    assert NATIVE_CRASH in log
     assert "crash_natively" in log
 
 
@@ -284,7 +303,7 @@ thread.start()
     session = _session(log.read_text(encoding="utf-8"))
     assert "Shutting down with 1 thread(s) still running." in session
     assert "Session ended normally." not in session
-    assert completed.returncode & 0xFFFFFFFF == FAIL_FAST
+    assert _ended_in_a_fatal_error(completed.returncode, fault_too=False)
 
 
 def test_an_oversized_log_is_rotated(tmp_path):

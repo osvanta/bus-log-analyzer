@@ -567,7 +567,10 @@ def test_the_cursor_readout_does_not_hold_the_plot_wide(qapp, window):
     qapp.processEvents()
     readout = panel.cursor_label
     assert readout.isVisible() and 'ΔT' in readout.text()
-    assert panel.plot_card.minimumSizeHint().width() < readout.sizeHint().width() // 2
+    # Were the readout part of the card's minimum, the card could not be
+    # narrower than it. (Not half of it: the other controls' widths depend
+    # on the desktop's font.)
+    assert panel.plot_card.minimumSizeHint().width() < readout.sizeHint().width()
 
 
 def test_the_empty_plot_header_does_not_hold_the_plot_wide(qapp, window):

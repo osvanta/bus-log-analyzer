@@ -73,7 +73,8 @@ bus-log-analyzer/
 │   ├── dbc_manager.py            # Database Manager dialog: per-bus-channel DBC/ARXML/LDF, match quality bars
 │   ├── splash.py                 # SplashScreen — minimisable, taskbar-visible splash screen
 │   ├── gc_guard.py               # Runs Python's cyclic garbage collector on the GUI thread only
-│   ├── app_data.py               # Where logs and settings live: %LOCALAPPDATA%\Osvanta\BusLogAnalyzer when packaged, next to app.py from source
+│   ├── app_data.py               # Where logs and settings live: %LOCALAPPDATA%\Osvanta\BusLogAnalyzer when packaged (~/.local/share/Osvanta/BusLogAnalyzer on Linux), next to app.py from source
+│   ├── fonts.py                  # The monospace and interface typefaces: Consolas and Segoe UI on Windows, the desktop's own elsewhere
 │   ├── crash_log.py              # BLA_crash.log: Qt fatal errors, native crashes, freezes, uncaught exceptions
 │   ├── app_log.py                # busloganalyzer_applog.log: every Log line and the warnings behind them, rotated at 1 MB
 │   ├── session_restore.py        # Last session: asks Save / Don't save / Cancel on close, keeps osvanta_last_session.json (refreshed each minute), offers it at start
@@ -99,7 +100,11 @@ bus-log-analyzer/
 ├── requirements-release.in       # requirements.txt + PyInstaller: the input of the release lock
 ├── requirements-release.txt      # The release lock: every package, version and hash CI installs
 ├── BusLogAnalyzer.spec           # PyInstaller spec, bundles resources/, config/ and ldfparser grammars;
-│                                 #   builds BusLogAnalyzer.exe and appdebugger.exe (-X dev)
+│                                 #   builds BusLogAnalyzer.exe and appdebugger.exe (-X dev); on Linux and
+│                                 #   macOS the same two without the suffix
+├── run_dev.bat, run_dev.sh       # Start from source: Windows, and Linux or macOS
+├── build.bat, build_portable.bat # Build the portable folder on Windows
+├── build.sh                      # Build the folder on Linux or macOS
 ├── .github/workflows/build.yml  # On a v*.*.* tag: test, build, SBOM and SHA-256 sums; a separate job publishes
 ├── .github/workflows/pr.yml     # On a PR: protected paths, dependency audit, lint, tests, portable build
 ├── .github/workflows/guide.yml  # Retired and disabled: it built the former user guide, now part of the website

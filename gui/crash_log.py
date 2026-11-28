@@ -98,9 +98,18 @@ def _capture_native_stderr(path: Path) -> None:
     Python reports its own fatal errors there, for example the memory
     allocator's "bad trailing pad byte" when a buffer was overrun. The
     packaged application is windowed, so without this the report is lost.
-    The stdio API set is the C runtime python312.dll itself writes through.
+    On Windows the stdio API set is the C runtime python312.dll itself writes
+    through; elsewhere the log is put on file descriptor 2.
     """
-    if sys.platform != 'win32' or sys.stderr is not None:
+    if sys.stderr is not None:
+        return
+    if sys.platform != 'win32':
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            os.dup2(fd, 2)
+            os.close(fd)
+        except OSError:
+            pass
         return
     try:
         import ctypes

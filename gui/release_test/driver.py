@@ -369,7 +369,13 @@ class _MemoryCounters(ctypes.Structure):
 
 
 def _memory() -> dict:
-    """This process's memory now and at its peak, in MB."""
+    """This process's memory now and at its peak, in MB.
+
+    Windows reports the private commit; Linux the resident set, now (VmRSS)
+    and at its high-water mark (VmHWM). Elsewhere nothing is read.
+    """
+    if sys.platform == 'linux':
+        return _memory_linux()
     if sys.platform != 'win32':
         return {}
     counters = _MemoryCounters()
@@ -382,6 +388,29 @@ def _memory() -> dict:
     return {
         'memory_mb': round(counters.PrivateUsage / 1e6),
         'peak_mb': round(counters.PeakPagefileUsage / 1e6),
+    }
+
+
+def _memory_linux(status: str = '/proc/self/status') -> dict:
+    """The resident set now and at its peak from the kernel's status file,
+    whose lines read ``VmRSS:\t  123456 kB``."""
+    try:
+        with open(status, encoding='ascii', errors='replace') as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return {}
+    kb = {}
+    for line in lines:
+        key, _, rest = line.partition(':')
+        if key in ('VmRSS', 'VmHWM'):
+            digits = rest.split()
+            if digits and digits[0].isdigit():
+                kb[key] = int(digits[0])
+    if 'VmRSS' not in kb or 'VmHWM' not in kb:
+        return {}
+    return {
+        'memory_mb': round(kb['VmRSS'] * 1024 / 1e6),
+        'peak_mb': round(kb['VmHWM'] * 1024 / 1e6),
     }
 
 

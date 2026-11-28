@@ -15,6 +15,10 @@ The packaged application keeps them per user::
             busloganalyzer_applog.log   the Log panel, warnings, errors
             BLA_crash.log               why the application ended
 
+On Linux the same tree sits under $XDG_DATA_HOME, by default
+~/.local/share/Osvanta/BusLogAnalyzer, and on macOS under
+~/Library/Application Support/Osvanta/BusLogAnalyzer.
+
 The logs name every measurement and database opened, and the plot layout
 names their signals. Next to the executable, anyone who could read that
 folder could read them: a shared tools folder or a network share is common.
@@ -62,12 +66,26 @@ def _executable_folder() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _os_data_root() -> Path:
+    """The folder the OS keeps per-user application data in.
+
+    %LOCALAPPDATA% on Windows, ~/Library/Application Support on macOS and
+    $XDG_DATA_HOME, by default ~/.local/share, elsewhere. Each is the user's
+    own, and writable without elevation.
+    """
+    if sys.platform == 'win32':
+        local = os.environ.get('LOCALAPPDATA')
+        return Path(local) if local else Path.home() / 'AppData' / 'Local'
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Application Support'
+    xdg = os.environ.get('XDG_DATA_HOME')
+    return Path(xdg) if xdg else Path.home() / '.local' / 'share'
+
+
 def _per_user_folder() -> Path:
     if os.environ.get(DATA_DIR_ENV_VAR):
         return Path(os.environ[DATA_DIR_ENV_VAR])
-    local = os.environ.get('LOCALAPPDATA')
-    root = Path(local) if local else Path.home() / 'AppData' / 'Local'
-    return root / _VENDOR / _PRODUCT
+    return _os_data_root() / _VENDOR / _PRODUCT
 
 
 def folder() -> Path:

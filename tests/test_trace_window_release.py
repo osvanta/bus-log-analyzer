@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gc
 import os
+import sys
 import time
 
 import numpy as np
@@ -33,9 +34,20 @@ def _frames(count: int = 2_000):
 
 
 def _paths(frames) -> list[str]:
-    paths = [frames._payload.short_path, frames._payload.long_path]
-    paths += [column.path for column in (frames._file_columns or {}).values()]
-    return paths
+    """What stands for each of the store's temp files while it is open.
+
+    On Windows the file's name, which delete-on-close removes with the last
+    handle. Elsewhere the name went when the file was opened, so its entry
+    under /proc/self/fd stands in: there while the descriptor is open.
+    """
+    files = [frames._payload.short_file, frames._payload.long_file]
+    files += [column._file for column in (frames._file_columns or {}).values()]
+    if sys.platform == 'win32':
+        return [frames._payload.short_path, frames._payload.long_path] + [
+            column.path for column in (frames._file_columns or {}).values()]
+    if not os.path.isdir('/proc/self/fd'):
+        pytest.skip('no /proc to tell an open descriptor by')
+    return [f'/proc/self/fd/{file.fileno()}' for file in files]
 
 
 def _settle(qapp) -> None:

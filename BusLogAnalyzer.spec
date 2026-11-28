@@ -10,16 +10,24 @@ from pathlib import Path
 import os
 import re
 import shutil
+import subprocess
+import sys
 
-import pefile
+if sys.platform == "win32":
+    import pefile    # comes with PyInstaller on Windows; reads what a DLL links to
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # PyInstaller executes spec files without defining __file__.
 # Resolve the project root from the current working directory, which is
-# expected to be the project root when build.bat runs pyinstaller.
+# expected to be the project root when build.bat or build.sh runs pyinstaller.
 project_root = Path(os.getcwd()).resolve()
 icon_file = project_root / "resources" / "app_icon.ico"
+
+# One spec for the Windows, Linux and macOS folders. Windows takes the
+# executable's icon from the .ico; a Linux executable carries no icon, and a
+# macOS one would need an .icns, so neither gets one here.
+_exe_icon = str(icon_file) if sys.platform == "win32" else None
 
 datas = []
 if icon_file.exists():
@@ -119,29 +127,46 @@ _EXCLUDES = [
 # Qt modules that Qt licenses under the GPL-3 (or commercially) only, never the
 # LGPL: doc.qt.io/qt-6/licensing.html, plus the Qt Charts and Qt Data
 # Visualization module pages. PySide6_Addons ships them all in one package.
-# Matched against file names; a match anywhere in the finished folder fails the
-# build (end of file). Lottie Animation's library is Qt6Bodymovin.
+# Matched against library names (see _library_name); a match anywhere in the
+# finished folder fails the build (end of file). Lottie Animation's library is
+# Qt6Bodymovin.
 _GPL_ONLY_QT = re.compile(
-    r"(?i)^(Qt6(Charts|DataVisualization|Graphs|Quick3D|QuickTimeline|VirtualKeyboard|"
-    r"Coap|HttpServer|Bodymovin|Mqtt|NetworkAuth|Grpc|QmlCompiler|WaylandCompositor|"
-    r"CanvasPainter)\w*\.dll|qtvirtualkeyboardplugin\.dll|qtvkb\w*\.dll|"
-    r"qmldbg_quick3d\w*\.dll)$"
+    r"^(qt6(charts|datavisualization|graphs|quick3d|quicktimeline|virtualkeyboard|"
+    r"coap|httpserver|bodymovin|mqtt|networkauth|grpc|qmlcompiler|waylandcompositor|"
+    r"canvaspainter)\w*|qtvirtualkeyboardplugin|qtvkb\w*|qmldbg_quick3d\w*)$"
 )
 
 # Qt libraries nothing in this application loads, dropped for size (19 MB), not
 # for licensing: all are LGPL. Quick and the four Qml libraries are there only
 # for the Virtual Keyboard plugin dropped below; Pdf only for the PDF image
 # format plugin (qpdf), and Network only for Pdf, Qml, Quick and the TUIO
-# network touch plugin. The end of this file checks that nothing left needs them.
+# network touch plugin. On Linux the VNC platform plugin (qvnc) is the one
+# other user of Network. The end of this file checks that nothing left needs them.
 _UNUSED_QT = {
-    "qt6quick.dll", "qt6qml.dll", "qt6qmlmodels.dll", "qt6qmlmeta.dll",
-    "qt6qmlworkerscript.dll", "qt6pdf.dll", "qt6network.dll",
-    "qpdf.dll", "qtuiotouchplugin.dll",
+    "qt6quick", "qt6qml", "qt6qmlmodels", "qt6qmlmeta",
+    "qt6qmlworkerscript", "qt6pdf", "qt6network",
+    "qpdf", "qtuiotouchplugin", "qvnc",
 }
 
+# What a shared library or executable is called on each OS.
+_LIBRARY_SUFFIXES = {".dll", ".pyd", ".exe", ".so", ".dylib"}
 
-def _dropped(name):
-    return bool(_GPL_ONLY_QT.match(name)) or name.lower() in _UNUSED_QT
+
+def _library_name(file_name):
+    """Qt6Quick.dll, libQt6Quick.so.6 and libQt6Quick.6.dylib are all qt6quick."""
+    stem = file_name.lower().split(".")[0]
+    if stem.startswith("lib") and len(stem) > 3:
+        stem = stem[3:]
+    return stem
+
+
+def _is_library(path):
+    return bool(_LIBRARY_SUFFIXES.intersection(s.lower() for s in path.suffixes))
+
+
+def _dropped(file_name):
+    library = _library_name(file_name)
+    return bool(_GPL_ONLY_QT.match(library)) or library in _UNUSED_QT
 
 
 a = Analysis(
@@ -186,7 +211,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    icon=str(project_root / 'resources' / 'app_icon.ico'),
+    icon=_exe_icon,
 )
 
 # The same application with Python's memory checks on (-X dev): a buffer
@@ -207,7 +232,7 @@ memcheck_exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    icon=str(project_root / 'resources' / 'app_icon.ico'),
+    icon=_exe_icon,
 )
 
 coll = COLLECT(
@@ -240,7 +265,8 @@ if _licence_dir.is_dir():
 # or any QML module: QML modules carry plugin DLLs this name check cannot
 # classify, and the application uses no QML.
 _gpl_only = sorted(p.relative_to(_install_dir).as_posix()
-                   for p in _install_dir.rglob("*") if _GPL_ONLY_QT.match(p.name))
+                   for p in _install_dir.rglob("*")
+                   if p.is_file() and _GPL_ONLY_QT.match(_library_name(p.name)))
 _qml = sorted(p.relative_to(_install_dir).as_posix()
               for p in _install_dir.rglob("qml") if p.is_dir())
 if _gpl_only or _qml:
@@ -253,24 +279,54 @@ if _gpl_only or _qml:
     )
 
 # Refuse a folder in which something still links to a library dropped above:
-# Windows would refuse to load it at run time, so the failure would otherwise
-# reach a user first. pefile comes with PyInstaller on Windows.
+# the OS would refuse to load it at run time, so the failure would otherwise
+# reach a user first. Windows binaries are read with pefile, which comes with
+# PyInstaller there; Linux ones with readelf (binutils) and macOS ones with
+# otool, where the tool is installed. Without the tool the check is skipped
+# and says so, rather than failing a build over a missing developer tool.
+
+
+def _linked_libraries(binary):
+    """The library names *binary* links to, or None if they cannot be read."""
+    if sys.platform == "win32":
+        try:
+            _pe = pefile.PE(str(binary), fast_load=True)
+        except pefile.PEFormatError:
+            return []
+        _pe.parse_data_directories(
+            directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+        needed = [entry.dll.decode() for entry in getattr(_pe, "DIRECTORY_ENTRY_IMPORT", [])]
+        _pe.close()
+        return needed
+    tool = ["otool", "-L"] if sys.platform == "darwin" else ["readelf", "-d"]
+    if shutil.which(tool[0]) is None:
+        return None
+    result = subprocess.run(tool + [str(binary)], capture_output=True, text=True,
+                            errors="replace")
+    if result.returncode != 0:
+        return []      # not a binary of this kind, for example a text file
+    if sys.platform == "darwin":
+        return [line.split()[0].rsplit("/", 1)[-1]
+                for line in result.stdout.splitlines()[1:] if line.strip()]
+    return re.findall(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", result.stdout)
+
+
 _needs_dropped = []
+_link_check_skipped = False
 for _binary in sorted(_install_dir.rglob("*")):
-    if _binary.suffix.lower() not in (".dll", ".pyd", ".exe"):
+    if not _binary.is_file() or not _is_library(_binary):
         continue
-    try:
-        _pe = pefile.PE(str(_binary), fast_load=True)
-    except pefile.PEFormatError:
-        continue
-    _pe.parse_data_directories(
-        directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
-    for _import in getattr(_pe, "DIRECTORY_ENTRY_IMPORT", []):
-        _needed = _import.dll.decode()
+    _needed_libraries = _linked_libraries(_binary)
+    if _needed_libraries is None:
+        _link_check_skipped = True
+        break
+    for _needed in _needed_libraries:
         if _dropped(_needed):
             _needs_dropped.append(
                 f"{_binary.relative_to(_install_dir).as_posix()} needs {_needed}")
-    _pe.close()
+if _link_check_skipped:
+    print("BusLogAnalyzer.spec: readelf/otool not found, so whether anything still "
+          "links to a dropped Qt library was not checked.")
 if _needs_dropped:
     raise SystemExit(
         "Build refused: something in the folder links to a library this spec drops.\n  "

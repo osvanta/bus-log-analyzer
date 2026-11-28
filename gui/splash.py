@@ -33,6 +33,8 @@ from PySide6.QtGui   import (
 )
 from PySide6.QtWidgets import QApplication, QLabel
 
+from gui.fonts import interface_font, monospace_font
+
 
 def _resource_root() -> Path:
     """
@@ -169,7 +171,7 @@ class SplashScreen(QLabel):
         s = self._scale
 
         # ── Status text inside the frosted-glass box ──────────────────────
-        font = QFont('Consolas', int(_STATUS_FONT_SIZE * s))
+        font = monospace_font(int(_STATUS_FONT_SIZE * s))
         font.setWeight(QFont.Weight.Normal)
         painter.setFont(font)
         painter.setPen(_STATUS_COLOR)
@@ -188,7 +190,7 @@ class SplashScreen(QLabel):
 
         # ── Version overlay — bottom-right corner ─────────────────────────
         if self._version:
-            ver_font = QFont('Segoe UI')
+            ver_font = interface_font()
             ver_font.setPointSizeF(_VERSION_FONT_SIZE * s)
             ver_font.setWeight(_VERSION_WEIGHT)
             painter.setFont(ver_font)

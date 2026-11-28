@@ -506,7 +506,13 @@ def test_without_a_track_no_map_is_drawn(qapp, map_path):
     other.close()
 
 
-def test_the_credit_sits_beside_north_and_the_scale_or_over_them(view, map_path, qapp):
+def test_the_credit_sits_beside_north_and_the_scale_or_over_them(view, map_path, qapp,
+                                                                  monkeypatch):
+    # A credit long enough that the narrow view below cannot hold it beside
+    # the key, whatever the desktop's font makes of the key's width.
+    from core import map_tiles
+    monkeypatch.setattr(map_tiles.MapFile, 'credit',
+                        lambda self: '© Test map makers, and the surveyors of the land')
     view.restore({'map': map_path})
     view.resize(1200, 500)
     _settle(qapp, view)

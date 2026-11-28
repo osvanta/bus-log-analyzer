@@ -112,9 +112,10 @@ class TRCHeader:
     @property
     def start_epoch(self) -> float | None:
         """The start as epoch seconds, read as local time like a BLF's. None
-        for a start before 1970 on this PC's clock, which Windows cannot
-        convert: python-can's writer stamps a log of relative times there."""
-        if self.start is None:
+        for a start before 1970: Windows cannot convert one, and python-can's
+        writer stamps a log of relative times there, so the frames keep the
+        file's own zero -- on every OS, so that the file reads alike."""
+        if self.start is None or self.start.year < 1970:
             return None
         try:
             return self.start.timestamp()

@@ -1,6 +1,6 @@
 # Osvanta Bus Log Analyzer
 
-> A portable Windows application for loading automotive measurements, decoding CAN and LIN signals, inspecting raw frames, and plotting signal data interactively.
+> A portable desktop application for loading automotive measurements, decoding CAN and LIN signals, inspecting raw frames, and plotting signal data interactively.
 
 > **Help:** [osvanta.com/bus-log-analyzer](https://osvanta.com/bus-log-analyzer/),
 > or **Help ▸ Getting started** (`F1`) in the application.
@@ -11,7 +11,7 @@
 > in August 2026.
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)
-![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?logo=windows)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
 ![License](https://img.shields.io/badge/License-MPL--2.0-green)
 ![Release](https://img.shields.io/github/v/release/osvanta/bus-log-analyzer)
 
@@ -93,6 +93,8 @@ Download the latest Windows ZIP from [Releases](https://github.com/osvanta/bus-l
 
 ### From source
 
+On Windows:
+
 ```powershell
 git clone https://github.com/osvanta/bus-log-analyzer.git
 cd bus-log-analyzer
@@ -101,6 +103,19 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 python app.py
 ```
+
+On Linux (`run_dev.sh` starts it afterwards):
+
+```sh
+git clone https://github.com/osvanta/bus-log-analyzer.git
+cd bus-log-analyzer
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+python app.py
+```
+
+Qt needs the desktop's usual libraries; on Ubuntu or Debian that is `libegl1 libgl1 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 libxcb-cursor0`. Settings and logs go to `~/.local/share/Osvanta/BusLogAnalyzer/` when the application is built, and stay next to `app.py` when it runs from source.
 
 The portable build and CI release build use Python 3.12.
 
@@ -151,7 +166,7 @@ python -m pip install -r requirements.txt -r requirements-dev.txt
 python -m pytest
 ```
 
-Build the portable application with:
+Build the portable application with `.\build_portable.bat` on Windows or `./build.sh` on Linux:
 
 ```powershell
 .\build_portable.bat

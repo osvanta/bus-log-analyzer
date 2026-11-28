@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from core.bus_types import BusType, all_channels_key, encode_key
 from core.channel_config import ChannelConfig
@@ -128,10 +128,13 @@ def _databases_for(folder: Path, files: list[Path]) -> tuple[dict[str, str], str
         channels = {}
         for key, saved in config.channels.items():
             path = Path(saved)
-            if not path.exists() and (folder / path.name).exists():
-                path = folder / path.name
+            # Saved on Windows and read on Linux, or the other way round: the
+            # name is what follows the last separator of either kind.
+            name = PureWindowsPath(saved).name
+            if not path.exists() and (folder / name).exists():
+                path = folder / name
             if not path.exists():
-                return {}, f'database named in the channel configuration is missing: {path.name}'
+                return {}, f'database named in the channel configuration is missing: {name}'
             channels[encode_key(key)] = str(path)
         return channels, ''
     if len(databases) > 1:

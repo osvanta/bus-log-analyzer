@@ -100,7 +100,7 @@ def test_classic_frames_take_eight_bytes_and_fd_only_its_words():
     store.append_raw_batch(*_columns(count, lengths), rows.tobytes())
     store.seal()
     payload = store._payload
-    assert os.path.getsize(payload.short_path) == count * 8
+    assert os.fstat(payload.short_file.fileno()).st_size == count * 8
     long = rows[:, 8:].any(axis=1)
     words = 8 - np.argmax((rows.view('<u8') != 0)[:, ::-1], axis=1)
     assert payload.long_count == int(long.sum())
