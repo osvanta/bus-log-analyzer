@@ -27,6 +27,7 @@ def packaged(monkeypatch, tmp_path):
     local = tmp_path / 'profile' / 'AppData' / 'Local'
     monkeypatch.setattr(sys, 'frozen', True, raising=False)
     monkeypatch.setattr(sys, 'executable', str(install / 'BusLogAnalyzer.exe'))
+    monkeypatch.setattr(sys, 'platform', 'win32')
     monkeypatch.setenv('LOCALAPPDATA', str(local))
     for name in (app_data.DATA_DIR_ENV_VAR, 'OSVANTA_APP_LOG', 'OSVANTA_CRASH_LOG'):
         monkeypatch.delenv(name, raising=False)
@@ -124,3 +125,34 @@ def test_from_source_everything_stays_next_to_app_py(monkeypatch):
     assert app_data.folder() == root
     assert app_log.default_log_path() == root / app_log.LOG_NAME
     assert crash_log.default_log_path() == root / crash_log.LOG_NAME
+
+
+@pytest.fixture()
+def packaged_elsewhere(monkeypatch, tmp_path):
+    """A packaged application on Linux or macOS, with a home folder of its own."""
+    home = tmp_path / 'home'
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'opt' / 'BusLogAnalyzer'))
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: home))
+    for name in (app_data.DATA_DIR_ENV_VAR, 'LOCALAPPDATA', 'XDG_DATA_HOME'):
+        monkeypatch.delenv(name, raising=False)
+    return home
+
+
+def test_on_linux_the_folder_is_under_the_xdg_data_home(packaged_elsewhere, monkeypatch):
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    # LOCALAPPDATA may be set by a developer's environment and means nothing here.
+    monkeypatch.setenv('LOCALAPPDATA', str(packaged_elsewhere / 'wrong'))
+
+    assert app_data.folder() == packaged_elsewhere / '.local' / 'share' / 'Osvanta' / 'BusLogAnalyzer'
+    assert (packaged_elsewhere / '.local' / 'share' / 'Osvanta' / 'BusLogAnalyzer' / 'logs').is_dir()
+
+    monkeypatch.setenv('XDG_DATA_HOME', str(packaged_elsewhere / 'data'))
+    assert app_data.folder() == packaged_elsewhere / 'data' / 'Osvanta' / 'BusLogAnalyzer'
+
+
+def test_on_macos_the_folder_is_under_application_support(packaged_elsewhere, monkeypatch):
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+
+    assert app_data.folder() == (packaged_elsewhere / 'Library' / 'Application Support'
+                                 / 'Osvanta' / 'BusLogAnalyzer')

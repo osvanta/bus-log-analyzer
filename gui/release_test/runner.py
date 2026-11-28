@@ -16,7 +16,6 @@ which runs with Python's memory checks on; from source it starts Python with
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import os
 import platform
@@ -27,19 +26,22 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
+from core.signal_store import physical_memory
 from gui import crash_log
+from gui.fonts import monospace_font
 from gui.release_test import SCENARIO_FLAG, responsiveness, timing
 from gui.release_test.driver import LOAD_TIMEOUT
 from gui.release_test.plan import build_scenarios, find_measurements, select
 from gui.release_test.report import Run, anonymise, crash_log_session, files_list, judge, render
 
-APP_EXE = 'BusLogAnalyzer.exe'
-MEMCHECK_EXE = 'appdebugger.exe'          # named in BusLogAnalyzer.spec
+_EXE = '.exe' if sys.platform == 'win32' else ''
+APP_EXE = 'BusLogAnalyzer' + _EXE
+MEMCHECK_EXE = 'appdebugger' + _EXE       # named in BusLogAnalyzer.spec
 REPORTS_FOLDER = 'release_test_reports'   # in the test folder, beside the measurements
 START_SECONDS = 120.0       # per run, on top of LOAD_TIMEOUT per load
 MEMCHECK_SLOWDOWN = 3
@@ -181,19 +183,8 @@ def _find_session(pid: int) -> str | None:
 
 
 def _total_memory_gb() -> float:
-    class Status(ctypes.Structure):
-        _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
-                    ('ullTotalPhys', ctypes.c_ulonglong), ('ullAvailPhys', ctypes.c_ulonglong),
-                    ('ullTotalPageFile', ctypes.c_ulonglong), ('ullAvailPageFile', ctypes.c_ulonglong),
-                    ('ullTotalVirtual', ctypes.c_ulonglong), ('ullAvailVirtual', ctypes.c_ulonglong),
-                    ('ullAvailExtendedVirtual', ctypes.c_ulonglong)]
-    status = Status()
-    status.dwLength = ctypes.sizeof(status)
-    try:
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-    except AttributeError:
-        return 0.0
-    return status.ullTotalPhys / 1e9
+    total, _available = physical_memory()
+    return total / 1e9
 
 
 class RunnerWindow(QWidget):
@@ -203,7 +194,7 @@ class RunnerWindow(QWidget):
         self.resize(820, 520)
         self.status = QLabel()
         self.log = QPlainTextEdit(readOnly=True)
-        self.log.setFont(QFont('Consolas'))
+        self.log.setFont(monospace_font())
         self.stop_button = QPushButton('Stop')
         self.report_button = QPushButton('Open report')
         self.report_button.setEnabled(False)

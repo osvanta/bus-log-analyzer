@@ -159,7 +159,7 @@ def test_the_report_names_no_measurement_or_database(tmp_path):
                               {'CAN:0': str(folder / 'Powertrain_X7.dbc')})
     session = crash_log_session(_LOG, 41).replace(
         'Session ended normally.',
-        f'Uncaught exception: OSError: cannot read {folder}\\prototype_x7_drive.mf4\n'
+        f'Uncaught exception: OSError: cannot read {folder}{os.sep}prototype_x7_drive.mf4\n'
         '10:00:06 Session ended normally.')
     run = Run(build_scenarios([measurement], False)[0], 1, exit_code=0,
               result={'finished': True, 'steps': []}, session=session)
@@ -173,9 +173,9 @@ def test_the_report_names_no_measurement_or_database(tmp_path):
 
 
 def test_the_built_app_finds_appdebugger_beside_it_and_back(tmp_path, monkeypatch):
-    from gui.release_test.runner import launcher
-    app = _touch(tmp_path / 'BusLogAnalyzer.exe')
-    debugger = _touch(tmp_path / 'appdebugger.exe')
+    from gui.release_test.runner import APP_EXE, MEMCHECK_EXE, launcher
+    app = _touch(tmp_path / APP_EXE)
+    debugger = _touch(tmp_path / MEMCHECK_EXE)
     monkeypatch.setattr(sys, 'frozen', True, raising=False)
 
     for running in (app, debugger):
@@ -185,6 +185,20 @@ def test_the_built_app_finds_appdebugger_beside_it_and_back(tmp_path, monkeypatc
 
     debugger.unlink()
     assert launcher(True) is None               # reported as missing, not run
+
+
+def test_on_linux_the_memory_figures_come_from_the_kernels_status_file(tmp_path):
+    from gui.release_test.driver import _memory_linux
+    status = tmp_path / 'status'
+    status.write_text('Name:\tBusLogAnalyzer\nVmPeak:\t 999999 kB\nVmRSS:\t  204800 kB\n'
+                      'VmHWM:\t  409600 kB\nThreads:\t12\n', encoding='ascii')
+
+    assert _memory_linux(str(status)) == {'memory_mb': 210, 'peak_mb': 419}
+    # A kernel that leaves a line out, or no status file at all: no figures,
+    # and the step is recorded without them, as on macOS.
+    status.write_text('VmRSS:\t  204800 kB\n', encoding='ascii')
+    assert _memory_linux(str(status)) == {}
+    assert _memory_linux(str(tmp_path / 'missing')) == {}
 
 
 def test_the_release_test_drives_the_application(tmp_path, blf_path, sample_dbc_path):

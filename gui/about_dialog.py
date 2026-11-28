@@ -27,7 +27,6 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -43,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui import help_menu
+from gui.fonts import monospace_font
 
 _NOTICES_FILE = 'THIRD_PARTY_NOTICES.md'
 _LICENCE_DIR = 'licenses'
@@ -186,7 +186,7 @@ class AboutDialog(QDialog):
         self._viewer = QPlainTextEdit(self)
         self._viewer.setReadOnly(True)
         self._viewer.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self._viewer.setFont(QFont('Consolas', 9))
+        self._viewer.setFont(monospace_font(9))
 
         self._list = QListWidget(self)
         self._list.currentItemChanged.connect(self._on_selection_changed)

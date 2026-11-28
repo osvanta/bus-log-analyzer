@@ -312,8 +312,12 @@ def test_the_temp_file_goes_when_the_process_ends_without_close():
     try:
         pid, path = process.stdout.readline().split(' ', 1)
         path = path.strip()
-        # 8 bytes a frame: classic CAN payload kept whole in the main file.
-        assert os.path.getsize(path) == 20_000 * 8
+        if sys.platform == 'win32':
+            # 8 bytes a frame: classic CAN payload kept whole in the main file.
+            assert os.path.getsize(path) == 20_000 * 8
+        else:
+            # The name went when the file was opened: nothing to leave behind.
+            assert not os.path.exists(path)
         # By its own pid: a virtual environment's python.exe is a launcher
         # that runs the interpreter as a child, which outlives the launcher.
         os.kill(int(pid), signal.SIGTERM)    # TerminateProcess on Windows
@@ -363,9 +367,10 @@ def test_leftover_files_are_removed_and_a_running_copy_keeps_its_own(tmp_path, m
 
     removed, freed = remove_leftover_files(tmp_path)
 
-    # The two leftovers, and the running copy's two payload files: their
-    # names go, the files stay usable (see the rows below).
-    assert (removed, freed) == (4, 64 * 100)
+    # The two leftovers, and on Windows the running copy's two payload files:
+    # their names go, the files stay usable (see the rows below). Elsewhere
+    # those two had no names since they were opened.
+    assert (removed, freed) == (4 if sys.platform == 'win32' else 2, 64 * 100)
     assert sorted(tmp_path.iterdir()) == sorted(kept)
     running.append(0.3, 1, 0x103, 8, 'Rx', False, False, bytes([3] * 8), 'Msg3', True)
     running.seal()

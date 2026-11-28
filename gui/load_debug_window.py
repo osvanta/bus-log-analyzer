@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from gui.fonts import monospace_font
 
 
 class LoadDebugWorker(QObject):
@@ -106,9 +108,7 @@ class LoadDebugWindow(QMainWindow):
         self.report = QPlainTextEdit()
         self.report.setReadOnly(True)
         self.report.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        font = QFont("Consolas")
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setPointSize(9)
+        font = monospace_font(9)
         self.report.setFont(font)
         self.report.setPlainText(
             "OSVANTA BUS LOG ANALYZER LOAD DEBUG\n"
